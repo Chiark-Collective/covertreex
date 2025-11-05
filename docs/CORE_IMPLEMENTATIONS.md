@@ -24,7 +24,7 @@ UV_CACHE_DIR=$PWD/.uv-cache \
 uv run python -m benchmarks.queries \
   --dimension 8 --tree-points 2048 \
   --batch-size 128 --queries 512 --k 8 \
-  --seed 42 --baseline all
+  --seed 42 --baseline gpboost
 ```
 
 _Set `COVERTREEX_ENABLE_DIAGNOSTICS=1` to collect the instrumentation counters (adds ~7 ms to the build in this configuration)._
@@ -47,7 +47,7 @@ UV_CACHE_DIR=$PWD/.uv-cache \
 uv run python -m benchmarks.queries \
   --dimension 8 --tree-points 8192 \
   --batch-size 256 --queries 1024 --k 16 \
-  --seed 12345 --baseline all
+  --seed 12345 --baseline gpboost
 
 # GPBoost-only 32k run
 COVERTREEX_BACKEND=numpy \
@@ -67,7 +67,7 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 - Dominated batches still pay ~14–20 ms in `traversal_ms` (dense mask construction + chain expansion), making traversal the clear build-time bottleneck despite Numba scope helpers.
 - The Numba conflict-graph path (segment dedupe + directed pair expansion) now lands at 3–4 ms per dominated batch, with `conflict_scope_group_ms < 0.01 ms` and `conflict_adj_scatter_ms ≈ 1.0–1.3 ms`. No GPU kernels are invoked in the NumPy backend configuration.
 - MIS is effectively free (`mis_ms ≤ 0.2 ms`). Remaining variation comes from first-call warm-up; post-compilation runs stay under 0.1 ms.
-- Running strictly on the CPU (NumPy backend, diagnostics optional) keeps comparisons against the sequential and GPBoost baselines reproducible and highlights traversal as the dominant optimisation target.
+- Running strictly on the CPU (NumPy backend, diagnostics optional) keeps comparisons against the GPBoost baseline reproducible while avoiding the slower sequential/external references that we now skip by default.
 
 ### Persistence journal (NumPy backend)
 

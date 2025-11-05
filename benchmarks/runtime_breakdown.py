@@ -514,7 +514,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-external",
         action="store_true",
-        help="Skip the external cover tree baseline if installed.",
+        default=True,
+        help="Skip the external cover tree baseline if installed (default: skipped).",
+    )
+    parser.add_argument(
+        "--include-external",
+        action="store_false",
+        dest="skip_external",
+        help="Include the external cover tree baseline.",
     )
     parser.add_argument(
         "--skip-gpboost",
@@ -524,7 +531,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-sequential",
         action="store_true",
-        help="Skip the sequential cover tree baseline.",
+        default=True,
+        help="Skip the sequential cover tree baseline (default: skipped).",
+    )
+    parser.add_argument(
+        "--include-sequential",
+        action="store_false",
+        dest="skip_sequential",
+        help="Include the sequential cover tree baseline.",
     )
     parser.add_argument(
         "--csv-output",
