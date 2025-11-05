@@ -3,6 +3,7 @@ import pytest
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
+from covertreex import config as cx_config
 from covertreex.algo.traverse import TraversalResult, traverse_collect_scopes
 from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
 
@@ -125,3 +126,28 @@ def test_traversal_semisorts_scopes_by_level():
     assert indptr == [0, 3]
     assert indices == [1, 2, 0]
     assert result.timings.pairwise_seconds >= 0.0
+
+
+def test_sparse_traversal_matches_dense(monkeypatch: pytest.MonkeyPatch):
+    tree = _sample_tree()
+    batch_points = [[2.0, 2.0], [3.0, 3.0]]
+
+    monkeypatch.delenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", raising=False)
+    monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
+    cx_config.reset_runtime_config_cache()
+    dense_result = traverse_collect_scopes(tree, batch_points)
+
+    monkeypatch.setenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", "1")
+    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
+    cx_config.reset_runtime_config_cache()
+    sparse_result = traverse_collect_scopes(tree, batch_points)
+
+    assert sparse_result.parents.tolist() == dense_result.parents.tolist()
+    assert sparse_result.levels.tolist() == dense_result.levels.tolist()
+    assert sparse_result.conflict_scopes == dense_result.conflict_scopes
+    assert sparse_result.scope_indptr.tolist() == dense_result.scope_indptr.tolist()
+    assert sparse_result.scope_indices.tolist() == dense_result.scope_indices.tolist()
+
+    monkeypatch.delenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", raising=False)
+    monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
+    cx_config.reset_runtime_config_cache()

@@ -126,6 +126,7 @@ class RuntimeConfig:
     precision: str
     devices: Tuple[str, ...]
     enable_numba: bool
+    enable_sparse_traversal: bool
     enable_diagnostics: bool
     log_level: str
     mis_seed: int | None
@@ -151,6 +152,9 @@ class RuntimeConfig:
         requested_devices = _parse_devices(os.getenv("COVERTREEX_DEVICE"))
         devices = _resolve_jax_devices(requested_devices) if backend == "jax" else ()
         enable_numba = _bool_from_env(os.getenv("COVERTREEX_ENABLE_NUMBA"), default=False)
+        enable_sparse_traversal = _bool_from_env(
+            os.getenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL"), default=False
+        )
         enable_diagnostics = _bool_from_env(
             os.getenv("COVERTREEX_ENABLE_DIAGNOSTICS"), default=True
         )
@@ -177,6 +181,7 @@ class RuntimeConfig:
             precision=precision,
             devices=devices,
             enable_numba=enable_numba,
+            enable_sparse_traversal=enable_sparse_traversal,
             enable_diagnostics=enable_diagnostics,
             log_level=log_level,
             mis_seed=mis_seed,
@@ -238,6 +243,7 @@ def describe_runtime() -> Dict[str, Any]:
         "devices": config.devices,
         "primary_platform": config.primary_platform,
         "enable_numba": config.enable_numba,
+        "enable_sparse_traversal": config.enable_sparse_traversal,
         "enable_diagnostics": config.enable_diagnostics,
         "log_level": config.log_level,
         "mis_seed": config.mis_seed,

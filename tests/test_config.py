@@ -11,6 +11,7 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "COVERTREEX_PRECISION",
         "COVERTREEX_DEVICE",
         "COVERTREEX_ENABLE_NUMBA",
+        "COVERTREEX_ENABLE_SPARSE_TRAVERSAL",
         "COVERTREEX_ENABLE_DIAGNOSTICS",
         "COVERTREEX_LOG_LEVEL",
         "COVERTREEX_MIS_SEED",
@@ -35,6 +36,7 @@ def test_runtime_config_defaults(monkeypatch: pytest.MonkeyPatch):
     assert runtime.jax_enable_x64 is True
     assert runtime.devices == ()
     assert runtime.primary_platform is None
+    assert runtime.enable_sparse_traversal is False
     assert runtime.scope_chunk_target == 65_536
     assert runtime.metric == "euclidean"
 
@@ -111,6 +113,7 @@ def test_describe_runtime_reports_expected_fields(monkeypatch: pytest.MonkeyPatc
     assert summary["backend"] == "numpy"
     assert summary["precision"] == "float64"
     assert summary["log_level"] == "INFO"
+    assert summary["enable_sparse_traversal"] is False
     assert summary["enable_diagnostics"] is True
     assert summary["jax_enable_x64"] is True
     assert "primary_platform" in summary
@@ -163,3 +166,12 @@ def test_metric_override(monkeypatch: pytest.MonkeyPatch):
 
     runtime = cx_config.runtime_config()
     assert runtime.metric == "residual_correlation"
+
+
+def test_sparse_traversal_toggle(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", "1")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.enable_sparse_traversal is True

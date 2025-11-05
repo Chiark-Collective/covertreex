@@ -11,6 +11,14 @@ from covertreex.core.metrics import get_metric
 from covertreex.core.tree import PCCTree, TreeBackend
 from covertreex.logging import get_logger
 from ._traverse_numba import NUMBA_TRAVERSAL_AVAILABLE, build_scopes_numba
+from ._traverse_sparse_numba import (
+    NUMBA_SPARSE_TRAVERSAL_AVAILABLE,
+    collect_sparse_scopes,
+)
+from covertreex.queries._knn_numba import (
+    knn_numba,
+    materialise_tree_view_cached,
+)
 
 LOGGER = get_logger("algo.traverse")
 
@@ -109,6 +117,90 @@ def _collect_next_chain(
     return tuple(chain)
 
 
+def _traverse_collect_sparse(
+    tree: PCCTree,
+    batch_points: Any,
+    *,
+    backend: TreeBackend,
+) -> TraversalResult:
+    queries_np = np.asarray(backend.to_numpy(batch_points), dtype=np.float64)
+    if queries_np.ndim == 1:
+        queries_np = queries_np[None, :]
+
+    batch_size = int(queries_np.shape[0])
+    if batch_size == 0:
+        return _empty_result(backend, 0)
+
+    view = materialise_tree_view_cached(tree)
+
+    parent_start = time.perf_counter()
+    indices, _distances = knn_numba(view, queries_np, k=1, return_distances=True)
+    pairwise_seconds = time.perf_counter() - parent_start
+
+    parents_np = np.asarray(indices, dtype=np.int64).reshape(batch_size)
+    top_levels_np = view.top_levels
+    levels_np = np.full(batch_size, -1, dtype=np.int64)
+    valid_mask = parents_np >= 0
+    if np.any(valid_mask):
+        levels_np[valid_mask] = top_levels_np[parents_np[valid_mask]]
+
+    base_radii = np.zeros(batch_size, dtype=np.float64)
+    base_radii[valid_mask] = np.power(2.0, levels_np[valid_mask].astype(np.float64) + 1.0)
+
+    si_values = np.zeros(batch_size, dtype=np.float64)
+    if view.si_cache.size:
+        within_si = np.logical_and(valid_mask, parents_np < view.si_cache.shape[0])
+        si_values[within_si] = view.si_cache[parents_np[within_si]]
+
+    radii_np = np.maximum(base_radii, si_values)
+
+    scope_start = time.perf_counter()
+    scopes = collect_sparse_scopes(view, queries_np, parents_np, radii_np)
+    scope_seconds = time.perf_counter() - scope_start
+
+    scope_lengths = [scope.shape[0] for scope in scopes]
+    scope_indptr_np = np.empty(batch_size + 1, dtype=np.int64)
+    scope_indptr_np[0] = 0
+    for idx in range(batch_size):
+        scope_indptr_np[idx + 1] = scope_indptr_np[idx] + scope_lengths[idx]
+    total_scope = int(scope_indptr_np[-1])
+    scope_indices_np = np.empty(total_scope, dtype=np.int64)
+    cursor = 0
+    conflict_scopes = []
+    for scope in scopes:
+        count = scope.shape[0]
+        if count:
+            scope_indices_np[cursor : cursor + count] = scope
+            conflict_scopes.append(tuple(int(x) for x in scope.tolist()))
+        else:
+            conflict_scopes.append(())
+        cursor += count
+
+    conflict_scopes_tuple = tuple(conflict_scopes)
+
+    parents_arr = backend.asarray(parents_np.astype(np.int64), dtype=backend.default_int)
+    levels_arr = backend.asarray(levels_np.astype(np.int64), dtype=backend.default_int)
+    scope_indptr_arr = backend.asarray(scope_indptr_np.astype(np.int64), dtype=backend.default_int)
+    scope_indices_arr = backend.asarray(scope_indices_np.astype(np.int64), dtype=backend.default_int)
+
+    return TraversalResult(
+        parents=backend.device_put(parents_arr),
+        levels=backend.device_put(levels_arr),
+        conflict_scopes=conflict_scopes_tuple,
+        scope_indptr=backend.device_put(scope_indptr_arr),
+        scope_indices=backend.device_put(scope_indices_arr),
+        timings=TraversalTimings(
+            pairwise_seconds=pairwise_seconds,
+            mask_seconds=0.0,
+            semisort_seconds=scope_seconds,
+            chain_seconds=0.0,
+            nonzero_seconds=0.0,
+            sort_seconds=0.0,
+            assemble_seconds=0.0,
+        ),
+    )
+
+
 def traverse_collect_scopes(
     tree: PCCTree,
     batch_points: Any,
@@ -126,6 +218,17 @@ def traverse_collect_scopes(
 
     if tree.is_empty():
         return _empty_result(backend, batch_size)
+
+    runtime = cx_config.runtime_config()
+
+    if (
+        runtime.enable_sparse_traversal
+        and runtime.enable_numba
+        and runtime.metric == "euclidean"
+        and NUMBA_SPARSE_TRAVERSAL_AVAILABLE
+        and backend.name == "numpy"
+    ):
+        return _traverse_collect_sparse(tree, batch, backend=backend)
 
     xp = backend.xp
     start = time.perf_counter()
@@ -155,7 +258,6 @@ def traverse_collect_scopes(
         mask_np = np.reshape(mask_np, (batch_size, tree.num_points))
     next_cache_np = np.asarray(tree.next_cache, dtype=np.int64)
 
-    runtime = cx_config.runtime_config()
     use_numba = runtime.enable_numba and NUMBA_TRAVERSAL_AVAILABLE
 
     if use_numba:

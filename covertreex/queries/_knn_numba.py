@@ -25,6 +25,7 @@ class NumbaTreeView:
 
     points: np.ndarray
     si_cache: np.ndarray
+    top_levels: np.ndarray
     children: np.ndarray
     next_cache: np.ndarray
     children_offsets: np.ndarray
@@ -317,6 +318,7 @@ def materialise_tree_view(tree: PCCTree) -> NumbaTreeView:
     backend = tree.backend
     points = _to_numpy(tree.points, backend, dtype=np.float64)
     si_cache = _to_numpy(tree.si_cache, backend, dtype=np.float64)
+    top_levels = _to_numpy(tree.top_levels, backend, dtype=np.int64)
     children = _to_numpy(tree.children, backend, dtype=np.int64)
     next_cache = _to_numpy(tree.next_cache, backend, dtype=np.int64)
     parents = _to_numpy(tree.parents, backend, dtype=np.int64)
@@ -356,6 +358,7 @@ def materialise_tree_view(tree: PCCTree) -> NumbaTreeView:
     return NumbaTreeView(
         points=points,
         si_cache=si_cache,
+        top_levels=top_levels,
         children=children,
         next_cache=next_cache,
         root_indices=root_indices,
