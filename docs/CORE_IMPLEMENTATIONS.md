@@ -8,24 +8,26 @@ _This file is a to-be-maintained reference. Keep the benchmark table and the cod
 
 ### Quick Benchmark — 2 048 tree pts / 512 queries / k=8
 
-| Implementation              | Build Time (s) | Query Time (s) | Throughput (q/s) | Notes |
-|-----------------------------|----------------|----------------|------------------|-------|
-| PCCT (Numba, diagnostics on)| 0.382          | 0.098          | 5 216            | `COVERTREEX_ENABLE_DIAGNOSTICS=1` |
-| Sequential baseline         | 2.25           | 0.024          | 21 001           | In-repo compressed cover tree |
-| GPBoost Numba baseline      | 0.292          | 0.519          | 987              | Numba port of the GPBoost cover tree |
-| External CoverTree baseline | 1.00           | 1.215          | 421              | `pip install -e '.[baseline]'` |
+| Implementation               | Build Time (s) | Query Time (s) | Throughput (q/s) | Notes |
+|------------------------------|----------------|----------------|------------------|-------|
+| PCCT (Numba, diagnostics off)| 0.366          | 0.097          | 5 261            | `COVERTREEX_ENABLE_DIAGNOSTICS=0`; diagnostics-on run: 0.373 s / 0.098 s |
+| Sequential baseline          | 2.25           | 0.024          | 21 001           | In-repo compressed cover tree |
+| GPBoost Numba baseline       | 0.292          | 0.519          | 987              | Numba port of the GPBoost cover tree |
+| External CoverTree baseline  | 1.00           | 1.215          | 421              | `pip install -e '.[baseline]'` |
 
 _Command:_
 ```
 COVERTREEX_BACKEND=numpy \
 COVERTREEX_ENABLE_NUMBA=1 \
-COVERTREEX_ENABLE_DIAGNOSTICS=1 \
+COVERTREEX_ENABLE_DIAGNOSTICS=0 \
 UV_CACHE_DIR=$PWD/.uv-cache \
 uv run python -m benchmarks.queries \
   --dimension 8 --tree-points 2048 \
   --batch-size 128 --queries 512 --k 8 \
   --seed 42 --baseline all
 ```
+
+_Set `COVERTREEX_ENABLE_DIAGNOSTICS=1` to collect the instrumentation counters (adds ~7 ms to the build in this configuration)._
 
 ### Scaling Snapshot — CPU builds (diagnostics on)
 
@@ -62,60 +64,39 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 
 ## Current Observations & Hypotheses
 
-- Chunked Numba scope grouping (controlled by `COVERTREEX_SCOPE_CHUNK_TARGET`, default 65 536 memberships) keeps `conflict_scope_group_ms ≈ 0.12–0.15` ms even for dominated batches; the former 150–250 ms hotspot is effectively gone.
-- After folding the radius check into the Numba builder the adjacency path no longer touches GPU kernels—`conflict_adj_sort_ms=0` and `conflict_adj_csr_ms ≈ 12–14` ms on dominated batches regardless of tree size.
-- MIS remains a rounding error (≲0.3 ms per batch) but the timing hook still reports inflated values; instrumentation cleanup is on the near-term list.
-- The CPU-only configuration eliminates variability from accidental GPU usage and makes apples-to-apples comparisons against the sequential and GPBoost baselines straightforward.
+- Dominated batches still pay ~14–20 ms in `traversal_ms` (dense mask construction + chain expansion), making traversal the clear build-time bottleneck despite Numba scope helpers.
+- The Numba conflict-graph path (segment dedupe + directed pair expansion) now lands at 3–4 ms per dominated batch, with `conflict_scope_group_ms < 0.01 ms` and `conflict_adj_scatter_ms ≈ 1.0–1.3 ms`. No GPU kernels are invoked in the NumPy backend configuration.
+- MIS is effectively free (`mis_ms ≤ 0.2 ms`). Remaining variation comes from first-call warm-up; post-compilation runs stay under 0.1 ms.
+- Running strictly on the CPU (NumPy backend, diagnostics optional) keeps comparisons against the sequential and GPBoost baselines reproducible and highlights traversal as the dominant optimisation target.
 
 ## Parallel Compressed Cover Tree — Conflict Graph Builder (dense + segmented)
 
 ```python
 # covertreex/algo/_scope_numba.py (excerpt)
-def _chunk_ranges_from_indptr(indptr: np.ndarray, chunk_target: int) -> list[tuple[int, int]]:
-    num_nodes = indptr.size - 1
-    if num_nodes <= 0:
-        return [(0, 0)]
-    if chunk_target <= 0:
-        return [(0, num_nodes)]
-
-    ranges: list[tuple[int, int]] = []
-    start = 0
-    accum = 0
-    for node in range(num_nodes):
-        accum += int(indptr[node + 1] - indptr[node])
-        if accum >= chunk_target:
-            ranges.append((start, node + 1))
-            start = node + 1
-            accum = 0
-    if start < num_nodes:
-        ranges.append((start, num_nodes))
-    if not ranges:
-        ranges.append((0, num_nodes))
-    return ranges
-
-
-@nb.njit(cache=True)
-def _expand_pairs_directed_into(
+@nb.njit(cache=True, parallel=True)
+def _expand_pairs_directed(
     values: np.ndarray,
     indptr: np.ndarray,
-    keep: np.ndarray,
-    start: int,
-    end: int,
-    out_src: np.ndarray,
-    out_dst: np.ndarray,
-    offset: int,
+    kept_nodes: np.ndarray,
+    offsets: np.ndarray,
     pairwise: np.ndarray,
     radii: np.ndarray,
-) -> int:
-    cursor = offset
-    for node in range(start, end):
-        if not keep[node]:
-            continue
+):
+    k = kept_nodes.size
+    capacity = offsets[-1]
+    sources = np.empty(capacity, dtype=I32)
+    targets = np.empty(capacity, dtype=I32)
+    used = np.zeros(k, dtype=I64)
+
+    for idx in nb.prange(k):
+        node = int(kept_nodes[idx])
         s = indptr[node]
         e = indptr[node + 1]
         c = e - s
         if c <= 1:
             continue
+        base = offsets[idx]
+        write = 0
         for a in range(c - 1):
             pa = values[s + a]
             ra = radii[pa]
@@ -124,13 +105,67 @@ def _expand_pairs_directed_into(
                 rb = radii[pb]
                 bound = ra if ra < rb else rb
                 if pairwise[pa, pb] <= bound:
-                    out_src[cursor] = pa
-                    out_dst[cursor] = pb
-                    cursor += 1
-                    out_src[cursor] = pb
-                    out_dst[cursor] = pa
-                    cursor += 1
-    return cursor
+                    sources[base + write] = pa
+                    targets[base + write] = pb
+                    write += 1
+                    sources[base + write] = pb
+                    targets[base + write] = pa
+                    write += 1
+        used[idx] = write
+
+    return sources, targets, used
+
+
+@nb.njit(cache=True)
+def _pairs_to_csr(
+    sources: np.ndarray,
+    targets: np.ndarray,
+    offsets: np.ndarray,
+    used: np.ndarray,
+    batch_size: int,
+):
+    total_used = I64(0)
+    for node in range(used.size):
+        total_used += used[node]
+
+    total_used_int = int(total_used)
+    if total_used_int == 0:
+        indptr = np.zeros(batch_size + 1, dtype=I64)
+        indices = np.empty(0, dtype=I32)
+        return indptr, indices, total_used_int
+
+    trimmed_src = np.empty(total_used_int, dtype=I32)
+    trimmed_dst = np.empty(total_used_int, dtype=I32)
+    counts = np.zeros(batch_size, dtype=I64)
+    cursor = I64(0)
+    for node in range(used.size):
+        count = used[node]
+        if count == 0:
+            continue
+        start_in = offsets[node]
+        for j in range(count):
+            src = int(sources[start_in + j])
+            tgt = targets[start_in + j]
+            trimmed_src[cursor] = src
+            trimmed_dst[cursor] = tgt
+            counts[src] += 1
+            cursor += 1
+    indptr = np.empty(batch_size + 1, dtype=I64)
+    acc = I64(0)
+    indptr[0] = 0
+    for i in range(batch_size):
+        acc += counts[i]
+        indptr[i + 1] = acc
+
+    indices = np.empty(total_used_int, dtype=I32)
+    heads = indptr[:-1].copy()
+    for i in range(total_used_int):
+        src = int(trimmed_src[i])
+        pos = heads[src]
+        indices[pos] = trimmed_dst[i]
+        heads[src] = pos + 1
+
+    return indptr, indices, total_used_int
 
 
 def build_conflict_graph_numba_dense(
@@ -147,6 +182,8 @@ def build_conflict_graph_numba_dense(
         return ScopeAdjacencyResult(
             sources=np.empty(0, dtype=I32),
             targets=np.empty(0, dtype=I32),
+            csr_indptr=np.zeros(batch_size + 1, dtype=I64),
+            csr_indices=np.empty(0, dtype=I32),
             max_group_size=0,
             total_pairs=0,
             candidate_pairs=0,
@@ -188,6 +225,8 @@ def build_conflict_graph_numba_dense(
         return ScopeAdjacencyResult(
             sources=np.empty(0, dtype=I32),
             targets=np.empty(0, dtype=I32),
+            csr_indptr=np.zeros(batch_size + 1, dtype=I64),
+            csr_indices=np.empty(0, dtype=I32),
             max_group_size=int(max_group_size),
             total_pairs=0,
             candidate_pairs=0,
@@ -197,62 +236,75 @@ def build_conflict_graph_numba_dense(
 
     directed_total_pairs = int(total_pairs * 2)
     candidate_pairs = directed_total_pairs
-    sources = (
-        np.empty(directed_total_pairs, dtype=I32)
-        if directed_total_pairs
-        else np.empty(0, dtype=I32)
-    )
-    targets = (
-        np.empty(directed_total_pairs, dtype=I32)
-        if directed_total_pairs
-        else np.empty(0, dtype=I32)
-    )
-    ranges = _chunk_ranges_from_indptr(indptr_nodes, chunk_target)
-    cursor = 0
-    for start, end in ranges:
-        if start >= end:
-            continue
-        chunk_pairs = np.int64(0)
-        for node in range(start, end):
-            if keep[node]:
-                chunk_pairs += pair_counts[node]
-        if chunk_pairs == 0:
-            continue
-        cursor = _expand_pairs_directed_into(
-            node_members,
-            indptr_nodes,
-            keep,
-            start,
-            end,
-            sources,
-            targets,
-            cursor,
-            pairwise_arr,
-            radii_arr,
-        )
-    if cursor == 0:
+    kept_nodes = np.nonzero(keep)[0].astype(I64)
+    if kept_nodes.size == 0:
         return ScopeAdjacencyResult(
             sources=np.empty(0, dtype=I32),
             targets=np.empty(0, dtype=I32),
+            csr_indptr=np.zeros(batch_size + 1, dtype=I64),
+            csr_indices=np.empty(0, dtype=I32),
             max_group_size=int(max_group_size),
             total_pairs=0,
             candidate_pairs=candidate_pairs,
             num_groups=num_groups,
             num_unique_groups=num_unique_groups,
         )
-    if cursor != sources.size:
-        sources = sources[:cursor].copy()
-        targets = targets[:cursor].copy()
+    pair_counts_kept = pair_counts[keep]
+    directed_counts = pair_counts_kept * 2
+    offsets = _prefix_sum(directed_counts)
+    capacity = int(offsets[-1])
+    if capacity == 0:
+        return ScopeAdjacencyResult(
+            sources=np.empty(0, dtype=I32),
+            targets=np.empty(0, dtype=I32),
+            csr_indptr=np.zeros(batch_size + 1, dtype=I64),
+            csr_indices=np.empty(0, dtype=I32),
+            max_group_size=int(max_group_size),
+            total_pairs=0,
+            candidate_pairs=candidate_pairs,
+            num_groups=num_groups,
+            num_unique_groups=num_unique_groups,
+        )
+
+    sources, targets, used_counts = _expand_pairs_directed(
+        node_members,
+        indptr_nodes,
+        kept_nodes,
+        offsets,
+        pairwise_arr,
+        radii_arr,
+    )
+    csr_indptr, csr_indices, actual_pairs = _pairs_to_csr(
+        sources,
+        targets,
+        offsets,
+        used_counts,
+        batch_size,
+    )
+    if actual_pairs == 0:
+        return ScopeAdjacencyResult(
+            sources=np.empty(0, dtype=I32),
+            targets=np.empty(0, dtype=I32),
+            csr_indptr=np.zeros(batch_size + 1, dtype=I64),
+            csr_indices=np.empty(0, dtype=I32),
+            max_group_size=int(max_group_size),
+            total_pairs=0,
+            candidate_pairs=candidate_pairs,
+            num_groups=num_groups,
+            num_unique_groups=num_unique_groups,
+        )
     return ScopeAdjacencyResult(
-        sources=sources,
-        targets=targets,
+        sources=np.empty(0, dtype=I32),
+        targets=np.empty(0, dtype=I32),
+        csr_indptr=csr_indptr,
+        csr_indices=csr_indices,
         max_group_size=int(max_group_size),
-        total_pairs=cursor,
+        total_pairs=actual_pairs,
         candidate_pairs=candidate_pairs,
         num_groups=num_groups,
         num_unique_groups=num_unique_groups,
     )
-
+```
 ```
 
 ## Baseline Implementations

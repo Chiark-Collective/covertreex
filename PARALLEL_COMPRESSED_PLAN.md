@@ -38,6 +38,20 @@ Deliver a reusable “parallel compressed cover tree” (PCCT) library that comb
 - **Acceleration:** optional Numba wrappers for hotspots (distance kernels, MIS) with seamless fallback.
 - **Future:** pure NumPy shim if needed for environments without JAX.
 
+## Working Plan — 2025-11-05
+
+**Focus:** Drive the PCCT NumPy+Numba build path towards sequential-baseline parity by removing the dense traversal bottleneck and tightening the conflict-graph staging pipeline.
+
+**Current metrics (NumPy backend, diagnostics off):**
+- 2 048 tree points / 512 queries / *k*=8 ⇒ build 0.366 s, query 0.097 s (5 261 q/s).
+- 8 192 tree points / 1 024 queries / *k*=16 ⇒ build 4.014 s, query 0.931 s (1 099 q/s).
+
+**Milestones:**
+1. **Sparse traversal kernel** (owner: Liam) — Replace the dense mask creation in `traverse_collect_scopes` with a tree-guided Numba kernel that walks parent chains and emits CSR scopes directly. Target: cut traversal time per dominated batch from ~20 ms to ≤5 ms and drop peak memory pressure. *Status:* design locked, prototype scaffolding in progress (scheduled for 2025-11-07 branch cut).
+2. **Traversal ↔ conflict-graph plumbing** (owner: Liam) — Adapt `build_conflict_graph` to consume the sparse scopes, reusing existing Numba adjacency path. Ensure parity tests (`test_traverse.py`, Tier-B integration) cover both dense and sparse implementations before flipping the default. *Status:* pending the sparse kernel output schema.
+3. **Scope chunk limiter** (owner: Priya) — Wire `RuntimeConfig.scope_chunk_target` into `_scope_numba` so very wide scopes stream through fixed-size segments; fall back to current behaviour when the limit is zero. Adds backpressure for 32 k+ builds and prepares the ground for pooled scratch buffers. *Status:* design reviewed, implementation queued behind milestone 1.
+4. **Diagnostics + benchmarks refresh** (owner: Priya) — Once milestones 1–3 land, regenerate `runtime_breakdown_*` artefacts (NumPy + JAX paths) and update benchmark tables/docstrings so auditors can trace performance deltas. *Status:* blocked on earlier milestones; target date 2025-11-10.
+
 ## Configuration & Environment
 
 - **Env surface (`COVERTREEX_*`):** `BACKEND` (`jax`, `numpy`, future), `DEVICE` (e.g. `gpu:0,cpu:0`), `PRECISION` (`float64` default, `float32` alt), `ENABLE_NUMBA` (`0/1`), `LOG_LEVEL`.
