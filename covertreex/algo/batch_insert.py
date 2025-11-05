@@ -8,9 +8,14 @@ import time
 
 import numpy as np
 
+from covertreex import config as cx_config
 from covertreex.algo.conflict_graph import ConflictGraph, build_conflict_graph
 from covertreex.algo.mis import MISResult, batch_mis_seeds, run_mis
 from covertreex.algo.traverse import TraversalResult, traverse_collect_scopes
+from covertreex.core._persistence_numba import (
+    NUMBA_PERSISTENCE_AVAILABLE,
+    apply_journal_cow,
+)
 from covertreex.core.metrics import get_metric
 from covertreex.core.persistence import SliceUpdate, clone_tree_with_updates
 from covertreex.core.tree import (
@@ -403,79 +408,99 @@ def _batch_insert_impl(
                 new_level = 0
             inserted_levels_np[selected_count + idx_dom] = new_level
 
-    inserted_levels = backend.asarray(inserted_levels_np, dtype=backend.default_int)
+    inserted_levels_backend = backend.asarray(
+        inserted_levels_np, dtype=backend.default_int
+    )
+    inserted_si_np = np.asarray(backend.to_numpy(inserted_si), dtype=float)
 
-    base_index = tree.num_points
-    append_slice = slice(base_index, base_index + total_inserted)
+    runtime = cx_config.runtime_config()
+    use_numba_persistence = (
+        runtime.enable_numba
+        and backend.name == "numpy"
+        and NUMBA_PERSISTENCE_AVAILABLE
+    )
 
-    points_updates = [
-        SliceUpdate(index=(append_slice, slice(None)), values=inserted_points)
-    ]
-    top_level_updates = [SliceUpdate(index=(append_slice,), values=inserted_levels)]
-    parent_updates: list[SliceUpdate] = [
-        SliceUpdate(index=(append_slice,), values=inserted_parents)
-    ]
-    si_cache_updates = [SliceUpdate(index=(append_slice,), values=inserted_si)]
-
-    default_child_block = xp.full((total_inserted,), -1, dtype=backend.default_int)
-    child_updates: list[SliceUpdate] = [
-        SliceUpdate(index=(append_slice,), values=default_child_block)
-    ]
-    default_next_block = xp.full((total_inserted,), -1, dtype=backend.default_int)
-    next_updates: list[SliceUpdate] = [
-        SliceUpdate(index=(append_slice,), values=default_next_block)
-    ]
-
-    tree_children_np = np.asarray(backend.to_numpy(tree.children), dtype=np.int64)
-
-    current_children: dict[int, int] = {}
-
-    def _parent_state(parent_idx: int) -> int:
-        if parent_idx not in current_children:
-            if parent_idx < tree.num_points:
-                prev_child = int(tree_children_np[parent_idx])
-            else:
-                prev_child = -1
-            current_children[parent_idx] = prev_child
-        return current_children[parent_idx]
-
-    for offset, parent in enumerate(inserted_parents_np):
-        global_idx = base_index + offset
-        current_children.setdefault(global_idx, -1)
-        if parent < 0:
-            continue
-
-        prev_child = _parent_state(parent)
-        child_updates.append(SliceUpdate(index=(parent,), values=int(global_idx)))
-        next_updates.append(
-            SliceUpdate(index=(global_idx,), values=int(prev_child if prev_child >= 0 else -1))
+    if use_numba_persistence:
+        updated_tree = _realise_batch_updates_numba(
+            tree,
+            backend=backend,
+            inserted_points_np=inserted_points_np,
+            inserted_levels_np=inserted_levels_np,
+            inserted_parents_np=inserted_parents_np,
+            inserted_si_np=inserted_si_np,
         )
-        current_children[parent] = int(global_idx)
+    else:
+        base_index = tree.num_points
+        append_slice = slice(base_index, base_index + total_inserted)
 
-    combined_top_levels = backend.asarray(
-        np.concatenate(
-            [
-                np.asarray(backend.to_numpy(tree.top_levels), dtype=np.int64),
-                inserted_levels_np,
-            ]
-        ),
-        dtype=backend.default_int,
-    )
-    new_level_offsets = compute_level_offsets(backend, combined_top_levels)
-    level_offset_updates = [
-        SliceUpdate(index=(slice(0, new_level_offsets.shape[0]),), values=new_level_offsets)
-    ]
+        points_updates = [
+            SliceUpdate(index=(append_slice, slice(None)), values=inserted_points)
+        ]
+        top_level_updates = [SliceUpdate(index=(append_slice,), values=inserted_levels_backend)]
+        parent_updates: list[SliceUpdate] = [
+            SliceUpdate(index=(append_slice,), values=inserted_parents)
+        ]
+        si_cache_updates = [SliceUpdate(index=(append_slice,), values=inserted_si)]
 
-    updated_tree = clone_tree_with_updates(
-        tree,
-        points_updates=points_updates,
-        top_level_updates=top_level_updates,
-        parent_updates=parent_updates,
-        child_updates=child_updates,
-        level_offset_updates=level_offset_updates,
-        si_cache_updates=si_cache_updates,
-        next_cache_updates=next_updates,
-    )
+        default_child_block = xp.full((total_inserted,), -1, dtype=backend.default_int)
+        child_updates: list[SliceUpdate] = [
+            SliceUpdate(index=(append_slice,), values=default_child_block)
+        ]
+        default_next_block = xp.full((total_inserted,), -1, dtype=backend.default_int)
+        next_updates: list[SliceUpdate] = [
+            SliceUpdate(index=(append_slice,), values=default_next_block)
+        ]
+
+        tree_children_np = np.asarray(backend.to_numpy(tree.children), dtype=np.int64)
+
+        current_children: dict[int, int] = {}
+
+        def _parent_state(parent_idx: int) -> int:
+            if parent_idx not in current_children:
+                if parent_idx < tree.num_points:
+                    prev_child = int(tree_children_np[parent_idx])
+                else:
+                    prev_child = -1
+                current_children[parent_idx] = prev_child
+            return current_children[parent_idx]
+
+        for offset, parent in enumerate(inserted_parents_np):
+            global_idx = base_index + offset
+            current_children.setdefault(global_idx, -1)
+            if parent < 0:
+                continue
+
+            prev_child = _parent_state(parent)
+            child_updates.append(SliceUpdate(index=(parent,), values=int(global_idx)))
+            next_updates.append(
+                SliceUpdate(index=(global_idx,), values=int(prev_child if prev_child >= 0 else -1))
+            )
+            current_children[parent] = int(global_idx)
+
+        combined_top_levels = backend.asarray(
+            np.concatenate(
+                [
+                    np.asarray(backend.to_numpy(tree.top_levels), dtype=np.int64),
+                    inserted_levels_np,
+                ]
+            ),
+            dtype=backend.default_int,
+        )
+        new_level_offsets = compute_level_offsets(backend, combined_top_levels)
+        level_offset_updates = [
+            SliceUpdate(index=(slice(0, new_level_offsets.shape[0]),), values=new_level_offsets)
+        ]
+
+        updated_tree = clone_tree_with_updates(
+            tree,
+            points_updates=points_updates,
+            top_level_updates=top_level_updates,
+            parent_updates=parent_updates,
+            child_updates=child_updates,
+            level_offset_updates=level_offset_updates,
+            si_cache_updates=si_cache_updates,
+            next_cache_updates=next_updates,
+        )
 
     stats = TreeLogStats(
         num_batches=tree.stats.num_batches + 1,
@@ -558,3 +583,243 @@ def batch_insert_prefix_doubling(
         groups=tuple(groups),
     )
 LOGGER = get_logger("algo.batch_insert")
+
+_POOL_MIN_CAPACITY = 16
+_EMPTY_INT32 = np.empty(0, dtype=np.int32)
+_JOURNAL_HEAD_PARENTS = _EMPTY_INT32
+_JOURNAL_HEAD_VALUES = _EMPTY_INT32
+_JOURNAL_NEXT_NODES = _EMPTY_INT32
+_JOURNAL_NEXT_VALUES = _EMPTY_INT32
+_JOURNAL_CHILDREN_SCRATCH = _EMPTY_INT32
+
+
+def _pool_next_capacity(current: int, required: int) -> int:
+    if required <= 0:
+        return 0
+    if current == 0:
+        return max(_POOL_MIN_CAPACITY, required)
+    return max(required, current * 2)
+
+
+def _request_head_parent_buffer(required: int) -> np.ndarray:
+    global _JOURNAL_HEAD_PARENTS
+    if required <= 0:
+        return _EMPTY_INT32
+    if _JOURNAL_HEAD_PARENTS.shape[0] < required:
+        new_size = _pool_next_capacity(_JOURNAL_HEAD_PARENTS.shape[0], required)
+        _JOURNAL_HEAD_PARENTS = np.empty(new_size, dtype=np.int32)
+    return _JOURNAL_HEAD_PARENTS
+
+
+def _request_head_value_buffer(required: int) -> np.ndarray:
+    global _JOURNAL_HEAD_VALUES
+    if required <= 0:
+        return _EMPTY_INT32
+    if _JOURNAL_HEAD_VALUES.shape[0] < required:
+        new_size = _pool_next_capacity(_JOURNAL_HEAD_VALUES.shape[0], required)
+        _JOURNAL_HEAD_VALUES = np.empty(new_size, dtype=np.int32)
+    return _JOURNAL_HEAD_VALUES
+
+
+def _request_next_nodes_buffer(required: int) -> np.ndarray:
+    global _JOURNAL_NEXT_NODES
+    if required <= 0:
+        return _EMPTY_INT32
+    if _JOURNAL_NEXT_NODES.shape[0] < required:
+        new_size = _pool_next_capacity(_JOURNAL_NEXT_NODES.shape[0], required)
+        _JOURNAL_NEXT_NODES = np.empty(new_size, dtype=np.int32)
+    return _JOURNAL_NEXT_NODES
+
+
+def _request_next_values_buffer(required: int) -> np.ndarray:
+    global _JOURNAL_NEXT_VALUES
+    if required <= 0:
+        return _EMPTY_INT32
+    if _JOURNAL_NEXT_VALUES.shape[0] < required:
+        new_size = _pool_next_capacity(_JOURNAL_NEXT_VALUES.shape[0], required)
+        _JOURNAL_NEXT_VALUES = np.empty(new_size, dtype=np.int32)
+    return _JOURNAL_NEXT_VALUES
+
+
+def _request_children_scratch(required: int) -> np.ndarray:
+    global _JOURNAL_CHILDREN_SCRATCH
+    if required <= 0:
+        return _EMPTY_INT32
+    if _JOURNAL_CHILDREN_SCRATCH.shape[0] < required:
+        new_size = _pool_next_capacity(_JOURNAL_CHILDREN_SCRATCH.shape[0], required)
+        _JOURNAL_CHILDREN_SCRATCH = np.empty(new_size, dtype=np.int32)
+    return _JOURNAL_CHILDREN_SCRATCH
+
+
+def _compute_level_offsets_incremental(
+    current_offsets: np.ndarray,
+    inserted_levels: np.ndarray,
+    *,
+    dtype: Any,
+) -> np.ndarray:
+    offsets_np = np.asarray(current_offsets, dtype=np.int64)
+    inserted_np = np.asarray(inserted_levels, dtype=np.int64)
+
+    if offsets_np.size <= 1:
+        counts = np.zeros(1, dtype=np.int64)
+    else:
+        diffs = np.diff(offsets_np).astype(np.int64, copy=False)
+        if diffs.size == 0:
+            counts = np.zeros(1, dtype=np.int64)
+        else:
+            counts = diffs[::-1]
+
+    max_existing = counts.shape[0] - 1
+    max_inserted = int(np.max(inserted_np)) if inserted_np.size else -1
+    target_level = max(max_existing, max_inserted)
+
+    if target_level < 0:
+        counts = np.zeros(1, dtype=np.int64)
+    elif counts.shape[0] <= target_level:
+        pad = target_level + 1 - counts.shape[0]
+        counts = np.pad(counts, (0, pad))
+    else:
+        counts = counts[: target_level + 1]
+
+    for level in inserted_np:
+        lvl = int(level)
+        if lvl < 0:
+            continue
+        if lvl >= counts.shape[0]:
+            pad = lvl - counts.shape[0] + 1
+            counts = np.pad(counts, (0, pad))
+        counts[lvl] += 1
+
+    if counts.sum() == 0:
+        return np.asarray([0], dtype=dtype)
+
+    counts_desc = counts[::-1]
+    result = np.empty(counts_desc.shape[0] + 1, dtype=np.int64)
+    result[0] = 0
+    np.cumsum(counts_desc, out=result[1:])
+    return result.astype(dtype, copy=False)
+
+
+def _build_head_and_sibling_updates(
+    inserted_parents: np.ndarray,
+    base_children: np.ndarray,
+    *,
+    base_length: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    inserted_count = inserted_parents.shape[0]
+    if inserted_count == 0:
+        return (_EMPTY_INT32, _EMPTY_INT32, _EMPTY_INT32, _EMPTY_INT32)
+
+    total_length = base_length + inserted_count
+
+    current_children_buffer = _request_children_scratch(total_length)
+    current_children = current_children_buffer[:total_length]
+    current_children[:base_length] = base_children[:base_length]
+    if inserted_count:
+        current_children[base_length:total_length] = -1
+
+    head_parents_buffer = _request_head_parent_buffer(inserted_count)
+    head_values_buffer = _request_head_value_buffer(inserted_count)
+    next_nodes_buffer = _request_next_nodes_buffer(inserted_count)
+    next_values_buffer = _request_next_values_buffer(inserted_count)
+
+    head_count = 0
+    for offset in range(inserted_count):
+        parent = int(inserted_parents[offset])
+        global_idx = base_length + offset
+        next_nodes_buffer[offset] = global_idx
+
+        if parent < 0 or parent >= total_length:
+            next_values_buffer[offset] = -1
+            continue
+
+        prev_child = int(current_children[parent])
+        head_parents_buffer[head_count] = parent
+        head_values_buffer[head_count] = global_idx
+        head_count += 1
+        next_values_buffer[offset] = prev_child
+        current_children[parent] = global_idx
+
+    return (
+        head_parents_buffer[:head_count],
+        head_values_buffer[:head_count],
+        next_nodes_buffer[:inserted_count],
+        next_values_buffer[:inserted_count],
+    )
+
+
+def _realise_batch_updates_numba(
+    tree: PCCTree,
+    *,
+    backend: TreeBackend,
+    inserted_points_np: np.ndarray,
+    inserted_levels_np: np.ndarray,
+    inserted_parents_np: np.ndarray,
+    inserted_si_np: np.ndarray,
+) -> PCCTree:
+    base_length = tree.num_points
+    inserted_count = inserted_levels_np.shape[0]
+    total_length = base_length + inserted_count
+
+    points_np = np.asarray(backend.to_numpy(tree.points), dtype=float)
+    parents_np = np.asarray(backend.to_numpy(tree.parents), dtype=np.int32)
+    levels_np = np.asarray(backend.to_numpy(tree.top_levels), dtype=np.int32)
+    children_np = np.asarray(backend.to_numpy(tree.children), dtype=np.int32)
+    next_np = np.asarray(backend.to_numpy(tree.next_cache), dtype=np.int32)
+    level_offsets_np = np.asarray(backend.to_numpy(tree.level_offsets), dtype=np.int64)
+    si_cache_np = np.asarray(backend.to_numpy(tree.si_cache), dtype=float)
+
+    parents_out = np.empty(total_length, dtype=np.int32)
+    levels_out = np.empty(total_length, dtype=np.int32)
+    children_out = np.empty(total_length, dtype=np.int32)
+    next_out = np.empty(total_length, dtype=np.int32)
+
+    (
+        head_parents,
+        head_values,
+        next_nodes,
+        next_values,
+    ) = _build_head_and_sibling_updates(
+        inserted_parents_np, children_np, base_length=base_length
+    )
+
+    apply_journal_cow(
+        parents_np,
+        levels_np,
+        children_np,
+        next_np,
+        inserted_parents_np.astype(np.int32, copy=False),
+        inserted_levels_np.astype(np.int32, copy=False),
+        head_parents,
+        head_values,
+        next_nodes,
+        next_values,
+        parents_out,
+        levels_out,
+        children_out,
+        next_out,
+        base_length,
+    )
+
+    if inserted_count:
+        points_updated = np.concatenate([points_np, inserted_points_np], axis=0)
+        si_updated = np.concatenate([si_cache_np, inserted_si_np], axis=0)
+    else:
+        points_updated = points_np.copy()
+        si_updated = si_cache_np.copy()
+
+    level_offsets_updated = _compute_level_offsets_incremental(
+        level_offsets_np,
+        inserted_levels_np,
+        dtype=backend.default_int,
+    )
+
+    return tree.replace(
+        points=backend.asarray(points_updated, dtype=backend.default_float),
+        top_levels=backend.asarray(levels_out, dtype=backend.default_int),
+        parents=backend.asarray(parents_out, dtype=backend.default_int),
+        children=backend.asarray(children_out, dtype=backend.default_int),
+        level_offsets=backend.asarray(level_offsets_updated, dtype=backend.default_int),
+        si_cache=backend.asarray(si_updated, dtype=backend.default_float),
+        next_cache=backend.asarray(next_out, dtype=backend.default_int),
+    )

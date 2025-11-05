@@ -69,6 +69,13 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 - MIS is effectively free (`mis_ms ≤ 0.2 ms`). Remaining variation comes from first-call warm-up; post-compilation runs stay under 0.1 ms.
 - Running strictly on the CPU (NumPy backend, diagnostics optional) keeps comparisons against the sequential and GPBoost baselines reproducible and highlights traversal as the dominant optimisation target.
 
+### Persistence journal (NumPy backend)
+
+- With `COVERTREEX_BACKEND=numpy` and `COVERTREEX_ENABLE_NUMBA=1`, batch inserts now route through a Numba “journal” kernel that clones the parent/child/next arrays once per batch and applies updates in a single sweep. When the flag is disabled or a non-NumPy backend is selected, the legacy SliceUpdate path is used automatically.
+- The journal path is metric-agnostic: it operates on the structural arrays only, so custom metrics (e.g. residual correlation) remain supported without additional guards.
+- Scratch buffers for head/next chains are pooled across batches, eliminating the small-but-frequent NumPy allocations that previously showed up as RSS spikes in large builds. Enable diagnostics to monitor pool growth via the existing logging hooks.
+- Rerun `benchmarks.runtime_breakdown` before/after enabling the journal to record wall-clock deltas for auditors; the 32 768-point configuration is the most illustrative workload.
+
 ## Parallel Compressed Cover Tree — Conflict Graph Builder (dense + segmented)
 
 ```python

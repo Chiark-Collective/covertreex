@@ -5,13 +5,15 @@ import pytest
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
+from covertreex import config as cx_config
 from covertreex.algo import (
     batch_insert,
     batch_insert_prefix_doubling,
     batch_mis_seeds,
     plan_batch_insert,
 )
-from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
+from covertreex.core._persistence_numba import NUMBA_PERSISTENCE_AVAILABLE
+from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeBackend, TreeLogStats
 
 
 def _setup_tree():
@@ -112,6 +114,73 @@ def _assert_child_sibling_consistency(tree: PCCTree) -> None:
             f"Sibling chain under parent {parent} mismatch: expected "
             f"{sorted(expected_children)}, got {sorted(chain)}"
         )
+
+
+@pytest.mark.skipif(not NUMBA_PERSISTENCE_AVAILABLE, reason="Numba persistence helpers unavailable")
+def test_batch_insert_numba_persistence_matches_fallback(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("COVERTREEX_BACKEND", "numpy")
+    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
+    cx_config.reset_runtime_config_cache()
+
+    backend = TreeBackend.numpy()
+    points = backend.asarray([[0.0, 0.0], [1.0, 1.0]], dtype=backend.default_float)
+    top_levels = backend.asarray([1, 0], dtype=backend.default_int)
+    parents = backend.asarray([-1, 0], dtype=backend.default_int)
+    children = backend.asarray([1, -1], dtype=backend.default_int)
+    level_offsets = backend.asarray([0, 1, 2], dtype=backend.default_int)
+    si_cache = backend.asarray([4.0, 2.0], dtype=backend.default_float)
+    next_cache = backend.asarray([-1, -1], dtype=backend.default_int)
+
+    tree = PCCTree(
+        points=points,
+        top_levels=top_levels,
+        parents=parents,
+        children=children,
+        level_offsets=level_offsets,
+        si_cache=si_cache,
+        next_cache=next_cache,
+        stats=TreeLogStats(num_batches=0),
+        backend=backend,
+    )
+
+    batch = backend.asarray([[2.5, 2.4], [0.8, 0.7]], dtype=backend.default_float)
+
+    numba_tree, _ = batch_insert(tree, batch)
+
+    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "0")
+    cx_config.reset_runtime_config_cache()
+    fallback_tree, _ = batch_insert(tree, batch)
+
+    cx_config.reset_runtime_config_cache()
+
+    np.testing.assert_allclose(
+        backend.to_numpy(numba_tree.points),
+        backend.to_numpy(fallback_tree.points),
+    )
+    np.testing.assert_array_equal(
+        backend.to_numpy(numba_tree.top_levels),
+        backend.to_numpy(fallback_tree.top_levels),
+    )
+    np.testing.assert_array_equal(
+        backend.to_numpy(numba_tree.parents),
+        backend.to_numpy(fallback_tree.parents),
+    )
+    np.testing.assert_array_equal(
+        backend.to_numpy(numba_tree.children),
+        backend.to_numpy(fallback_tree.children),
+    )
+    np.testing.assert_array_equal(
+        backend.to_numpy(numba_tree.level_offsets),
+        backend.to_numpy(fallback_tree.level_offsets),
+    )
+    np.testing.assert_allclose(
+        backend.to_numpy(numba_tree.si_cache),
+        backend.to_numpy(fallback_tree.si_cache),
+    )
+    np.testing.assert_array_equal(
+        backend.to_numpy(numba_tree.next_cache),
+        backend.to_numpy(fallback_tree.next_cache),
+    )
 
 
 def test_plan_batch_insert_runs_pipeline():
