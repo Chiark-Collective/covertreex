@@ -1,0 +1,4 @@
+pcct | build=23.5848s queries=1024 k=16 time=0.9274s latency=0.9056ms throughput=1,104.2 q/s
+baseline[sequential] | build=33.6903s time=0.1940s latency=0.1895ms throughput=5,277.4 q/s slowdown=0.209x
+baseline[gpboost] | build=0.6216s time=3.3428s latency=3.2645ms throughput=306.3 q/s slowdown=3.605x
+baseline[external] | build=14.6392s time=8.4189s latency=8.2216ms throughput=121.6 q/s slowdown=9.078x

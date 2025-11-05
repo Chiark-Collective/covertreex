@@ -4,12 +4,21 @@ import logging
 import os
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Tuple
+from typing import Any, Dict, Tuple
 
-import jax
+try:  # pragma: no cover - exercised indirectly via tests
+    import jax  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - depends on environment
+    jax = None  # type: ignore
 
-_SUPPORTED_BACKENDS = {"jax"}
+_FALLBACK_CPU_DEVICE = ("cpu:0",)
+_LOGGER = logging.getLogger("covertreex")
+_JAX_WARNING_EMITTED = False
+
+_SUPPORTED_BACKENDS = {"jax", "numpy"}
 _SUPPORTED_PRECISION = {"float32", "float64"}
+_CONFLICT_GRAPH_IMPLS = {"dense", "segmented", "auto"}
+_DEFAULT_SCOPE_CHUNK_TARGET = 65_536
 
 
 def _bool_from_env(value: str | None, *, default: bool) -> bool:
@@ -52,6 +61,17 @@ def _normalise_precision(value: str | None) -> str:
     return value
 
 
+def _parse_conflict_graph_impl(value: str | None) -> str:
+    if value is None:
+        return "dense"
+    impl = value.strip().lower()
+    if impl not in _CONFLICT_GRAPH_IMPLS:
+        raise ValueError(
+            f"Unsupported conflict-graph implementation '{impl}'. Expected one of {_CONFLICT_GRAPH_IMPLS}."
+        )
+    return impl
+
+
 def _infer_precision_from_env() -> str:
     precision = os.getenv("COVERTREEX_PRECISION")
     if precision:
@@ -63,47 +83,41 @@ def _infer_precision_from_env() -> str:
 
 
 def _infer_backend_from_env() -> str:
-    backend = os.getenv("COVERTREEX_BACKEND", "jax").strip().lower()
+    backend = os.getenv("COVERTREEX_BACKEND", "numpy").strip().lower()
     if backend not in _SUPPORTED_BACKENDS:
         raise ValueError(f"Unsupported backend '{backend}'. Expected one of {_SUPPORTED_BACKENDS}.")
     return backend
 
 
-def _device_label(device: jax.Device) -> str:
+def _device_label(device: Any) -> str:
     index = getattr(device, "id", getattr(device, "device_id", 0))
     return f"{device.platform}:{index}"
 
 
 def _resolve_jax_devices(requested: Tuple[str, ...]) -> Tuple[str, ...]:
+    if jax is None:
+        if requested and requested:
+            _LOGGER.info(
+                "JAX is unavailable; forcing CPU stub device while GPU support is disabled."
+            )
+        return _FALLBACK_CPU_DEVICE
+
     available = jax.devices()
     if not available:
         return ()
-    if not requested:
-        return tuple(_device_label(device) for device in available)
-
-    selected: list[str] = []
-    for spec in requested:
-        if ":" in spec:
-            platform, idx = spec.split(":", 1)
-            matches = [
-                device
-                for device in available
-                if device.platform == platform and str(getattr(device, "id", None)) == idx
-            ]
-        else:
-            matches = [device for device in available if device.platform == spec]
-        if matches:
-            selected.extend(_device_label(device) for device in matches)
-    if selected:
-        return tuple(selected)
-
     cpu_devices = [device for device in available if device.platform == "cpu"]
     if cpu_devices:
-        logging.getLogger("covertreex").debug(
-            "Requested devices %s unavailable; falling back to CPU.", requested
-        )
+        if requested and any(not spec.startswith("cpu") for spec in requested):
+            _LOGGER.info(
+                "GPU execution is disabled; forcing CPU devices despite request %s.",
+                requested,
+            )
         return tuple(_device_label(device) for device in cpu_devices)
-    return tuple(_device_label(device) for device in available)
+
+    _LOGGER.warning(
+        "GPU execution disabled but no CPU devices reported by JAX; using fallback stub."
+    )
+    return _FALLBACK_CPU_DEVICE
 
 
 @dataclass(frozen=True)
@@ -112,8 +126,13 @@ class RuntimeConfig:
     precision: str
     devices: Tuple[str, ...]
     enable_numba: bool
+    enable_diagnostics: bool
     log_level: str
     mis_seed: int | None
+    conflict_graph_impl: str
+    scope_segment_dedupe: bool
+    scope_chunk_target: int
+    metric: str
 
     @property
     def jax_enable_x64(self) -> bool:
@@ -125,14 +144,65 @@ class RuntimeConfig:
             return None
         return self.devices[0].split(":", 1)[0]
 
+    @classmethod
+    def from_env(cls) -> "RuntimeConfig":
+        backend = _infer_backend_from_env()
+        precision = _normalise_precision(_infer_precision_from_env())
+        requested_devices = _parse_devices(os.getenv("COVERTREEX_DEVICE"))
+        devices = _resolve_jax_devices(requested_devices) if backend == "jax" else ()
+        enable_numba = _bool_from_env(os.getenv("COVERTREEX_ENABLE_NUMBA"), default=False)
+        enable_diagnostics = _bool_from_env(
+            os.getenv("COVERTREEX_ENABLE_DIAGNOSTICS"), default=True
+        )
+        log_level = os.getenv("COVERTREEX_LOG_LEVEL", "INFO").upper()
+        mis_seed = _parse_optional_int(os.getenv("COVERTREEX_MIS_SEED"))
+        conflict_graph_impl = _parse_conflict_graph_impl(
+            os.getenv("COVERTREEX_CONFLICT_GRAPH_IMPL")
+        )
+        scope_segment_dedupe = _bool_from_env(
+            os.getenv("COVERTREEX_SCOPE_SEGMENT_DEDUP"), default=True
+        )
+        raw_chunk_target = _parse_optional_int(
+            os.getenv("COVERTREEX_SCOPE_CHUNK_TARGET")
+        )
+        if raw_chunk_target is None:
+            scope_chunk_target = _DEFAULT_SCOPE_CHUNK_TARGET
+        elif raw_chunk_target <= 0:
+            scope_chunk_target = 0
+        else:
+            scope_chunk_target = raw_chunk_target
+        metric = os.getenv("COVERTREEX_METRIC", "euclidean").strip().lower() or "euclidean"
+        return cls(
+            backend=backend,
+            precision=precision,
+            devices=devices,
+            enable_numba=enable_numba,
+            enable_diagnostics=enable_diagnostics,
+            log_level=log_level,
+            mis_seed=mis_seed,
+            conflict_graph_impl=conflict_graph_impl,
+            scope_segment_dedupe=scope_segment_dedupe,
+            scope_chunk_target=scope_chunk_target,
+            metric=metric,
+        )
+
 
 def _apply_jax_runtime_flags(config: RuntimeConfig) -> None:
     if config.backend != "jax":
         return
+
+    if jax is None:
+        global _JAX_WARNING_EMITTED
+        if not _JAX_WARNING_EMITTED:
+            _LOGGER.warning(
+                "JAX backend requested but `jax` is not installed; using CPU stub devices."
+            )
+            _JAX_WARNING_EMITTED = True
+        return
+
     jax.config.update("jax_enable_x64", config.jax_enable_x64)
 
-    if config.primary_platform and "JAX_PLATFORM_NAME" not in os.environ:
-        jax.config.update("jax_platform_name", config.primary_platform)
+    jax.config.update("jax_platform_name", "cpu")
 
 
 def _configure_logging(level: str) -> None:
@@ -148,22 +218,7 @@ def _configure_logging(level: str) -> None:
 
 @lru_cache(maxsize=None)
 def runtime_config() -> RuntimeConfig:
-    backend = _infer_backend_from_env()
-    precision = _normalise_precision(_infer_precision_from_env())
-    requested_devices = _parse_devices(os.getenv("COVERTREEX_DEVICE"))
-    devices = _resolve_jax_devices(requested_devices) if backend == "jax" else ()
-    enable_numba = _bool_from_env(os.getenv("COVERTREEX_ENABLE_NUMBA"), default=False)
-    log_level = os.getenv("COVERTREEX_LOG_LEVEL", "INFO").upper()
-    mis_seed = _parse_optional_int(os.getenv("COVERTREEX_MIS_SEED"))
-
-    config = RuntimeConfig(
-        backend=backend,
-        precision=precision,
-        devices=devices,
-        enable_numba=enable_numba,
-        log_level=log_level,
-        mis_seed=mis_seed,
-    )
+    config = RuntimeConfig.from_env()
     _apply_jax_runtime_flags(config)
     _configure_logging(config.log_level)
     return config
@@ -171,3 +226,24 @@ def runtime_config() -> RuntimeConfig:
 
 def reset_runtime_config_cache() -> None:
     runtime_config.cache_clear()
+
+
+def describe_runtime() -> Dict[str, Any]:
+    """Return a serialisable view of the active runtime configuration."""
+
+    config = runtime_config()
+    return {
+        "backend": config.backend,
+        "precision": config.precision,
+        "devices": config.devices,
+        "primary_platform": config.primary_platform,
+        "enable_numba": config.enable_numba,
+        "enable_diagnostics": config.enable_diagnostics,
+        "log_level": config.log_level,
+        "mis_seed": config.mis_seed,
+        "jax_enable_x64": config.jax_enable_x64,
+        "conflict_graph_impl": config.conflict_graph_impl,
+        "scope_segment_dedupe": config.scope_segment_dedupe,
+        "scope_chunk_target": config.scope_chunk_target,
+        "metric": config.metric,
+    }

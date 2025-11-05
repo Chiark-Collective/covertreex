@@ -1,0 +1,4 @@
+Saved runtime breakdown to runtime_breakdown.png
+PCCT (JAX): build=85.435s query=2.077s
+PCCT (Numba): build=4.431s query=2.097s
+Sequential Baseline: build=2.181s query=0.024s

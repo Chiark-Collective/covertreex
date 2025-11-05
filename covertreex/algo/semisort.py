@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Tuple
-
-import numpy as np
+from typing import Any
 
 from covertreex.core.tree import TreeBackend
 
@@ -36,28 +34,41 @@ def group_by_int(
         Whether to preserve the relative order of equal keys (default True).
     """
 
-    keys_np = np.asarray(backend.to_numpy(keys), dtype=np.int64)
-    values_np = np.asarray(backend.to_numpy(values))
+    xp = backend.xp
+    keys_arr = backend.asarray(keys, dtype=backend.default_int)
+    values_arr = backend.asarray(values)
 
-    if keys_np.ndim != 1:
+    if keys_arr.ndim != 1:
         raise ValueError("group_by_int expects 1-D `keys`.")
-    if values_np.shape[0] != keys_np.shape[0]:
+    if values_arr.shape[0] != keys_arr.shape[0]:
         raise ValueError("`values` must align with `keys` in the first dimension.")
 
-    if keys_np.size == 0:
-        empty = backend.asarray([], dtype=backend.default_int)
-        return GroupByResult(keys=empty, indptr=backend.asarray([0], dtype=backend.default_int), values=backend.asarray(values_np))
+    size = int(keys_arr.shape[0])
+    if size == 0:
+        empty_keys = backend.asarray([], dtype=backend.default_int)
+        empty_indptr = backend.asarray([0], dtype=backend.default_int)
+        return GroupByResult(keys=empty_keys, indptr=empty_indptr, values=values_arr)
 
-    order = np.argsort(keys_np, kind="stable" if stable else "quicksort")
-    sorted_keys = keys_np[order]
-    sorted_values = values_np[order]
+    indices = xp.arange(size, dtype=backend.default_int)
+    if stable:
+        order = xp.lexsort((indices, keys_arr))
+    else:
+        order = xp.argsort(keys_arr)
+    sorted_keys = keys_arr[order]
+    sorted_values = values_arr[order]
 
-    unique_keys, counts = np.unique(sorted_keys, return_counts=True)
-    indptr = np.concatenate([[0], np.cumsum(counts, dtype=np.int64)])
-
-    return GroupByResult(
-        keys=backend.asarray(unique_keys, dtype=backend.default_int),
-        indptr=backend.asarray(indptr, dtype=backend.default_int),
-        values=backend.asarray(sorted_values),
+    unique_keys, counts = xp.unique(sorted_keys, return_counts=True)
+    counts = counts.astype(backend.default_int)
+    indptr = xp.concatenate(
+        (
+            xp.zeros((1,), dtype=backend.default_int),
+            xp.cumsum(counts, dtype=backend.default_int),
+        ),
+        axis=0,
     )
 
+    return GroupByResult(
+        keys=backend.device_put(unique_keys.astype(backend.default_int)),
+        indptr=backend.device_put(indptr),
+        values=backend.device_put(sorted_values),
+    )

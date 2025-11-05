@@ -1,7 +1,4 @@
-import pytest
-
-jax = pytest.importorskip("jax")
-jnp = pytest.importorskip("jax.numpy")
+import numpy as np
 
 from covertreex.core.persistence import SliceUpdate, clone_array_segment, clone_tree_with_updates
 from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
@@ -45,7 +42,7 @@ def test_clone_tree_with_updates_replaces_values():
 
     updated = clone_tree_with_updates(
         tree,
-        points_updates=[SliceUpdate(index=(1,), values=jnp.array([2.0, 2.0]))],
+        points_updates=[SliceUpdate(index=(1,), values=np.array([2.0, 2.0], dtype=tree.backend.default_float))],
         parent_updates=[SliceUpdate(index=(1,), values=0)],
     )
 
@@ -53,4 +50,3 @@ def test_clone_tree_with_updates_replaces_values():
     assert updated.points.tolist() == [[0.0, 0.0], [2.0, 2.0]]
     assert updated.parents.tolist() == [-1, 0]
     assert tree.points.tolist() == [[0.0, 0.0], [1.0, 1.0]]
-

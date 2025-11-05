@@ -1,6 +1,6 @@
 # Covertreex
 
-Parallel compressed cover tree (PCCT) library engineered for Vecchia-style Gaussian process pipelines on GPUs. This is the implementation companion to the plan captured in `PARALLEL_COMPRESSED_PLAN.md`.
+Parallel compressed cover tree (PCCT) library engineered for Vecchia-style Gaussian process pipelines. The current focus is an efficient **CPU + Numba** implementation; GPU/JAX execution has been intentionally disabled until the CPU path reaches the desired performance envelope. This is the implementation companion to the plan captured in `PARALLEL_COMPRESSED_PLAN.md`.
 
 > Status: scaffolding in progress. Expect rapid iteration across backends, persistence utilities, and traversal/insertion kernels.
 
@@ -13,6 +13,39 @@ pip install -e ".[dev]"
 ```
 
 The default backend is `jax.numpy` (`jnp`). Optional acceleration hooks leverage `numba` when the `numba` extra is installed.
+
+## Runtime Controls
+
+Configuration is driven by environment variables consumed when `covertreex` is imported:
+
+- `COVERTREEX_DEVICE` is ignored for now—execution is forced onto CPU even if GPUs are present.
+- `COVERTREEX_ENABLE_NUMBA=1` enables the Numba-backed MIS kernels (recommended).
+- `COVERTREEX_ENABLE_DIAGNOSTICS=0` disables resource polling (wall/CPU/RSS/GPU) in the operation logs to minimise benchmarking overhead.
+- `COVERTREEX_METRIC=residual_correlation` switches the library to the residual-correlation metric (pairwise handler configured via `covertreex.configure_residual_metric`).
+
+Residual metrics are wired up lazily: call `covertreex.configure_residual_metric(pairwise=..., pointwise=...)` after import to supply the Vecchia residual-correlation provider; `reset_residual_metric()` clears the hooks (useful for tests).
+
+Use `covertreex.config.describe_runtime()` to inspect the active settings.
+
+## Benchmarks
+
+Smoke benchmarks live under `benchmarks/` and now emit structured telemetry:
+
+```bash
+UV_CACHE_DIR=$PWD/.uv-cache uv run python -m benchmarks.batch_ops insert --dimension 8 --batch-size 64 --batches 4
+```
+
+The k-NN benchmark supports baseline comparisons against both the in-repo sequential tree and the optional external CoverTree implementation:
+
+```bash
+# Optional extras for the external baseline
+pip install -e '.[baseline]'
+
+UV_CACHE_DIR=$PWD/.uv-cache uv run python -m benchmarks.queries \
+  --dimension 8 --tree-points 2048 --queries 512 --k 8 --baseline both
+```
+
+Baseline outputs list build/query timings, throughput, and slowdown ratios alongside the PCCT measurements so you can quantify gains from the compressed parallel design.
 
 ## Reference Material
 

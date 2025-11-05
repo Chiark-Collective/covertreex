@@ -282,13 +282,24 @@ Latest logs: `runtime_breakdown_output_2048_numba_baselines.txt`, `runtime_break
 - 2025-11-05 (CSR assembly kernel, 32 k follow-up) — Extended the Numba scope builder to emit CSR `indptr/indices` directly and taught the dense conflict-graph path to consume them, removing the Python-side CSR pass.
   - Dominated batches on the 32 k workload now log `conflict_adj_csr_ms ≈ 0.003–0.008 ms` (down from ~59 ms). Host-side CSR assembly disappears; adjacency wall is essentially the scatter cost.
   - Fresh 8 k run (`--tree-points 8192 --batch-size 256 --queries 1024 --k 16`, diagnostics off) produces **build 2.63 s / query 0.049 s** with `conflict_adj_csr_ms ≈ 0.002 ms` and unchanged CPU utilisation (≈1.78×). Scope H2D traffic now only moves the CSR buffers (~257 KiB per dominated batch).
-  - Added `--skip-sequential`/`--skip-external` toggles to `benchmarks.runtime_breakdown` so the heavy baselines can be disabled on large runs. With the latest in-kernel CSR compaction, the 32 k benchmark (`--skip-sequential --skip-external --skip-jax`) lands at **build 42.5 s / query 0.459 s** (build CPU 51.1 s, util 1.20×; query CPU 10.9 s, util 23.8×) while keeping `conflict_adj_csr_ms` sub‑0.01 ms and peak RSS ≈ 3.32 GiB.
+  - Added `--skip-sequential` / `--skip-external` toggles to `benchmarks.runtime_breakdown` so the heavy baselines can be disabled on large runs. With the latest in-kernel CSR compaction, the 32 k benchmark (skipping sequential/external, diagnostics off) lands at **build 42.5 s / query 0.459 s** (build CPU 51.1 s, util 1.20×; query CPU 10.9 s, util 23.8×) while keeping `conflict_adj_csr_ms` sub‑0.01 ms and peak RSS ≈ 3.32 GiB.
   - Directed scatter buffers stay inside the Numba kernel now, eliminating the per-batch 1 MiB Python copies; remaining allocations come from the kernel’s scratch arrays and are candidates for chunk pooling if we still want further trims.
 
-## Next Steps (2025-11-05 update) — completed
+## Status Snapshot — 2025-11-05
 
-- Collapsed `conflict_adj_filter_ms` by integrating radius pruning into the Numba builder (see “Radius pruning integration — 2025-11-05”).
-- MIS timing reconciliation and the 32 k benchmark remain on deck, tracked under “Next steps — 2025-11-05”.
+- **Completed recently**
+  - Conflict-graph CSR emission now fully resident in Numba; host CSR build is gone.
+  - Benchmark harness supports skipping sequential/external baselines for heavyweight runs.
+  - 32 k / 8 k diagnostics refreshed with the CSR improvements (see bullet above).
+
+- **Top TODOs**
+  1. Recycle / pool the temporary directed-edge scratch buffers inside `_scope_numba` to curb per-batch allocations on large inserts.
+  2. Revisit MIS timing at scale (Luby loop still serial) and prototype a parallel path once the conflict graph settles.
+  3. Re-measure the end-to-end pipeline with diagnostics enabled after buffer pooling to confirm no new hotspots emerge.
+
+- **Working hypotheses**
+  - Most of the remaining build gap vs GPBoost is MIS + traversal book-keeping; trimming scratch allocations should buy stability but not remove the gap entirely.
+  - Keeping diagnostics off by default is still the right trade-off; enable them in controlled runs only (they double the knn wall time at 32 k).
 
 ### Adjacency filter fusion sketch (retained for reference)
 

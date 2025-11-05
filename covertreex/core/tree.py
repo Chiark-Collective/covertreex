@@ -3,8 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable
 
-import jax
-import jax.numpy as jnp
+try:  # pragma: no cover - exercised via configuration
+    import jax  # type: ignore
+    import jax.numpy as jnp  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - depends on environment
+    jax = None  # type: ignore
+    jnp = None  # type: ignore
+import numpy as np
 
 from covertreex import config as cx_config
 from covertreex.logging import get_logger
@@ -33,13 +38,15 @@ class TreeBackend:
     asarray: Callable[..., ArrayLike]
     stack: Callable[..., ArrayLike]
     device_put: Callable[[ArrayLike], ArrayLike] = field(default=_device_put_default)
-    default_float: Any = field(default=jnp.float64)
-    default_int: Any = field(default=jnp.int32)
+    default_float: Any = field(default=np.float64)
+    default_int: Any = field(default=np.int32)
 
     @classmethod
     def jax(cls, *, precision: str = "float64") -> "TreeBackend":
         """Instantiate the canonical JAX backend."""
 
+        if jax is None or jnp is None:
+            raise RuntimeError("JAX backend requested but `jax` is not available.")
         default_float = {"float32": jnp.float32, "float64": jnp.float64}.get(precision)
         if default_float is None:
             raise ValueError(f"Unsupported precision '{precision}'.")
@@ -51,6 +58,23 @@ class TreeBackend:
             device_put=jax.device_put,
             default_float=default_float,
             default_int=jnp.int32,
+        )
+
+    @classmethod
+    def numpy(cls, *, precision: str = "float64") -> "TreeBackend":
+        """Instantiate a NumPy-backed implementation."""
+
+        default_float = {"float32": np.float32, "float64": np.float64}.get(precision)
+        if default_float is None:
+            raise ValueError(f"Unsupported precision '{precision}'.")
+        return cls(
+            name="numpy",
+            xp=np,
+            asarray=np.asarray,
+            stack=np.stack,
+            device_put=_device_put_default,
+            default_float=default_float,
+            default_int=np.int32,
         )
 
     def array(self, value: ArrayLike, *, dtype: Any | None = None) -> ArrayLike:
@@ -71,20 +95,42 @@ class TreeBackend:
     def to_numpy(self, value: ArrayLike) -> Any:
         """Convert to a host NumPy array for debugging/testing."""
 
-        if hasattr(value, "tolist"):  # Works for JAX DeviceArray
-            return self.xp.asarray(value).tolist()
-        return value
+        if jax is not None:
+            try:
+                return np.asarray(jax.device_get(value))
+            except Exception:
+                pass
+        return np.asarray(value)
 
 
 def _init_default_backend() -> TreeBackend:
     runtime = cx_config.runtime_config()
-    if runtime.backend != "jax":
-        raise NotImplementedError(f"Backend '{runtime.backend}' is not supported yet.")
-    return TreeBackend.jax(precision=runtime.precision)
+    if runtime.backend == "jax":
+        return TreeBackend.jax(precision=runtime.precision)
+    if runtime.backend == "numpy":
+        return TreeBackend.numpy(precision=runtime.precision)
+    raise NotImplementedError(f"Backend '{runtime.backend}' is not supported yet.")
 
 
 DEFAULT_BACKEND = _init_default_backend()
 LOGGER = get_logger("core.tree")
+
+
+def compute_level_offsets(backend: TreeBackend, top_levels: ArrayLike) -> ArrayLike:
+    """Return descending level offsets compatible with the compressed layout."""
+
+    xp = backend.xp
+    levels = backend.asarray(top_levels, dtype=backend.default_int)
+    if levels.size == 0:
+        return backend.asarray([0], dtype=backend.default_int)
+    levels = xp.where(levels < 0, 0, levels)
+    max_level = int(xp.max(levels))
+    counts = xp.bincount(levels, minlength=max_level + 1)
+    counts_desc = counts[::-1]
+    zero = xp.zeros((1,), dtype=backend.default_int)
+    cumulative = xp.cumsum(counts_desc, dtype=backend.default_int)
+    offsets = xp.concatenate([zero, cumulative], axis=0)
+    return backend.asarray(offsets, dtype=backend.default_int)
 
 
 @dataclass(frozen=True)

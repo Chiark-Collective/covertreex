@@ -26,6 +26,13 @@ dev = [
   "pytest-benchmark>=4.0.0",
   "rich>=13.7"
 ]
+baseline = [
+  "covertree>=1.0.0",
+  "scipy>=1.11"
+]
+viz = [
+  "matplotlib>=3.8"
+]
 
 [project.urls]
 homepage = "https://github.com/chiark/cover-tree"

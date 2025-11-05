@@ -49,6 +49,13 @@ def test_traversal_assigns_nearest_parent():
         tuple(indices[indptr[i] : indptr[i + 1]]) for i in range(len(result.conflict_scopes))
     ]
     assert reconstructed == list(result.conflict_scopes)
+    assert result.timings.pairwise_seconds >= 0.0
+    assert result.timings.mask_seconds >= 0.0
+    assert result.timings.semisort_seconds >= 0.0
+    assert result.timings.chain_seconds >= 0.0
+    assert result.timings.nonzero_seconds >= 0.0
+    assert result.timings.sort_seconds >= 0.0
+    assert result.timings.assemble_seconds >= 0.0
 
 
 def test_traversal_uses_tree_backend_by_default():
@@ -64,6 +71,8 @@ def test_traversal_uses_tree_backend_by_default():
     ]
     assert reconstructed == list(result.conflict_scopes)
     assert result.scope_indptr.tolist() == [0, len(result.conflict_scopes[0])]
+    assert result.timings.pairwise_seconds >= 0.0
+    assert result.timings.chain_seconds >= 0.0
 
 
 def test_traversal_handles_empty_tree():
@@ -77,6 +86,8 @@ def test_traversal_handles_empty_tree():
     assert result.conflict_scopes == ((),)
     assert result.scope_indptr.tolist() == [0, 0]
     assert result.scope_indices.shape[0] == 0
+    assert result.timings.pairwise_seconds == 0.0
+    assert result.timings.chain_seconds == 0.0
 
 
 def test_traversal_semisorts_scopes_by_level():
@@ -113,3 +124,4 @@ def test_traversal_semisorts_scopes_by_level():
     indices = result.scope_indices.tolist()
     assert indptr == [0, 3]
     assert indices == [1, 2, 0]
+    assert result.timings.pairwise_seconds >= 0.0

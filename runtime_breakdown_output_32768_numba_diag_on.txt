@@ -1,0 +1,1 @@
+pcct | build=65.6543s queries=2048 k=16 time=8.3455s latency=4.0749ms throughput=245.4 q/s
