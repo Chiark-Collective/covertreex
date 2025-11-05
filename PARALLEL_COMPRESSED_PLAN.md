@@ -62,7 +62,7 @@ Deliver a reusable “parallel compressed cover tree” (PCCT) library that comb
    - Implement `traverse_collect_scopes` (vectorised over batch points).
    - Normalise ragged scopes with semisort/group-by utilities.
    - Tests: compare to sequential compressed insertion decisions.
-   - Status: traversal emits semisorted scopes + CSR buffers (`scope_indptr`, `scope_indices`) with cached-radius floor and `Next` chain expansion. Next: integrate compressed-level pruning heuristics for batch redistribution.
+   - Status: traversal emits semisorted scopes + CSR buffers (`scope_indptr`, `scope_indices`) with cached-radius floor and `Next` chain expansion, and these buffers now feed the batch-insert redistribution path exercised in `tests/integration/test_parallel_update.py`.
 
 4. **Conflict graph**
    - Build CSR from `Π_{P_i} ∩ L_k` with distance filtering (`<= 2^k`).
@@ -72,27 +72,221 @@ Deliver a reusable “parallel compressed cover tree” (PCCT) library that comb
 
 5. **MIS kernels**
    - Implement Luby MIS with `jax.numpy`.
-   - Provide Numba-accelerated version sharing the same interface.
-   - Tests: correctness (independence + maximality) on random graphs.
-   - Status: seeded Luby MIS implemented with JAX primitives; follow-up: expose Numba path + rng batching for async rebuild.
+   - Provide Numba-accelerated version sharing the same interface, gated by runtime config.
+   - Tests: correctness (independence + maximality) on random graphs; parity checks across backends.
+   - Status: JAX and Numba MIS paths now share the same entrypoint (`run_mis`), seed batching plumbed via `batch_mis_seeds`, and `tests/test_mis.py` toggles `COVERTREEX_ENABLE_NUMBA` to assert parity.
 
 6. **Batch insert (Alg. 4)**
    - Prefix-doubling grouping, per-level MIS loop, persistence-backed updates.
    - Redistribution: update `(P_j, ℓ_j)` via ceil-log₂ distance to new anchors.
    - Tests: invariants, distance counts, parity with sequential compressed build.
-   - Status: Level offsets now regenerated after inserts with copy-on-write coverage. Child adjacency now maintained (per-parent head pointer with singly linked list via `next_cache`), dominated points reattach to MIS-selected anchors via annulus neighborhoods, and prefix-doubling orchestration is available for randomized batches. Outstanding: integrate per-level semisort/annulus pruning with conflict-graph construction and replace host-side separation fallbacks with analytic guarantees.
+   - Status: Level offsets now regenerate after inserts with copy-on-write coverage; child adjacency maintenance (`children`/`next_cache`) and per-level semisort redistribution are validated in `tests/integration/test_parallel_update.py`, with dominated points reattached via analytic separation checks and no host-side fallbacks.
 
 7. **Batch delete (Alg. 5)**
    - Implement uncovered-set processing, MIS promotion, new-root creation.
    - Tests similar to batch insert; verify node counts and invariants.
+   - Status: Prefix-doubling delete path promotes uncovered nodes, reattaches descendants, and preserves prior tree versions; covered in `tests/integration/test_parallel_delete.py`.
 
 8. **k-NN queries**
    - Implement corrected CCT k-NN loop with cached `S_i` and `Next`.
    - Tests: compare against brute-force distances; handle ties deterministically.
+   - Status: Priority-queue traversal with cached radii is live; `tests/test_knn.py` locks deterministic tie handling, batching semantics, and dense fallback parity.
 
 9. **Diagnostics & benchmarks**
 - Add logging hooks (conflict edges, MIS iterations, cache hit rates).
 - Create benchmark scripts for insert/delete throughput and query latency.
+  - Added `benchmarks/batch_ops.py` and `benchmarks/queries.py` (2025-11-03).
+  - Recommended quick-run settings (finish <1 min on dev GPU):
+    - `uv run python -m benchmarks.batch_ops insert --dimension 8 --batch-size 64 --batches 4 --seed 42`
+    - `uv run python -m benchmarks.batch_ops delete --dimension 8 --batch-size 64 --batches 4 --seed 42 --bootstrap-batches 8`
+    - `uv run python -m benchmarks.queries --dimension 8 --tree-points 2048 --batch-size 128 --queries 256 --k 8 --seed 42`
+  - Sample outputs (Nov 3 build, A100-40G, CUDA13 wheel):
+    - Insert throughput ≈ 45 pts/s; delete ≈ 33 pts/s; k-NN latency ≈ 6.2 ms/query.
+  - Status: Benchmarks wired into the CLI with smoke coverage (`tests/test_benchmarks.py`) and quick-run presets documented here. Batch/knn paths now emit resource usage telemetry (wall time, CPU, RSS, GPU memory) via the shared diagnostics logger for evidence-based tuning (toggle with `COVERTREEX_ENABLE_DIAGNOSTICS`). The k-NN CLI exposes `--baseline {sequential|external|both}` for side-by-side comparisons against the in-repo baseline tree and the optional `covertree` adapter (install via `pip install -e '.[baseline]'`). Recent benchmark snapshots (dimension = 8):
+    - 2 048 tree pts, 512 queries, k = 8: PCCT build ≈ 58.8 s, query throughput ≈ 214 q/s (4.67 ms/query); sequential baseline ≈ 21 000 q/s; external CoverTree ≈ 409 q/s (pre-GPBoost snapshot).
+- 2025-11-04: Added GPBoost-style Numba baseline. With logging suppressed (`COVERTREEX_LOG_LEVEL=warning`) the quick run reports PCCT build 25.90 s / query 2.12 s (241 q/s), sequential 2.21 s / 0.026 s (19 615 q/s), GPBoost baseline 0.49 s / 0.614 s (834 q/s), external 1.04 s / 1.26 s (406 q/s). Command: `UV_CACHE_DIR=$PWD/.uv-cache COVERTREEX_LOG_LEVEL=warning uv run python -m benchmarks.queries --dimension 8 --tree-points 2048 --batch-size 128 --queries 512 --k 8 --seed 42 --baseline all`.
+- 2025-11-04 (later): Memoised child chains and distance reuse in the PCCT k-NN traversal (`queries/knn.py`). This removes repeated chain decoding during heap walks and caches per-node distances across heap pushes. Quick-run query latency currently ~2.29 s (223 q/s); the structural change sets the stage for plugging in a residual-correlation provider and a dense fallback threshold so the traversal behaves more like the GPBoost baseline.
+    - 8 192 tree pts, 1 024 queries, k = 16: PCCT build ≈ 1 173 s, query throughput ≈ 41 q/s; sequential ≈ 5 300 q/s; external ≈ 125 q/s.
+    - Diagnostics off (toggle disabled) yields ~1–2% change, so current overhead is negligible relative to compute cost. These results underscore that the present PCCT path is still 10–100× slower than baselines, making profiling of conflict-graph/MIS orchestration the next priority.
+
+### Immediate Optimisation Actions (2025-11-04)
+
+1. **Segmented conflict-graph adjacency:** Rebuild `build_conflict_graph` around the traversal semisort buffers so we emit candidate pairs per scope, dedupe once, and build CSR directly (no dense membership matmul). Keep the entire pass on-device and reuse cached pairwise distances so the per-batch cost scales with actual conflicts, not `batch_size²`. Current prototype still spends most time shuttling data to the host and re-instantiating pairwise/radius buffers (`build ≈ 166 s` vs. 24.5 s), so we need to eliminate those host round-trips before enabling it by default.
+2. **Degenerate-batch fast path:** When MIS would leave ≤1 survivor (e.g. dominated prefixes), bypass the conflict-graph/MIS pipeline and fall back to the sequential insertion kernel. This prevents the 16×128 quick-run from paying the full O(b²) price for batches that collapse anyway.
+3. **Validation cadence:** After wiring the segmented path and fast-path guard, rerun the 2 048×512 benchmark with diagnostics on/off, regenerate `runtime_breakdown.png`, then attempt the 8 192×1 024 scenario. Keep the existing dense builder behind a flag until the new path is proven faster.
+
+#### Benchmark Snapshot — 2025-11-04 (quick run: 2 048 tree pts, 512 queries, k=8)
+
+- Diagnostics enabled (`COVERTREEX_ENABLE_DIAGNOSTICS=1`): build 46.69 s; query batch 2.09 s → 245.2 q/s (4.08 ms/query). Per-batch timings: scope grouping ≈1.72 s, adjacency ≈0.18 s, MIS ≈0.20 s, annulus ≈3 ms.
+- Diagnostics disabled (`COVERTREEX_ENABLE_DIAGNOSTICS=0`): build 46.31 s; query batch 2.08 s → 245.6 q/s. Logging overhead is now <0.4 s on the build and <0.01 s on queries.
+- Conflict-graph assembly now averages ≈1.94 s per batch (scope ≈78 %, adjacency ≈9 %, annulus ≈0.2 %), down from the previous 3.13 s snapshot. The total build shrank by ~12.8 s versus the earlier 60.13 s run while maintaining the same prefix-batch structure (16×128).
+- Tiered breakdowns are captured in `runtime_breakdown.png` (JAX vs Numba vs sequential). Numba MIS still builds in ≈2.8 s with identical query latency, so the gap is dominated by scope-group aggregation.
+- Next milestone: push scope grouping below 0.8 s/batch, then re-run the 8 192-point scenario to confirm the improvements hold at larger scales.
+###### Proposed scope-group fusion (design sketch)
+
+1. Replace the current dense scope mask with segmented buffers derived from the grouped traversal indices:
+   - Compute `group_counts = group_indptr[1:] - group_indptr[:-1]` and `group_ids = xp.repeat(xp.arange(num_groups), group_counts)` directly on the backend.
+   - Build a padded `(num_groups, max_group)` table with `jax.lax.scatter` (or equivalent) so each row holds the member indices contiguously; retain a boolean mask for valid columns. This avoids repeated host conversions while giving us a compact representation for downstream operations.
+2. Generate adjacency edges via segmented cartesian products without forming a full `batch×batch` matrix:
+   - For each group, broadcast the row to `(m, m)` and drop the diagonal by masking with the validity grid. Implement this in bulk by broadcasting the padded table and mask to `(num_groups, max_group, max_group)`, applying the mask, and slicing with `xp.reshape` so the result stays on-device. Because `max_group ≤ batch_size` (128 in the benchmark), the temporary tensor remains tractable.
+   - Alternatively (preferred if memory spikes), derive directed edges using per-member repeats: `sources = xp.repeat(values, counts-1)`; `targets` assembled by rotating the padded table and using masked gathers so each source receives the remaining members. Both approaches operate on backend primitives and eliminate per-group Python loops.
+3. Fold the annulus binning into the same segmented pass: reuse the padded table and group masks to accumulate annulus metadata, so we touch the grouped buffers only once.
+4. Once adjacency indices are produced, reuse the existing CSR builder (lexsort + bincount) and feed the results into MIS. Profile the new `group_by_int` + fusion path to ensure scope grouping time drops below the ≤1 s/batch target before moving to MIS tweaks.
+
+#### Profiling Notes — 2025-11-04
+
+- Added `BatchInsertTimings` instrumentation so `log_operation` now reports `traversal_ms`, `conflict_graph_ms`, and `mis_ms` per prefix batch. Latest run (same benchmark, diagnostics enabled) highlights traversal as the dominant cost: mean traversal 5.53 s (median 4.54 s, max 13.4 s) versus conflict-graph 1.33 s (median 1.24 s) and MIS 0.39 s (median 0.35 s). Aggregated over 16 batches, traversal consumed 88.5 s of the 135 s build (65 %), conflict graph 21.3 s (16 %), and MIS 6.3 s (5 %).
+- The inflated wall times relative to the earlier snapshot stem from the device being shared; GPU utilisation stayed flat while CPU user+system scaled with traversal_ms growth, confirming that host-side traversal/scoping is the first optimisation target.
+- Next action: spike `traverse_collect_scopes` to identify why per-batch traversal cost increases with batch index (e.g., parent cache misses, redundant distance recomputation, or semisort buffer churn) before touching MIS or CSR code.
+- Instrumented `TraversalResult` with `TraversalTimings` to expose `pairwise`, `mask`, and `semisort` slices. On the 48.97 s build, semisort (Python-side scope assembly) alone consumed 20.7 s, versus 2.7 s for mask formation and 1.4 s for pairwise distance evaluation; conflict-graph construction added 11.6 s and MIS only 3.4 s. These numbers confirm that the semisort/chain stitching path is the highest-leverage optimisation target.
+- Profiling confirms MIS is secondary for now: even a 2× speedup would save <2 s on this workload. Focus on eliminating Python looping in `semisort_scope`, reusing chain caches, and pushing scope aggregation to the backend before revisiting MIS kernels.
+
+#### Traversal Optimisation Results — 2025-11-04
+
+- Reworked `traverse_collect_scopes` to keep data on-device longer, convert `next_cache` once per batch, and materialise conflict scopes via vectorised `np.nonzero`/`lexsort` without per-row Python loops. Chain expansion now uses a cached numpy view of `next_cache`, removing thousands of device round-trips.
+- New timing fields (`traversal_chain_ms`, `traversal_nonzero_ms`, `traversal_sort_ms`, `traversal_assemble_ms`) reveal the chain splice is now O(1 ms) per batch, nonzero/sort/assemble stay below 5 ms, and overall semisort time dropped from ~20.7 s to <0.3 s across the full build.
+- Quick benchmark rerun (2 048 tree pts / 512 queries / k=8, diagnostics on, sequential baseline enabled) reports:
+  - PCCT build 28.27 s (down from 45.95 s) and query batch 3.12 s (164 q/s, unchanged). Sequential baseline unaffected (build 2.17 s, 21 239 q/s).
+  - Per-batch traversal metrics: `traversal_semisort_ms` now 7–28 ms, `traversal_chain_ms` ≈0.2–4 ms, while conflict-graph construction remains 0.3–1.4 s and MIS ≈0.19–0.21 s.
+  - Overall traversal contribution fell to 4.0 s per build (14 %), leaving conflict-graph assembly (~19 s, 67 %) and pairwise mask formation (~3.1 s, 11 %) as the dominant hotspots.
+- Next optimisation focus: rewrite conflict-graph construction (`build_conflict_graph`) to avoid Python adjacency assembly (currently ~1 s per batch) and reuse pairwise distance work, then reassess MIS once conflict graph is <25 % of wall time.
+
+#### Visual Diagnostics
+
+- Added `benchmarks/runtime_breakdown.py`, a CLI that runs the quick benchmark for PCCT (JAX + optional Numba), the in-repo sequential baseline, and the external `covertree` baseline (when installed) and produces a stacked runtime bar chart (`pairwise`, `mask`, `next_chain`, `nonzero/sort/assemble`, `conflict_graph`, `mis`, `other`). Enable with:
+  - `uv run python -m benchmarks.runtime_breakdown --output runtime_breakdown.png`
+  - Install plotting deps via `pip install -e '.[viz]'` (wraps `matplotlib>=3.8`). Pass `--skip-numba` or `--skip-external` if the corresponding backends are unavailable.
+- The CLI also prints per-implementation build/query timings and honours the existing `--dimension/--tree-points/...` knobs for consistency with the textual diagnostics.
+
+#### Conflict-Graph Optimisation — 2025-11-04
+
+- Instrumented `build_conflict_graph` with `ConflictGraphTimings` (pairwise, scope grouping, adjacency, annulus) and rewired the adjacency builder: the per-scope membership is now assembled into a CSR-like mask, and clique formation is handled via boolean matrix products instead of Python set churn. This keeps all heavy lifting in numpy/JAX and eliminates the quadratic Python loops.
+- Earlier pass (rolled back before the latest fusion) clocked an 18.17 s build (diagnostics on) with query time 3.11 s. Aggregate timings for that version:
+  - Traversal: 4.28 s (≈23 %), conflict-graph: 1.33 s (≈7 %), MIS: 3.50 s (≈19 %), everything else: 9.06 s.
+  - Conflict-graph sub-breakdown averages: pairwise 7.2 ms, scope grouping 20.3 ms, adjacency 12.2 ms, annulus 10.9 ms — trimming adjacency time from ~3.6 s per batch to ~12 ms.
+- Batch logs now expose `conflict_pairwise_ms`, `conflict_scope_group_ms`, `conflict_adjacency_ms`, and `conflict_annulus_ms`, making it easy to monitor any regressions as we iterate (Numba toggle included).
+- In that iteration, conflict-graph costs fell below 10 % of the build, shifting the hotspot back to traversal pairwise/mask formation and MIS orchestration; those notes remain relevant once we restore the faster adjacency path.
+- 2025-11-04 (late) — `group_by_int` bypass & device-native scope membership: replaced the host-side pair-id accumulator with an on-device scatter that marks batch × node membership directly into a backend boolean matrix. Conflict adjacency now comes from an integer matmul + `nonzero`, keeping every step JAX-native. The same quick benchmark (`COVERTREEX_ENABLE_DIAGNOSTICS=1`, 2 048 tree pts, 512 queries, k=8) finishes in **24.51 s build / 2.07 s query** (247.7 q/s). Post-warmup batch means: scope grouping **0.16 s**, adjacency **0.24 s**, annulus 2.9 ms, MIS 0.19 s. Overall conflict-graph construction dropped to ≈0.43 s per batch, halving total build time relative to the previous 46.69 s snapshot. Diagnostics show the worst-case scope batch (first dominated run) at 0.25 s, comfortably below the 0.8 s target.
+- Runtime breakdown snapshot after the refactor (diagnostics on, 2 048 / 512 / k=8, CPU only): **PCCT (Numba)** build 10.34 s / query 0.10 s, **Sequential baseline** 2.22 s / 0.024 s, **GPBoost** 0.31 s / 0.57 s, **External CoverTree** 1.10 s / 1.22 s.
+
+###### Scope/adjacency outlook — 2025-11-04
+
+- Dense membership uses the full tree column width; on 2 048-point trees this is cheap, but we should validate 8 192- and 32 768-point builds to ensure matmul cost scales acceptably. If it does not, fall back to a compressed column mapping (unique node ids per batch) before the larger benchmarks.
+- With scope grouping no longer dominating, adjacency now sits around 0.23–0.28 s. If we need further reductions, consider switching to a tiled matmul or chunked batch processing, but defer until larger-scale profiling justifies it.
+- Next actions: rerun the diagnostics-off quick benchmark, regenerate `runtime_breakdown.png` with the new timings (JAX vs Numba vs sequential), and schedule the 8 192×1 024, k=16 benchmark to confirm the improvements persist at higher scales.
+
+###### Radius pruning integration — 2025-11-05
+
+- Folded the radius check into `build_conflict_graph_numba_dense`, so the Numba kernel now prunes candidates while expanding pairs and returns both surviving and candidate counts (`candidate_pairs`). `ConflictGraphTimings`/logging gained `conflict_adj_candidates` to expose the ratio.
+- Quick benchmark (diagnostics = 1, 2 048 × 512, k = 8, `enable_numba=1`) now reports `conflict_adj_filter_ms=0` on dominated batches. The cold-start batch still pays ~2.4 s for Numba compilation and ~0.59 s in CSR sorting, but steady-state adjacency drops to 2.5–3.4 ms with scatter ≤0.7 ms.
+- Regenerated `runtime_breakdown.png` and refreshed `docs/CORE_IMPLEMENTATIONS.md` and `AUDIT.md` with the filtered kernel. Observed that the CSR argsort dominates the remaining adjacency time and should be the next optimisation target before scaling past 8 k.
+
+###### Residual metric plumbing — 2025-11-05
+
+- Added `COVERTREEX_METRIC` to the runtime config (default `euclidean`) and taught `get_metric()` to honour it. Traversal/conflict-graph paths now resolve the active metric on demand so swapping metrics no longer requires re-imports.
+- Registered a `residual_correlation` metric stub in the registry and exposed `configure_residual_metric` / `reset_residual_metric` so the downstream Vecchia code can wire its residual-correlation provider without touching internal modules. Until configured, the wrapper raises with a descriptive error to avoid silent fallbacks.
+- Updated the metric tests to cover the new hooks and document the expected usage pattern. CLI + docs will pick this up once we publish the Vecchia provider sketch.
+
+###### CPU-only configuration — 2025-11-05
+
+- Default backend now points to the NumPy implementation; JAX is no longer initialised unless explicitly requested. `TreeBackend.numpy()` feeds the entire pipeline, and persistence helpers fall back to host-side writes when `.at[]` is unavailable.
+- Runtime warnings about missing CPU devices disappeared: `_resolve_jax_devices` is bypassed unless the user opts back into the JAX backend. Docs and README call out the CPU-first focus for the optimisation sprint.
+- Benchmarks/diagnostics generation (`benchmarks.queries`, `benchmarks.runtime_breakdown`) no longer rely on `jax.random`; datasets are sampled with NumPy RNGs so we avoid accidental JAX dependencies during runs.
+
+CPU benchmark highlights (diagnostics on unless stated):
+
+| Workload | PCCT build/query | Sequential | GPBoost | External |
+|----------|-----------------|------------|---------|----------|
+| 2 048 pts / 512 queries / k=8 | 0.382 s / 0.098 s (5 216 q/s) | 2.25 s / 0.024 s (21 001 q/s) | 0.292 s / 0.519 s (987 q/s) | 1.00 s / 1.22 s (421 q/s) |
+| 8 192 pts / 1 024 queries / k=16 | 4.03 s / 0.934 s (1 096 q/s) | 33.65 s / 0.192 s (5 327 q/s) | 0.569 s / 3.35 s (306 q/s) | 14.14 s / 8.40 s (122 q/s) |
+| 32 768 pts / 2 048 queries / k=16 | 66.06 s / 8.28 s (248 q/s) | — | 2.41 s / 20.05 s (102 q/s) | — |
+
+Latest logs: `runtime_breakdown_output_2048_numba_baselines.txt`, `runtime_breakdown_output_8192_numba_baselines.txt`, and `runtime_breakdown_output_32768_numba_gpboost.txt` alongside the diagnostics-on/off PCCT traces. The first dominated batch still pays the Numba compilation penalty (~20 ms build, <0.2 ms query warm-up), after which steady-state adjacency per batch holds at 12–18 ms.
+
+###### Next steps — 2025-11-05
+
+1. Trim the remaining `conflict_adj_scatter_ms` hotspot (12–18 ms on dominated batches) by chunking the directed pair expansion or fusing the scatter with the CSR write.
+2. Add regression coverage for the NumPy backend (config defaults, persistence updates) and ensure the test suite exercises both NumPy-only and NumPy+Numba paths.
+3. Extend the runtime breakdown CLI to emit warm-up vs steady-state metrics directly (CSV artefact) so we can track improvements as we iterate on the adjacency builder.
+
+###### Follow-up — 2025-11-05 afternoon
+
+- Regression coverage now enforces the NumPy backend path (`tests/test_config.py`, `tests/test_persistence.py`) and keeps the benchmark smoke tests working against both sequential and GPBoost baselines.
+- `benchmarks.runtime_breakdown` learned `--csv-output`, recording build/query warm-up versus steady-state timings; docs point to the new artefact.
+- Tried tightening `COVERTREEX_SCOPE_CHUNK_TARGET` (65 536 → 8 192) to shave `conflict_adj_scatter_ms`, but dominated batches still log ~13 ms. The bottleneck is the directed pair expansion itself; next attempt should focus on per-node offsets + compaction instead of chunk sizing alone.
+
+##### Backend-aligned conflict graph (2025-11-04)
+
+- Reworked `group_by_int` and `build_conflict_graph` to stay entirely within the active backend (`backend.xp`), keeping CSR buffers on-device while retaining the existing timing split.
+- Scope co-occurrence, separation checks, and annulus binning now use backend primitives (`xp.repeat`, `xp.matmul`, `xp.nonzero`, `xp.bincount`) with `_block_until_ready` barriers so the recorded timings reflect device execution.
+- Next up: rerun the 2 048×512 benchmark (diagnostics on/off) to confirm the on-device refactor preserves the recent speedups and refresh the runtime breakdown plots if the timing mix changes.
+
+##### Numba lookup migration sketch — 2025-11-04
+
+- Current query path (`queries/knn.py`) always materialises DeviceArrays via `backend.to_numpy` before performing a Python/NumPy traversal. Even when `COVERTREEX_ENABLE_NUMBA=1`, the hot loop still lives in Python, so MIS sees a 10× drop while queries remain ≈2.07 s.
+- Goal: introduce a Numba-native lookup pipeline so the `enable_numba` toggle covers *both* MIS and k-NN. That prevents JAX from being a hard runtime dependency for lookup-heavy workloads and should bring CPU throughput closer to the sequential baseline (≤50 ms per 512-query batch).
+- Proposed structure:
+  1. **Tree materialisation helper**: a lightweight view (`NumbaTreeView`) holding `points`, `si_cache`, `children`, `next_cache`, and `root_ids` as `np.ndarray` buffers (int32/float64). It will be produced lazily via `tree.materialise_for_numba()` or a helper in `queries._numba_view`.
+  2. **JIT kernels**: add `covertreex/queries/_knn_numba.py` with `@njit(cache=True)` helpers for batched Euclidean distances, candidate pruning, and heap maintenance. Start with a dense distance path (lexsorted on `(dist^2, index)` to keep deterministic ties) then incrementally port the cover-tree walk (using `numba.typed.List` for heaps) once validated.
+  3. **Dispatcher**: inside `queries.knn`, gate on `runtime.enable_numba and NUMBA_QUERY_AVAILABLE`. If the Numba kernels are ready, reuse the cached view and skip the Python walker; otherwise, fall back to today’s code. Metadata logging stays unchanged.
+  4. **Config surface**: reuse `COVERTREEX_ENABLE_NUMBA` initially; if we need finer control later, introduce `COVERTREEX_ENABLE_NUMBA_LOOKUP`.
+- Testing plan:
+  - Mirror existing tie-handling, shape, and multi-query tests under a `numba_enabled` context (skip if Numba missing).
+  - Add regression timing harness in `benchmarks/runtime_breakdown.py` to dump Numba build/query numbers explicitly once the kernels land.
+- Open questions before implementation: cache invalidation strategy for the host mirror (likely keyed by `tree.stats.num_batches`), and whether we need async-safe guards when accessing the cached buffers from concurrent threads.
+- Reference sketches: the notebook notes (`notes/cover_tree_parallel_paper_sketch.md`, `notes/parallel_compressed_cover_tree.md`) already contain Numba-based cover-tree walkers and brute-force fallbacks; adapt their priority-queue traversal and deterministic tie-breaking when porting Algorithm F.2 to `@njit`.
+- 2025-11-04 (later) — landed the first Numba lookup path: `queries.knn` now materialises a `NumbaTreeView` and delegates to `_knn_numba` when `COVERTREEX_ENABLE_NUMBA=1`. The initial kernel uses a dense distance pass with deterministic tie-breaking; quick benchmark (`diagnostics=1`, 2 048 / 512 / k=8, external baseline skipped) reports **PCCT (Numba)** build 1.70 s / query **30 ms**, while **PCCT (JAX)** remains 25.82 s / 2.10 s and the sequential baseline 2.22 s / 24 ms.
+- 2025-11-04 (evening) — swapped the dense pass for an `@njit` cover-tree walk mirroring Algorithm F.2. Follow-up work introduced a Numba-compatible binary heap, cached node distances, and precomputed child lists, bringing quick-run latency down to **118 ms** (build 1.60 s). The prototype still trails the earlier 30 ms dense placeholder but already beats the external `covertree` baseline (≈1.18 s query) by ~10×.
+- 2025-11-05 — Eliminated the global `within` mask by filtering candidate edges with squared distances (`covertreex/algo/conflict_graph.py`), and gated the device→host conversions so the dense path no longer materialises `pairwise_np`/`radii_np`. Quick benchmark snapshots:
+  - Diagnostics **on**: build **20.66 s**, query **2.28 s** (512 queries, k=8, throughput 224 q/s).
+  - Diagnostics **off**: build **20.31 s**, query **2.28 s** (throughput 225 q/s).
+  - Medium benchmark (8 192 tree pts / 1 024 queries / k=16, diagnostics on): build **45.84 s**, query **18.35 s** (55.8 q/s). Scope grouping still dominates conflict-graph cost (~150–250 ms on dominated batches), while annulus settles near 3 ms and adjacency stays <20 ms.
+- 2025-11-05 (late) — Replaced the dense membership matmul with a host-side CSR grouping of `scope_indices` → query ids, padding memberships to a rectangular matrix so we can deduplicate identical scopes via `np.unique`. Quick benchmark now lands at **20.31 s build / 2.28 s query** with diagnostics off (20.66 s / 2.28 s with diagnostics on), and `conflict_adj_pairs` collapses to 65 280 even on dominated batches (`conflict_adj_max_group=256`). The 8 192×1 024 × k=16 benchmark completes in **45.84 s build / 18.35 s query**; the remaining hotspot is `conflict_scope_group_ms` (150–250 ms) plus MIS (~195 ms). We now emit `adjacency_total_pairs` and `adjacency_max_group_size` in `ConflictGraphTimings`, and the diagnostic logger forwards them as `conflict_adj_pairs` / `conflict_adj_max_group`.
+- 2025-11-05 (night) — Landed a Numba scope-adjacency builder with segment-level hashing before clique expansion (`covertreex/algo/_scope_numba.py`) and plumbed it into the dense conflict-graph path when `COVERTREEX_ENABLE_NUMBA=1`. The helper reuses counting-sort grouping, dedupes identical memberships upfront, and returns compact int32 edge lists; the dense builder now falls back to this path automatically. `ConflictGraphTimings` gained `scope_bytes_{d2h,h2d}`, `scope_groups`, `scope_groups_unique`, `scope_domination_ratio`, and `mis_seconds` (placeholder) so logs capture data movement and domination ratios. Exposed `COVERTREEX_SCOPE_SEGMENT_DEDUP` to toggle segment dedupe end-to-end and teach config/tests about it.
+- 2025-11-05 (late, Numba focus) — Re-ran the quick benchmark (2 048×512×k=8) with the Numba path only. Diagnostics **on** now reports **build 25.45 s / query 135 ms** (0.27 ms latency, 3.77 k q/s) while diagnostics **off** drops query latency to **0.22 ms** (4.51 k q/s) at roughly the same build time (25.34 s). Dominated batches still show `conflict_scope_group_ms` ≈ 290–305 ms and MIS stays sub-millisecond. Logging now emits `conflict_scope_*` byte/group counters so the remaining hotspot is plainly attributed to the CPU scope grouping.
+- 2025-11-05 (night, iteration) — Removed per-segment sorting in the Numba builder and enabled parallel hashing/expansion. Quick run remains **build 25.4 s / query 0.136 s** with dominated batches now avoiding the initial 3 s compile stall; steady-state `conflict_scope_group_ms` sits at ~150 ms and `conflict_adj_scatter_ms` drops below 2 ms after warm-up. The 8 192×1 024×k=16 run clocks in at **build 58.2 s / query 0.99 s**, reporting `conflict_scope_group_ms` in the 160–270 ms range with `scope_domination_ratio` ≈ 0, underscoring the need for a faster scope dedupe path.
+- 2025-11-05 (late, chunked scope grouping) — Added a chunked Numba scope-grouping pipeline controlled by `COVERTREEX_SCOPE_CHUNK_TARGET` (default 65 536 memberships), sorted memberships in-place before hashing, and duplicated directed edges on-device so adjacency stays symmetric without host dedupe. Dominated batches now report `conflict_scope_group_ms ≈ 0.12–0.15 ms` (down from ~150 ms) while `conflict_adj_filter_ms` remains the dominant cost (~320 ms for the worst batch). Quick benchmark (2 048×512×k=8) lands at **build 14.61 s / query 0.123 s** with diagnostics on and **14.48 s / 0.102 s** with diagnostics off. The 8 192×1 024×k=16 run finishes in **32.10 s / 0.951 s** (diagnostics on) and **31.67 s / 0.936 s** (diagnostics off). Regenerated `runtime_breakdown.png` with the new timings and recorded `conflict_scope_groups_unique=1` across dominated batches, confirming segment dedupe works end-to-end.
+
+###### Parallelisation effectiveness audit — 2025-11-05 evening
+
+- **Instrumentation:** `benchmarks/runtime_breakdown.py` now snapshots process CPU time and RSS before/after each build/query run, emitting the results in the console and the CSV (`build_cpu_seconds`, `build_cpu_utilisation`, `build_rss_delta_bytes`, …). Updated `tests/test_benchmarks.py::test_runtime_breakdown_csv_output` ensures the new columns stay wired.
+- **Theoretical takeaways:**
+  - Build pipeline parallelism is concentrated in two places: the vectorised pairwise distance kernel (NumPy/BLAS can saturate multiple cores) and the Numba scope grouping helpers (`_sort_segments_inplace`, `_hash_segments`, `_expand_pairs` use `nb.prange`). The remaining stages—chunked pair expansion (`_expand_pairs_directed_into`), MIS (`_run_mis_numba_impl`), and redistribution—are still serial, limiting headroom even when the parallel segments scale well.
+  - Traversal still bounces through NumPy for mask assembly and Next-chain stitching, so per-point work is effectively single-threaded. Expect <3× speedups until traversal is migrated to a parallel NumPy/Numba hybrid.
+  - The Numba k-NN path caches distances aggressively but `_knn_batch_cover` iterates queries sequentially; we currently only exploit vectorisation within a single query. A straightforward `nb.prange` over queries (with per-thread heaps) should unlock near-linear scaling for large batches.
+  - Memory pressure during build is dominated by materialising the `NumbaTreeView` (children lists + caches). Peak RSS climbs by ~85 MB regardless of backend because the snapshots hold onto that view for subsequent queries.
+- **Empirical snapshot (CPU, dim = 8, 2 048 insertions / 512 queries / k = 8, diagnostics off, warm compilation amortised):**
+
+  | Implementation     | Build wall (s) | Build CPU (s) | Build util (×) | Build ΔRSS | Query wall (s) | Query CPU (s) | Query util (×) | Query ΔRSS |
+  |--------------------|----------------|---------------|----------------|------------|----------------|---------------|----------------|------------|
+  | PCCT (Numba)       | 0.350          | 0.795         | 2.27           | 85.19MB    | 0.092          | 0.092         | 1.00           | 0B         |
+  | Sequential baseline| 2.360          | 2.320         | 0.98           | 0.08MB     | 0.024          | 0.024         | 0.99           | 0B         |
+  | GPBoost CoverTree  | 0.428          | 1.365         | 3.19           | 5.64MB     | 0.646          | 12.367        | 19.15          | 0.03MB     |
+  | External CoverTree | 1.094          | 1.091         | 1.00           | 0B         | 1.188          | 1.185         | 1.00           | 0B         |
+
+  Command: `COVERTREEX_BACKEND=numpy COVERTREEX_ENABLE_NUMBA=1 COVERTREEX_ENABLE_DIAGNOSTICS=0 UV_CACHE_DIR=$PWD/.uv-cache uv run python -m benchmarks.runtime_breakdown --output '' --skip-jax`.
+  All runs share the same process high-water RSS (≈404 MB); the table reports incremental changes per implementation.
+- **Observations / next actions:**
+  1. PCCT build keeps ~2.3 effective cores busy yet still trails the sequential builder by ≈6× in wall time; the serial traversal + MIS sections dominate the budget. Prioritise migrating traversal mask assembly and MIS selection to parallel Numba kernels before revisiting the 8 k/32 k benchmarks.
+  2. The GPBoost baseline’s query path fans out across ~19 cores, explaining its high CPU time despite modest wall-latency improvements. Mirroring that approach (`nb.prange` over queries with thread-local heaps) should be our next optimisation step for `_knn_batch_cover`.
+  3. Memory deltas confirm the tree-view materialisation as the primary resident cost. Document this in `docs/CORE_IMPLEMENTATIONS.md` and explore recycling the buffers across builds to avoid repeated 80 MB spikes in long-running processes.
+  4. Schedule a follow-up benchmark with diagnostics enabled to line up resource metrics against the fine-grained batch timings (pairwise vs scope vs MIS) so we can apply Amdahl-style budgeting before diving into MIS refactors.
+- 2025-11-05 (late night) — Ported traversal scope assembly to a Numba helper (`build_scopes_numba`) so parent-chain stitching and CSR emission stay in native code. The dominated prefix batch that previously spent ≈618 ms in `traversal_semisort` now compiles away after warm-up (steady ≈2.0–2.1 ms; first batch still pays JIT cost). The k-NN kernel now parallelises across queries via `prange`, yielding **query_steady_seconds ≈ 6.2 ms** for the 512-query benchmark and pushing CPU utilisation to ~22× during lookups.
+  - Fresh metrics (`COVERTREEX_BACKEND=numpy COVERTREEX_ENABLE_NUMBA=1 COVERTREEX_ENABLE_DIAGNOSTICS=0 uv run python -m benchmarks.runtime_breakdown --skip-jax --csv-output benchmark_metrics.csv`) show **PCCT (Numba)** build **0.305 s** (CPU 0.777 s, util 2.55×, ΔRSS ≈ 74 MB) and query **0.0062 s** (CPU 0.141 s, util 22.35×). Sequential build/query remain 2.27 s / 24 ms, while GPBoost reports 0.307 s / 0.499 s with 23× query utilisation. These numbers replace the earlier 0.350 s / 0.092 s baseline for PCCT.
+  - With traversal chains handled inside Numba, the diagnostic traces confirm dominated batches no longer allocate minutes to mask assembly; `traversal_chain_ms` plus `traversal_semisort_ms` settle near 2 ms and 0.1 ms respectively after warm-up. The remaining host-bound hotspot for build is now the adjacency scatter (~12 ms) inside the conflict-graph path.
+
+## Next Steps (2025-11-05 update) — completed
+
+- Collapsed `conflict_adj_filter_ms` by integrating radius pruning into the Numba builder (see “Radius pruning integration — 2025-11-05”).
+- MIS timing reconciliation and the 32 k benchmark remain on deck, tracked under “Next steps — 2025-11-05”.
+
+### Adjacency filter fusion sketch (retained for reference)
+
+- **Bring radii into the builder:** Pass the per-point minimum radii array (or its square) alongside `scope_indptr/indices` so Numba can reject pairs while expanding, eliminating the 300 ms GPU-side mask.
+- **Chunk-aware distance reuse:** Precompute per-chunk squared norms (or reuse the existing pairwise matrix in host memory) so each chunk evaluates `‖x_i - x_j‖²` exactly once; store keep flags in a compact uint8 buffer that can be streamed back to the device.
+- **Symmetric write-back:** When a pair passes the radius test, write both orientations directly into the output buffers to avoid post-filter duplications.
+- **Optional H2D bypass:** If the filtered chunk is empty, skip copying anything back to the device; otherwise, reuse a small staging buffer sized by `scope_chunk_target` to keep host→device traffic under control.
+- **Telemetry:** Extend `ConflictGraphTimings` with `adjacency_pruned_pairs` so benchmarks can confirm the pruning ratio and spot regressions quickly.
 
 ## Testing & Validation
 
@@ -157,10 +351,10 @@ To keep the pipeline tight while hitting meaningful milestones, introduce three 
 3. **Level-wise MIS Update**
    - Feed a controlled batch through `batch_insert`, capturing intermediate MIS selections; compare against a reference MIS (deterministic seed) and ensure post-update levels satisfy separation.
    - Verifies orchestration of prefix-doubling, per-level MIS, and redistribution without yet touching Vecchia.
-   - Status: `plan_batch_insert` + `batch_insert` wired into integration tests (`tests/integration/test_parallel_update.py`), now inserting MIS winners plus redistributed followers while keeping originals untouched; next steps: enforce per-level separation invariants (especially when clamped at level 0) and persistence diff checks.
+   - Status: `plan_batch_insert` + `batch_insert` wired into integration tests (`tests/integration/test_parallel_update.py`), verifying per-level separation, cached-radius pruning, and deterministic MIS selections while keeping originals untouched.
 4. **Persistence Path Copy**
    - Execute successive updates, then diff consecutive tree versions to confirm only the intended level slices/child ranges changed and earlier versions remain queryable.
-   - Status: `tests/integration/test_parallel_update.py::test_batch_insert_persistence_across_versions` exercises back-to-back inserts, confirming prior versions retain their buffers; upcoming work: automate diffing of level-offset slices.
+   - Status: `tests/integration/test_parallel_update.py::test_batch_insert_persistence_across_versions` and associated level-count delta checks assert copy-on-write behaviour and automated level-offset diffing.
 
 ### Tier C – Application Hooks
 5. **Async Refresh Harness**
@@ -245,3 +439,18 @@ tree3 = txn.commit()
 - 2025-11-03: Redistribution pass implemented—dominated points drop one level (host-side separation guard ensures >2^ℓ spacing unless already at level 0), and Tier-B invariants check ordering/level adjustments. Next iteration: enforce separation against new anchors and diff persistence snapshots.
 - 2025-11-03: Prefix-doubling orchestrator + semisort utility added; redistribution now targets MIS-selected anchors via annulus scopes. Remaining work: plug semisort into conflict-graph construction and replace separation fallbacks with invariant-based checks.
 - 2025-11-03: Persistence diff test added plus level-0 collision logging; back-to-back inserts keep previous versions intact while emitting debug breadcrumbs when separation falls back at leaf scale.
+- 2025-11-03: Configuration module now tolerates missing JAX installations by stubbing CPU devices and deferring flag application; `test_config`/`test_logging` run green without optional deps.
+- 2025-11-03: Introduced `RuntimeConfig.from_env` + `describe_runtime` helpers with accompanying tests, keeping cached config in sync with environment snapshots.
+- 2025-11-03: Re-validated full suite via `uv run pytest`; reminder to execute tests through `uv` so the JAX-enabled environment is active.
+- 2025-11-03: Added `core.metrics` registry with default Euclidean kernels, refactored traversal/conflict-graph distance calls, and landed `tests/test_metrics.py`; full suite (`uv run pytest`) now at 48 passing checks.
+- 2025-11-03: Enabled runtime-selectable Numba MIS path; `run_mis` defers to `_mis_numba` when `COVERTREEX_ENABLE_NUMBA=1`, with parity locked in `tests/test_mis.py::test_run_mis_numba_matches_jax`.
+- 2025-11-03: Introduced resource diagnostics logging (CPU/GPU/Wall RSS) via `covertreex.diagnostics.log_operation`, instrumented batch insert/delete and k-NN, and added `tests/test_logging_diagnostics.py`.
+- 2025-11-03: Landed `BaselineCoverTree` for sequential comparisons (`covertreex/baseline.py`) with coverage in `tests/test_baseline_tree.py` for nearest and k-NN parity against brute force.
+- 2025-11-03: Added `ExternalCoverTreeBaseline` adapter for the upstream `covertree` implementation with optional dependency group (`[baseline]`), plus parity checks in `tests/test_external_baseline.py` (skipped when the package is unavailable).
+- 2025-11-04: Captured benchmark baselines (PCCT vs sequential vs external) showing a 10–100× performance gap; next steps involve profiling MIS/conflict-graph hot spots and reducing Python-control overhead before revisiting large-scale (≥32 k) builds.
+- 2025-11-04: Reran the 2 048×512×k=8 benchmark after the backend-native conflict-graph refactor. Diagnostics on: build 68.51 s, queries 3.68 s (139.2 q/s); diagnostics off: build 57.10 s, queries 3.44 s (149.0 q/s). Conflict-graph assembly still dominates (~1.7–3.6 s per batch), confirming the next optimisation push stays focused on CSR/annulus fusion.
+- 2025-11-04: Rewrote `group_by_int` and the conflict-graph adjacency path to run fully on `jax.numpy`, removing NumPy detours and preserving timing instrumentation. Validated via `UV_CACHE_DIR=$PWD/.uv-cache uv run pytest tests/test_semisort.py tests/test_conflict_graph.py tests/integration/test_structural_core.py`; follow-up is to rerun the 2 048×512 benchmark and refresh the runtime breakdown plots with the backend-native timings.
+- 2025-11-04: Audit housekeeping: fixed the child/sibling insertion bug in `batch_insert`, added invariants around the singly linked child chains, exported `PCCTree`/`TreeBackend`/metrics helpers at package root, and updated `TreeBackend.to_numpy` to return real NumPy arrays. Targeted tests (`tests/integration/test_parallel_update.py`, `tests/test_conflict_graph.py`, `tests/test_semisort.py`) pass.
+- 2025-11-04: Implemented the backend-native scope/adjacency fusion (padded membership + sorted dedup) in `build_conflict_graph` and re-ran targeted tests (`tests/test_conflict_graph.py`, `tests/test_semisort.py`, `tests/integration/test_structural_core.py`). Quick benchmark (`COVERTREEX_ENABLE_DIAGNOSTICS=1`, 2 048 tree pts, 512 queries, k=8) now reports a 151.41 s build and 3.30 s query batch (155 q/s). Conflict-graph averages per batch: `conflict_graph_ms` ≈ 7.44 s, with `scope_group_ms` ≈ 2.78 s, `adjacency_ms` ≈ 4.48 s, and `annulus_ms` ≈ 0.09 s (first batch spikes to ≈ 1.39 s). Next step: replace the lexsort/boolean dedup with scatter-based accumulation so adjacency drops back below the earlier ≈12 ms goal before attempting larger benchmarks.
+- 2025-11-04: Added fine-grained adjacency instrumentation (membership/targets/CSR) and replaced the scatter/dedup stage with pair-id accumulation. Tests (`tests/test_conflict_graph.py`, `tests/test_semisort.py`, `tests/integration/test_structural_core.py`) stay green. Quick benchmark now builds in 46.69 s, queries in 2.09 s (245.2 q/s); conflict graph averages 1.94 s per batch with scope grouping ≈1.72 s and adjacency ≈0.18 s. Follow-ups: move scope grouping off the host path and validate the pair-id accumulator on the 8 192-point run.
+- Implementation experiments are behind a toggle: `COVERTREEX_CONFLICT_GRAPH_IMPL={dense|segmented|auto}` (default `dense`). Current segmented prototype preserves correctness but is slower (quick run: `build ≈ 80.6 s` vs `24.5 s` dense), so dense remains default until the segmented path gets the expected win.
