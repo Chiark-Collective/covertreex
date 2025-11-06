@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 
@@ -37,7 +37,7 @@ if NUMBA_SPARSE_TRAVERSAL_AVAILABLE:
         return si_val if si_val > base else base
 
     @njit(cache=True)
-    def _collect_scope_single(
+    def _collect_scope_single_into(
         query: np.ndarray,
         parent: int,
         radius: float,
@@ -48,18 +48,18 @@ if NUMBA_SPARSE_TRAVERSAL_AVAILABLE:
         children_list: np.ndarray,
         roots: np.ndarray,
         next_cache: np.ndarray,
-    ) -> np.ndarray:
+        out_buf: np.ndarray,
+    ) -> int:
         num_nodes = points.shape[0]
         if num_nodes == 0 or parent < 0 or parent >= num_nodes:
-            return np.empty(0, dtype=np.int64)
+            return 0
 
         stack = np.empty(num_nodes, dtype=np.int64)
         stack_size = 0
         visited = np.zeros(num_nodes, dtype=np.uint8)
         included = np.zeros(num_nodes, dtype=np.uint8)
-        collected = np.empty(num_nodes, dtype=np.int64)
-        count = 0
 
+        count = 0
         for r in roots:
             idx = int(r)
             if 0 <= idx < num_nodes:
@@ -77,7 +77,7 @@ if NUMBA_SPARSE_TRAVERSAL_AVAILABLE:
 
             dist = math.sqrt(_sqdist_row(query, points[node]))
             if dist <= radius + _EPS and included[node] == 0:
-                collected[count] = node
+                out_buf[count] = node
                 count += 1
                 included[node] = 1
 
@@ -96,7 +96,7 @@ if NUMBA_SPARSE_TRAVERSAL_AVAILABLE:
         steps = 0
         while 0 <= current < num_nodes and steps < num_nodes:
             if included[current] == 0:
-                collected[count] = current
+                out_buf[count] = current
                 count += 1
                 included[current] = 1
             nxt = -1
@@ -109,20 +109,155 @@ if NUMBA_SPARSE_TRAVERSAL_AVAILABLE:
 
         if count > 1:
             for i in range(1, count):
-                idx = collected[i]
+                idx = out_buf[i]
                 level = top_levels[idx]
                 j = i - 1
                 while j >= 0:
-                    prev = collected[j]
+                    prev = out_buf[j]
                     prev_level = top_levels[prev]
                     if prev_level < level or (prev_level == level and prev > idx):
-                        collected[j + 1] = prev
+                        out_buf[j + 1] = prev
                         j -= 1
                     else:
                         break
-                collected[j + 1] = idx
+                out_buf[j + 1] = idx
 
+        return count
+
+    @njit(cache=True)
+    def _collect_scope_single(
+        query: np.ndarray,
+        parent: int,
+        radius: float,
+        points: np.ndarray,
+        top_levels: np.ndarray,
+        si_cache: np.ndarray,
+        children_offsets: np.ndarray,
+        children_list: np.ndarray,
+        roots: np.ndarray,
+        next_cache: np.ndarray,
+    ) -> np.ndarray:
+        num_nodes = points.shape[0]
+        collected = np.empty(num_nodes, dtype=np.int64)
+        count = _collect_scope_single_into(
+            query,
+            parent,
+            radius,
+            points,
+            top_levels,
+            si_cache,
+            children_offsets,
+            children_list,
+            roots,
+            next_cache,
+            collected,
+        )
         return collected[:count].copy()
+
+    @njit(cache=True)
+    def _collect_scopes_csr(
+        queries: np.ndarray,
+        parents: np.ndarray,
+        radii: np.ndarray,
+        points: np.ndarray,
+        top_levels: np.ndarray,
+        si_cache: np.ndarray,
+        children_offsets: np.ndarray,
+        children_list: np.ndarray,
+        roots: np.ndarray,
+        next_cache: np.ndarray,
+        chunk_target: int,
+    ) -> Tuple[np.ndarray, np.ndarray, int, int, int]:
+        batch_size = queries.shape[0]
+        num_nodes = points.shape[0]
+        counts = np.zeros(batch_size, dtype=np.int64)
+        buffer = np.empty(num_nodes, dtype=np.int64)
+        chunk_segments = 0
+        chunk_emitted = 0
+        chunk_max_members = 0
+
+        for idx in range(batch_size):
+            parent = int(parents[idx])
+            radius = float(radii[idx])
+            if parent < 0 or num_nodes == 0:
+                counts[idx] = 0
+            else:
+                counts[idx] = _collect_scope_single_into(
+                    queries[idx],
+                    parent,
+                    radius,
+                    points,
+                    top_levels,
+                    si_cache,
+                    children_offsets,
+                    children_list,
+                    roots,
+                    next_cache,
+                    buffer,
+                )
+
+            count_val = counts[idx]
+            if chunk_target > 0:
+                segments = 1
+                if count_val > 0:
+                    segments = (count_val + chunk_target - 1) // chunk_target
+                    current_max = chunk_target if count_val > chunk_target else int(count_val)
+                    if current_max > chunk_max_members:
+                        chunk_max_members = current_max
+                chunk_segments += segments
+                if segments > 1:
+                    chunk_emitted += segments - 1
+            else:
+                chunk_segments += 1
+                if count_val > chunk_max_members:
+                    chunk_max_members = int(count_val)
+
+        total_scope = int(np.sum(counts))
+        indptr = np.empty(batch_size + 1, dtype=np.int64)
+        indptr[0] = 0
+        for idx in range(batch_size):
+            indptr[idx + 1] = indptr[idx] + counts[idx]
+
+        indices = np.empty(total_scope, dtype=np.int64)
+        if total_scope > 0:
+            for idx in range(batch_size):
+                count = int(counts[idx])
+                if count == 0:
+                    continue
+                parent = int(parents[idx])
+                if parent < 0 or num_nodes == 0:
+                    continue
+                _ = _collect_scope_single_into(
+                    queries[idx],
+                    parent,
+                    float(radii[idx]),
+                    points,
+                    top_levels,
+                    si_cache,
+                    children_offsets,
+                    children_list,
+                    roots,
+                    next_cache,
+                    buffer,
+                )
+                start = int(indptr[idx])
+                indices[start : start + count] = buffer[:count]
+
+        if chunk_target > 0 and chunk_max_members == 0 and total_scope > 0:
+            chunk_max_members = int(np.max(counts))
+
+        return indptr, indices, int(chunk_segments), int(chunk_emitted), int(chunk_max_members)
+
+else:  # pragma: no cover - executed when numba missing
+
+    def _collect_scope_single_into(*_args, **_kwargs):
+        raise RuntimeError("Sparse traversal requires numba to be installed.")
+
+    def _collect_scope_single(*_args, **_kwargs):
+        raise RuntimeError("Sparse traversal requires numba to be installed.")
+
+    def _collect_scopes_csr(*_args, **_kwargs):
+        raise RuntimeError("Sparse traversal requires numba to be installed.")
 
 
 def collect_sparse_scopes(
@@ -155,3 +290,29 @@ def collect_sparse_scopes(
         )
         results.append(scope)
     return results
+
+
+def collect_sparse_scopes_csr(
+    view: NumbaTreeView,
+    queries: np.ndarray,
+    parents: np.ndarray,
+    radii: np.ndarray,
+    chunk_target: int,
+) -> Tuple[np.ndarray, np.ndarray, int, int, int]:
+    if not NUMBA_SPARSE_TRAVERSAL_AVAILABLE:  # pragma: no cover - defensive
+        raise RuntimeError("Sparse traversal requires numba to be installed.")
+
+    indptr, indices, chunk_segments, chunk_emitted, chunk_max_members = _collect_scopes_csr(
+        queries,
+        parents,
+        radii,
+        view.points,
+        view.top_levels,
+        view.si_cache,
+        view.children_offsets,
+        view.children_list,
+        view.root_indices,
+        view.next_cache,
+        int(chunk_target),
+    )
+    return indptr, indices, chunk_segments, chunk_emitted, chunk_max_members

@@ -21,6 +21,7 @@ from ._traverse_numba import NUMBA_TRAVERSAL_AVAILABLE, build_scopes_numba
 from ._traverse_sparse_numba import (
     NUMBA_SPARSE_TRAVERSAL_AVAILABLE,
     collect_sparse_scopes,
+    collect_sparse_scopes_csr,
 )
 from covertreex.queries._knn_numba import (
     knn_numba,
@@ -52,6 +53,10 @@ class TraversalTimings:
     nonzero_seconds: float = 0.0
     sort_seconds: float = 0.0
     assemble_seconds: float = 0.0
+    tile_seconds: float = 0.0
+    scope_chunk_segments: int = 0
+    scope_chunk_emitted: int = 0
+    scope_chunk_max_members: int = 0
 
 
 def _block_until_ready(value: Any) -> None:
@@ -285,29 +290,65 @@ def _traverse_collect_sparse(
 
     radii_np = np.maximum(base_radii, si_values)
 
+    runtime = cx_config.runtime_config()
+    chunk_target = int(runtime.scope_chunk_target)
+
     scope_start = time.perf_counter()
-    scopes = collect_sparse_scopes(view, queries_np, parents_np, radii_np)
-    scope_seconds = time.perf_counter() - scope_start
+    if chunk_target > 0:
+        scope_indptr_np, scope_indices_np, chunk_segments, chunk_emitted, chunk_max_members = collect_sparse_scopes_csr(
+            view,
+            queries_np,
+            parents_np,
+            radii_np,
+            chunk_target,
+        )
+        scope_seconds = time.perf_counter() - scope_start
+        conflict_scopes = []
+        for idx in range(batch_size):
+            start = int(scope_indptr_np[idx])
+            end = int(scope_indptr_np[idx + 1])
+            if start == end:
+                conflict_scopes.append(())
+            else:
+                conflict_scopes.append(
+                    tuple(int(x) for x in scope_indices_np[start:end])
+                )
+        conflict_scopes_tuple = tuple(conflict_scopes)
+        semisort_seconds = 0.0
+        tile_seconds = scope_seconds
+    else:
+        scopes = collect_sparse_scopes(view, queries_np, parents_np, radii_np)
+        scope_seconds = time.perf_counter() - scope_start
 
-    scope_lengths = [scope.shape[0] for scope in scopes]
-    scope_indptr_np = np.empty(batch_size + 1, dtype=np.int64)
-    scope_indptr_np[0] = 0
-    for idx in range(batch_size):
-        scope_indptr_np[idx + 1] = scope_indptr_np[idx] + scope_lengths[idx]
-    total_scope = int(scope_indptr_np[-1])
-    scope_indices_np = np.empty(total_scope, dtype=np.int64)
-    cursor = 0
-    conflict_scopes = []
-    for scope in scopes:
-        count = scope.shape[0]
-        if count:
-            scope_indices_np[cursor : cursor + count] = scope
-            conflict_scopes.append(tuple(int(x) for x in scope.tolist()))
-        else:
-            conflict_scopes.append(())
-        cursor += count
+        scope_lengths = [scope.shape[0] for scope in scopes]
+        scope_indptr_np = np.empty(batch_size + 1, dtype=np.int64)
+        scope_indptr_np[0] = 0
+        for idx in range(batch_size):
+            scope_indptr_np[idx + 1] = scope_indptr_np[idx] + scope_lengths[idx]
+        total_scope = int(scope_indptr_np[-1])
+        scope_indices_np = np.empty(total_scope, dtype=np.int64)
+        cursor = 0
+        conflict_scopes = []
+        for scope in scopes:
+            count = scope.shape[0]
+            if count:
+                scope_indices_np[cursor : cursor + count] = scope
+                conflict_scopes.append(tuple(int(x) for x in scope.tolist()))
+            else:
+                conflict_scopes.append(())
+            cursor += count
 
-    conflict_scopes_tuple = tuple(conflict_scopes)
+        conflict_scopes_tuple = tuple(conflict_scopes)
+        chunk_segments = batch_size
+        chunk_emitted = 0
+        chunk_max_members = int(max(scope_lengths)) if scope_lengths else 0
+        semisort_seconds = scope_seconds
+        tile_seconds = 0.0
+
+    if chunk_target > 0:
+        # ensure chunk metrics have sensible defaults when scopes are empty
+        if chunk_max_members == 0 and scope_indices_np.size:
+            chunk_max_members = int(np.max(scope_indptr_np[1:] - scope_indptr_np[:-1]))
 
     parents_arr = backend.asarray(parents_np.astype(np.int64), dtype=backend.default_int)
     levels_arr = backend.asarray(levels_np.astype(np.int64), dtype=backend.default_int)
@@ -323,11 +364,15 @@ def _traverse_collect_sparse(
         timings=TraversalTimings(
             pairwise_seconds=pairwise_seconds,
             mask_seconds=0.0,
-            semisort_seconds=scope_seconds,
+            semisort_seconds=semisort_seconds,
             chain_seconds=0.0,
             nonzero_seconds=0.0,
             sort_seconds=0.0,
             assemble_seconds=0.0,
+            tile_seconds=tile_seconds,
+            scope_chunk_segments=int(chunk_segments),
+            scope_chunk_emitted=int(chunk_emitted),
+            scope_chunk_max_members=int(chunk_max_members),
         ),
     )
 

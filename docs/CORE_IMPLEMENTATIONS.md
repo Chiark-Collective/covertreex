@@ -72,6 +72,8 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 - MIS is effectively free (`mis_ms ≤ 0.2 ms`) once the initial JIT completes. Remaining variation comes from the first-build warm-up.
 - Running strictly on the CPU (NumPy backend, diagnostics optional) keeps comparisons against the GPBoost baseline reproducible while avoiding the slower sequential/external references that we now skip by default.
 - GPBoost’s cover tree baseline is sequential and Euclidean-only: it inserts points one at a time, mutates its structure in-place, and never builds a conflict graph or MIS. PCCT’s batch design (exact Euclidean checks + MIS + immutable journals) is inherently heavier; the optimisation path is to trim traversal/mask overhead, not to regress to per-point mutation.
+- Sparse traversal now exposes `tile_seconds` along with `scope_chunk_segments`, `scope_chunk_emitted`, and `scope_chunk_max_members` inside `TraversalTimings` whenever the CSR chunking path is active. This makes it obvious when traversal chunking is actually engaged before we enter the conflict-graph builder.
+- Chunked traversal is opt-in: the default runtime keeps `COVERTREEX_SCOPE_CHUNK_TARGET=0`, so dense traversal remains the baseline until the chunked pipeline is tuned. Set the env var (or pass `chunk_target` through `RuntimeConfig`) to activate segmentation for experiments.
 
 ### Residual-correlation metric (synthetic RBF caches, 2025-11-06)
 
@@ -84,6 +86,7 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
   1. Reuse the precomputed `residual_pairwise` matrix inside `_build_dense_adjacency` / filter to eliminate redundant kernel-provider calls and their 0.6 s per-batch cost.
   2. Tighten `_collect_residual_scopes_streaming` (radius guards / partial dot-product bounds) to cap scope sizes and reduce the 3.1 s adjacency workload.
   3. Land the partial dot-product early-exit in `compute_residual_distances_with_radius` so `traversal_pairwise_ms` stops drifting toward 0.7–0.8 s on the later batches.
+- The scope adjacency builder now respects `_chunk_ranges_from_indptr(scope_indptr, scope_chunk_target)`: each chunk emits its CSR page independently, and `ConflictGraphTimings` reports `scope_chunk_segments`, `scope_chunk_emitted`, and `scope_chunk_max_members` so large residual batches show when backpressure or segmentation kicks in. This trimmed the scratch RSS spikes during dominated batches and exposes whether chunk caps are actually being exercised.
 
 ## Residual-Correlation Metric Benchmark Status (2025-11-06)
 
@@ -253,6 +256,8 @@ def compute_distance_chunk(...):
 - For heavier boxes increase `NUMBA_NUM_THREADS` and, if needed, batch size (`--batch-size`) and `COVERTREEX_SCOPE_CHUNK_TARGET` to keep each worker busy. The TBB threading layer provides work-stealing, so threads redistribute skewed batches automatically once these pools are configured.
 
 ## Parallel Compressed Cover Tree — Conflict Graph Builder (dense + segmented)
+
+`ScopeAdjacencyResult` in the implementation now also tracks chunk telemetry (`chunk_count`, `chunk_emitted`, `chunk_max_members`) so diagnostics reflect how `_chunk_ranges_from_indptr` splits oversized scopes.
 
 ```python
 # covertreex/algo/_scope_numba.py (excerpt)

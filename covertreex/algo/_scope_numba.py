@@ -31,6 +31,9 @@ class ScopeAdjacencyResult:
     candidate_pairs: int
     num_groups: int
     num_unique_groups: int
+    chunk_count: int = 1
+    chunk_emitted: int = 0
+    chunk_max_members: int = 0
 
 
 def _chunk_ranges_from_indptr(indptr: np.ndarray, chunk_target: int) -> list[tuple[int, int]]:
@@ -497,6 +500,9 @@ if NUMBA_SCOPE_AVAILABLE:
                 candidate_pairs=0,
                 num_groups=num_groups,
                 num_unique_groups=num_unique_groups,
+                chunk_count=1,
+                chunk_emitted=0,
+                chunk_max_members=0,
             )
 
         directed_total_pairs = int(total_pairs * 2)
@@ -513,40 +519,133 @@ if NUMBA_SCOPE_AVAILABLE:
                 candidate_pairs=candidate_pairs,
                 num_groups=num_groups,
                 num_unique_groups=num_unique_groups,
-            )
-        pair_counts_kept = pair_counts[keep]
-        directed_counts = pair_counts_kept * 2
-        offsets = _prefix_sum(directed_counts)
-        capacity = int(offsets[-1])
-        if capacity == 0:
-            return ScopeAdjacencyResult(
-                sources=np.empty(0, dtype=I32),
-                targets=np.empty(0, dtype=I32),
-                csr_indptr=np.zeros(batch_size + 1, dtype=I64),
-                csr_indices=np.empty(0, dtype=I32),
-                max_group_size=int(max_group_size),
-                total_pairs=0,
-                candidate_pairs=candidate_pairs,
-                num_groups=num_groups,
-                num_unique_groups=num_unique_groups,
+                chunk_count=1,
+                chunk_emitted=0,
+                chunk_max_members=0,
             )
 
-        sources, targets, used_counts = _expand_pairs_directed(
-            node_members,
-            indptr_nodes,
-            kept_nodes,
-            offsets,
-            pairwise_arr,
-            radii_arr,
-        )
-        csr_indptr, csr_indices, actual_pairs = _pairs_to_csr(
-            sources,
-            targets,
-            offsets,
-            used_counts,
-            batch_size,
-        )
-        if actual_pairs == 0:
+        chunk_ranges = _chunk_ranges_from_indptr(indptr_nodes, chunk_target)
+        use_chunks = chunk_target > 0 and len(chunk_ranges) > 1
+
+        if not use_chunks:
+            pair_counts_kept = pair_counts[keep]
+            directed_counts = pair_counts_kept * 2
+            offsets = _prefix_sum(directed_counts)
+            capacity = int(offsets[-1])
+            if capacity == 0:
+                return ScopeAdjacencyResult(
+                    sources=np.empty(0, dtype=I32),
+                    targets=np.empty(0, dtype=I32),
+                    csr_indptr=np.zeros(batch_size + 1, dtype=I64),
+                    csr_indices=np.empty(0, dtype=I32),
+                    max_group_size=int(max_group_size),
+                    total_pairs=0,
+                    candidate_pairs=candidate_pairs,
+                    num_groups=num_groups,
+                    num_unique_groups=num_unique_groups,
+                    chunk_count=len(chunk_ranges),
+                    chunk_emitted=0,
+                    chunk_max_members=int(indptr_nodes[-1] - indptr_nodes[0]),
+                )
+
+            sources, targets, used_counts = _expand_pairs_directed(
+                node_members,
+                indptr_nodes,
+                kept_nodes,
+                offsets,
+                pairwise_arr,
+                radii_arr,
+            )
+            csr_indptr, csr_indices, actual_pairs = _pairs_to_csr(
+                sources,
+                targets,
+                offsets,
+                used_counts,
+                batch_size,
+            )
+            if actual_pairs == 0:
+                return ScopeAdjacencyResult(
+                    sources=np.empty(0, dtype=I32),
+                    targets=np.empty(0, dtype=I32),
+                    csr_indptr=np.zeros(batch_size + 1, dtype=I64),
+                    csr_indices=np.empty(0, dtype=I32),
+                    max_group_size=int(max_group_size),
+                    total_pairs=0,
+                    candidate_pairs=candidate_pairs,
+                    num_groups=num_groups,
+                    num_unique_groups=num_unique_groups,
+                    chunk_count=len(chunk_ranges),
+                    chunk_emitted=0,
+                    chunk_max_members=int(indptr_nodes[-1] - indptr_nodes[0]),
+                )
+            return ScopeAdjacencyResult(
+                sources=np.empty(0, dtype=I32),
+                targets=np.empty(0, dtype=I32),
+                csr_indptr=csr_indptr,
+                csr_indices=csr_indices,
+                max_group_size=int(max_group_size),
+                total_pairs=actual_pairs,
+                candidate_pairs=candidate_pairs,
+                num_groups=num_groups,
+                num_unique_groups=num_unique_groups,
+                chunk_count=len(chunk_ranges),
+                chunk_emitted=len(chunk_ranges) if actual_pairs > 0 else 0,
+                chunk_max_members=int(indptr_nodes[-1] - indptr_nodes[0]),
+            )
+
+        counts_per_source = np.zeros(batch_size, dtype=I64)
+        chunk_results: list[tuple[np.ndarray, np.ndarray]] = []
+        chunk_emitted = 0
+        chunk_max_members = 0
+        total_pairs_accum = I64(0)
+
+        for chunk_start, chunk_end in chunk_ranges:
+            if chunk_end <= chunk_start:
+                continue
+            start_offset = int(indptr_nodes[chunk_start])
+            end_offset = int(indptr_nodes[chunk_end])
+            volume = end_offset - start_offset
+            if volume > chunk_max_members:
+                chunk_max_members = volume
+
+            keep_slice = keep[chunk_start:chunk_end]
+            if not np.any(keep_slice):
+                continue
+
+            local_kept = np.nonzero(keep_slice)[0].astype(I64)
+            local_pair_counts = pair_counts[chunk_start:chunk_end]
+            local_directed = local_pair_counts[keep_slice] * 2
+            offsets = _prefix_sum(local_directed)
+            capacity = int(offsets[-1])
+            if capacity == 0:
+                continue
+
+            local_members = node_members[start_offset:end_offset]
+            local_indptr = indptr_nodes[chunk_start : chunk_end + 1] - indptr_nodes[chunk_start]
+
+            sources, targets, used_counts = _expand_pairs_directed(
+                local_members,
+                local_indptr,
+                local_kept,
+                offsets,
+                pairwise_arr,
+                radii_arr,
+            )
+            csr_indptr_chunk, csr_indices_chunk, actual_pairs_chunk = _pairs_to_csr(
+                sources,
+                targets,
+                offsets,
+                used_counts,
+                batch_size,
+            )
+            if actual_pairs_chunk == 0:
+                continue
+            chunk_emitted += 1
+            chunk_results.append((csr_indptr_chunk, csr_indices_chunk))
+            counts_per_source += csr_indptr_chunk[1:] - csr_indptr_chunk[:-1]
+            total_pairs_accum += I64(actual_pairs_chunk)
+
+        if total_pairs_accum == 0:
             return ScopeAdjacencyResult(
                 sources=np.empty(0, dtype=I32),
                 targets=np.empty(0, dtype=I32),
@@ -557,17 +656,40 @@ if NUMBA_SCOPE_AVAILABLE:
                 candidate_pairs=candidate_pairs,
                 num_groups=num_groups,
                 num_unique_groups=num_unique_groups,
+                chunk_count=len(chunk_ranges),
+                chunk_emitted=chunk_emitted,
+                chunk_max_members=chunk_max_members,
             )
+
+        global_indptr = _prefix_sum64(counts_per_source.astype(I64))
+        total_edges = int(global_indptr[-1])
+        global_indices = np.empty(total_edges, dtype=I32)
+        heads = global_indptr[:-1].copy()
+
+        for csr_indptr_chunk, csr_indices_chunk in chunk_results:
+            for src in range(batch_size):
+                start = int(csr_indptr_chunk[src])
+                end = int(csr_indptr_chunk[src + 1])
+                if start == end:
+                    continue
+                dst_start = int(heads[src])
+                dst_end = dst_start + (end - start)
+                global_indices[dst_start:dst_end] = csr_indices_chunk[start:end]
+                heads[src] = dst_end
+
         return ScopeAdjacencyResult(
             sources=np.empty(0, dtype=I32),
             targets=np.empty(0, dtype=I32),
-            csr_indptr=csr_indptr,
-            csr_indices=csr_indices,
+            csr_indptr=global_indptr,
+            csr_indices=global_indices,
             max_group_size=int(max_group_size),
-            total_pairs=actual_pairs,
+            total_pairs=int(total_pairs_accum),
             candidate_pairs=candidate_pairs,
             num_groups=num_groups,
             num_unique_groups=num_unique_groups,
+            chunk_count=len(chunk_ranges),
+            chunk_emitted=chunk_emitted,
+            chunk_max_members=chunk_max_members,
         )
 
 else:  # pragma: no cover - executed when numba missing

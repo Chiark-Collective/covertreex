@@ -37,7 +37,7 @@ def test_runtime_config_defaults(monkeypatch: pytest.MonkeyPatch):
     assert runtime.devices == ()
     assert runtime.primary_platform is None
     assert runtime.enable_sparse_traversal is False
-    assert runtime.scope_chunk_target == 65_536
+    assert runtime.scope_chunk_target == 0
     assert runtime.metric == "euclidean"
 
 
@@ -119,7 +119,7 @@ def test_describe_runtime_reports_expected_fields(monkeypatch: pytest.MonkeyPatc
     assert "primary_platform" in summary
     assert summary["primary_platform"] is None
     assert summary["conflict_graph_impl"] == "dense"
-    assert summary["scope_chunk_target"] == 65_536
+    assert summary["scope_chunk_target"] == 0
     assert summary["metric"] == "euclidean"
 
 

@@ -230,6 +230,19 @@ Latest logs: `runtime_breakdown_output_2048_numba_baselines.txt`, `runtime_break
 2. Add regression coverage for the NumPy backend (config defaults, persistence updates) and ensure the test suite exercises both NumPy-only and NumPy+Numba paths.
 3. Extend the runtime breakdown CLI to emit warm-up vs steady-state metrics directly (CSV artefact) so we can track improvements as we iterate on the adjacency builder.
 
+###### Implementation plan — 2025-11-06
+
+- **Scope segmentation & caps** — Implement real segmentation once the sparse traversal kernel lands. Reuse `_chunk_ranges_from_indptr` inside `build_conflict_graph_numba_dense` so `chunk_target` produces filtered CSR shards rather than a no-op. Feed per-segment radii into the filter and accumulate telemetry for chunk hits, capped memberships, and backpressure bytes; surface them via `ConflictGraphTimings` and the `batch_insert` logger. On the traversal side, add level- or parent-chain splits in `_collect_residual_scopes_streaming` so we prune memberships before the conflict graph sees 16 k-entry scopes.
+- **Traversal work balancing** — Prototype tile-based pair assembly around `collect_sparse_scopes` and gate it behind `RuntimeConfig.enable_sparse_traversal`. The kernel should walk parent chains, emit CSR scopes directly, and schedule tiles keyed by the new chunk ranges so `traversal_pairwise_ms` and `traversal_assemble_ms` fall from the current ~200 ms / ~300 ms hotspots. Instrument traversal timings to compare dense versus tiled paths batch-by-batch.
+- **Memory pressure options** — After segmentation is wired, allow residual pairwise caches to downcast to float32 with a tolerance guard (raise if relative error exceeds the configured bound) before entering traversal or the conflict graph. Record peak RSS deltas and float32 hit counts in diagnostics so auditors can confirm the ~275 MB spikes shrink. Explore hard scope member caps that fall back to queued work when chunks still exceed the guardrails.
+- **Telemetry export helper** — Standardise on the refreshed `benchmarks.runtime_breakdown --csv-output` artefacts and add a lightweight script/CLI to stitch per-run logs into a schema auditors can diff. Include the new scope-chunk, float32 fallback, and traversal tile counters so side-by-side comparisons no longer require manual parsing.
+- Default runtime now leaves chunked traversal disabled (`scope_chunk_target=0`). Chunking must be enabled explicitly via `COVERTREEX_SCOPE_CHUNK_TARGET>0`, ensuring dense traversal remains the reference behaviour until the tile path is optimised.
+
+###### Sparse traversal log analysis — 2025-11-06
+
+- Baseline dense scopes (`scope_chunk_target=0`) on the 8 192×1 024×k=16 benchmark recorded a first dominated batch with `traversal_semisort_ms≈157.6 ms`, `traversal_pairwise_ms≈4.0 ms`, and `conflict_adj_scatter_ms≈0.73 ms` (build steady-state ≈0.76 s, `dense_run.csv`). Later dominated batches settle near 12–20 ms of semisort work with conflict scatter under 1 ms.
+- Enabling chunked traversal (`scope_chunk_target=8 192`) removes semisort entirely but pushes work into the tiled path: dominated batches show `traversal_ms≈20–87 ms` with `conflict_adj_scatter_ms` jumping to 5.7–1.9 ms. Build steady-state inflates to ≈1.44 s (`chunked_run.csv`). Tile telemetry (`tile_seconds`, `scope_chunk_segments`) confirms segmentation is active, but conflict scatter needs additional pruning before the chunked mode is competitive.
+
 ###### Follow-up — 2025-11-05 afternoon
 
 - Regression coverage now enforces the NumPy backend path (`tests/test_config.py`, `tests/test_persistence.py`) and keeps the benchmark smoke tests working against both sequential and GPBoost baselines.

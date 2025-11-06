@@ -76,6 +76,9 @@ class ConflictGraphTimings:
     scope_groups: int = 0
     scope_groups_unique: int = 0
     scope_domination_ratio: float = 0.0
+    scope_chunk_segments: int = 0
+    scope_chunk_emitted: int = 0
+    scope_chunk_max_members: int = 0
     mis_seconds: float = 0.0
 
 
@@ -98,6 +101,9 @@ class _AdjacencyBuild:
     bytes_h2d: int = 0
     bytes_d2h: int = 0
     radius_pruned: bool = False
+    scope_chunk_segments: int = 0
+    scope_chunk_emitted: int = 0
+    scope_chunk_max_members: int = 0
 
 
 def _block_until_ready(value: Any) -> None:
@@ -136,6 +142,9 @@ def _build_dense_adjacency(
     radius_pruned = False
     csr_indptr_np: np.ndarray | None = None
     csr_indices_np: np.ndarray | None = None
+    scope_chunk_segments = 1
+    scope_chunk_emitted = 0
+    scope_chunk_max_members = 0
 
     if batch_size and scope_indices.size:
         runtime = cx_config.runtime_config()
@@ -193,6 +202,9 @@ def _build_dense_adjacency(
             )
             bytes_h2d = int(csr_indptr_np.nbytes + csr_indices_np.nbytes)
             radius_pruned = True
+            scope_chunk_segments = int(adjacency.chunk_count)
+            scope_chunk_emitted = int(adjacency.chunk_emitted)
+            scope_chunk_max_members = int(adjacency.chunk_max_members)
         else:
             counts_np = np.diff(scope_indptr_np)
             if scope_indices_np.size == 0:
@@ -210,6 +222,9 @@ def _build_dense_adjacency(
                     scope_groups_unique=0,
                     scope_domination_ratio=0.0,
                     bytes_d2h=bytes_d2h,
+                    scope_chunk_segments=scope_chunk_segments,
+                    scope_chunk_emitted=scope_chunk_emitted,
+                    scope_chunk_max_members=scope_chunk_max_members,
                 )
 
             if counts_np.size and np.max(counts_np) <= 1:
@@ -229,6 +244,9 @@ def _build_dense_adjacency(
                     scope_groups_unique=non_empty,
                     scope_domination_ratio=(1.0 if scope_groups else 0.0),
                     bytes_d2h=bytes_d2h,
+                    scope_chunk_segments=scope_chunk_segments,
+                    scope_chunk_emitted=scope_chunk_emitted,
+                    scope_chunk_max_members=int(np.max(counts_np)) if counts_np.size else scope_chunk_max_members,
                 )
 
             point_ids_np = np.repeat(
@@ -252,6 +270,9 @@ def _build_dense_adjacency(
                     scope_groups_unique=0,
                     scope_domination_ratio=0.0,
                     bytes_d2h=bytes_d2h,
+                    scope_chunk_segments=scope_chunk_segments,
+                    scope_chunk_emitted=scope_chunk_emitted,
+                    scope_chunk_max_members=scope_chunk_max_members,
                 )
 
             counts_by_node = np.bincount(node_ids_np, minlength=max_node + 1)
@@ -271,6 +292,9 @@ def _build_dense_adjacency(
                     scope_groups_unique=0,
                     scope_domination_ratio=0.0,
                     bytes_d2h=bytes_d2h,
+                    scope_chunk_segments=scope_chunk_segments,
+                    scope_chunk_emitted=scope_chunk_emitted,
+                    scope_chunk_max_members=scope_chunk_max_members,
                 )
 
             offsets = np.concatenate(
@@ -324,6 +348,9 @@ def _build_dense_adjacency(
                     scope_domination_ratio=scope_domination_ratio,
                     bytes_h2d=bytes_h2d,
                     bytes_d2h=bytes_d2h,
+                    scope_chunk_segments=scope_chunk_segments,
+                    scope_chunk_emitted=scope_chunk_emitted,
+                    scope_chunk_max_members=scope_chunk_max_members,
                 )
 
             unique_counts = np.asarray(unique_counts_list, dtype=np.int64)
@@ -344,6 +371,9 @@ def _build_dense_adjacency(
                     scope_domination_ratio=scope_domination_ratio,
                     bytes_h2d=bytes_h2d,
                     bytes_d2h=bytes_d2h,
+                    scope_chunk_segments=scope_chunk_segments,
+                    scope_chunk_emitted=scope_chunk_emitted,
+                    scope_chunk_max_members=scope_chunk_max_members,
                 )
 
             scatter_start = time.perf_counter()
@@ -398,6 +428,9 @@ def _build_dense_adjacency(
         bytes_h2d=bytes_h2d,
         bytes_d2h=bytes_d2h,
         radius_pruned=radius_pruned,
+        scope_chunk_segments=scope_chunk_segments,
+        scope_chunk_emitted=scope_chunk_emitted,
+        scope_chunk_max_members=scope_chunk_max_members,
     )
 
 
@@ -491,6 +524,16 @@ def _build_segmented_adjacency(
         candidate_pairs=total_pairs,
         max_group_size=max_group_size,
         radius_pruned=True,
+        scope_groups=int(counts_np.size),
+        scope_groups_unique=int(np.count_nonzero(counts_np)),
+        scope_domination_ratio=(
+            float(np.count_nonzero(counts_np)) / float(counts_np.size)
+            if counts_np.size
+            else 0.0
+        ),
+        scope_chunk_segments=1,
+        scope_chunk_emitted=int(np.count_nonzero(counts_np > 0)),
+        scope_chunk_max_members=int(counts_np.max()) if counts_np.size else 0,
     )
 def build_conflict_graph(
     tree: PCCTree,
@@ -640,6 +683,9 @@ def build_conflict_graph(
     scope_groups_unique = adjacency_build.scope_groups_unique
     scope_domination_ratio = adjacency_build.scope_domination_ratio
     radius_pruned = adjacency_build.radius_pruned
+    scope_chunk_segments = adjacency_build.scope_chunk_segments
+    scope_chunk_emitted = adjacency_build.scope_chunk_emitted
+    scope_chunk_max_members = adjacency_build.scope_chunk_max_members
 
     if sources.size and not radius_pruned:
         filter_start = time.perf_counter()
@@ -801,6 +847,9 @@ def build_conflict_graph(
             scope_groups=scope_groups,
             scope_groups_unique=scope_groups_unique,
             scope_domination_ratio=scope_domination_ratio,
+            scope_chunk_segments=scope_chunk_segments,
+            scope_chunk_emitted=scope_chunk_emitted,
+            scope_chunk_max_members=scope_chunk_max_members,
         ),
     )
 RESIDUAL_FILTER_EPS = 1e-9
