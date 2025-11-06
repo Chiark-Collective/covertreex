@@ -1,6 +1,8 @@
 import numpy as np
+import pytest
 
 from covertreex import config as cx_config
+from covertreex.core import persistence as persistence_mod
 from covertreex.core.persistence import (
     SliceUpdate,
     apply_persistence_journal,
@@ -100,10 +102,25 @@ def test_build_persistence_journal_tracks_head_updates():
     )
 
 
-def test_apply_persistence_journal_numpy(monkeypatch):
+@pytest.mark.parametrize("enable_numba", ["0", "1"])
+def test_apply_persistence_journal_numpy(monkeypatch, enable_numba):
+    if enable_numba == "1" and not persistence_mod.NUMBA_PERSISTENCE_AVAILABLE:
+        pytest.skip("Numba persistence helpers are unavailable")
+
     monkeypatch.setenv("COVERTREEX_BACKEND", "numpy")
-    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "0")
+    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", enable_numba)
     cx_config.reset_runtime_context()
+
+    tracker: dict[str, bool] = {"numba_called": False}
+
+    if enable_numba == "1":
+        original_apply = persistence_mod._apply_journal_numba
+
+        def _tracking_apply(*args, **kwargs):
+            tracker["numba_called"] = True
+            return original_apply(*args, **kwargs)
+
+        monkeypatch.setattr(persistence_mod, "_apply_journal_numba", _tracking_apply)
 
     try:
         backend = TreeBackend.numpy()
@@ -138,5 +155,8 @@ def test_apply_persistence_journal_numpy(monkeypatch):
         assert updated.points.shape[0] == 3
         assert tree.points.shape[0] == 2
         assert updated.points.tolist()[-1] == [2.0, 2.0]
+
+        if enable_numba == "1":
+            assert tracker["numba_called"] is True
     finally:
         cx_config.reset_runtime_context()

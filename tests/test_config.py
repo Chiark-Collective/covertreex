@@ -41,6 +41,15 @@ def test_runtime_config_defaults(monkeypatch: pytest.MonkeyPatch):
     assert runtime.metric == "euclidean"
 
 
+def test_runtime_context_uses_numpy_backend_by_default(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    cx_config.reset_runtime_context()
+
+    backend = cx_config.runtime_context().get_backend()
+
+    assert backend.name == "numpy"
+
+
 def test_precision_override(monkeypatch: pytest.MonkeyPatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("COVERTREEX_PRECISION", "float32")
