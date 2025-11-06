@@ -1,4 +1,4 @@
-# Core Implementations & Benchmark Snapshot (2025-11-05)
+# Core Implementations & Benchmark Snapshot (2025-11-06)
 
 _This file is a to-be-maintained reference. Keep the benchmark table and the code listings in sync with the repository state whenever core algorithms change._
 
@@ -64,13 +64,151 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 
 ## Current Observations & Hypotheses
 
-- Dominated batches still pay ~200 ms in `traversal_pairwise_ms` (even with the residual-aware early exit disabled for Euclidean runs) and spend ~300 ms in `traversal_assemble_ms` when we push 32 k points. Conflict-graph construction has dropped to ~59 ms on the same workload, so traversal remains the clear bottleneck.
-- Fresh 32 768-point benchmark on 2025-11-06 landed at **41.01 s build / 0.42 s query (4 889 q/s)** for PCCT with NumPy+Numba, while the GPBoost baseline stayed at 2.80 s build / 20.94 s query (98 q/s). The residual-aware chunking keeps adjacency cheap (~59 ms per dominated batch), highlighting traversal and mask assembly as the remaining hotspots.
-- The Numba conflict-graph path (segment dedupe + directed pair expansion) now lands at 3–4 ms per dominated batch, with `conflict_scope_group_ms < 0.01 ms` and `conflict_adj_scatter_ms ≈ 1.0–1.3 ms`. No GPU kernels are invoked in the NumPy backend configuration.
-- MIS is effectively free (`mis_ms ≤ 0.2 ms`). Remaining variation comes from first-call warm-up; post-compilation runs stay under 0.1 ms.
+### Euclidean metric (NumPy backend)
+
+- Fresh 32 768-point benchmark on 2025-11-06 lands at **41.01 s build / 0.42 s query (4 889 q/s)** for PCCT with NumPy+Numba, while the GPBoost baseline stays at 2.80 s build / 20.94 s query (98 q/s).
+- Dominated batches still spend ~200 ms in `traversal_pairwise_ms` and ~300 ms in `traversal_assemble_ms` at this scale; conflict-graph construction remains ~59 ms per dominated batch, so traversal continues to be the limiting factor for the Euclidean path.
+- The Numba conflict-graph builder (segment dedupe + directed pair expansion) holds steady at 3–4 ms per dominated batch with `conflict_scope_group_ms < 0.01 ms` and `conflict_adj_scatter_ms ≈ 1.0–1.3 ms`.
+- MIS is effectively free (`mis_ms ≤ 0.2 ms`) once the initial JIT completes. Remaining variation comes from the first-build warm-up.
 - Running strictly on the CPU (NumPy backend, diagnostics optional) keeps comparisons against the GPBoost baseline reproducible while avoiding the slower sequential/external references that we now skip by default.
-- GPBoost’s cover tree baseline is sequential and Euclidean-only: it inserts points one at a time, mutates its structure in-place, and never builds a conflict graph or MIS. PCCT, by design, processes large batches (typically 256 points) with exact Euclidean distance checks, parallel MIS, and immutable journals, so even with the same metric the PCCT build is ~15× heavier. Once we port the residual-correlation kernels, expect the gap to widen unless we land the traversal optimisations outlined below.
-- We keep the sequential baseline around for comparison, but reusing its in-place mutation pattern inside PCCT is a non-starter: it would throw away batch safety (no MIS), break the immutable snapshot contract that enables concurrent queries/diagnostics, and undermine the compressed layout bookkeeping that our journals maintain. If the goal is a fast sequential tree, extend the GPBoost baseline; if we want PCCT to be faster, we need to optimise its traversal/persistence kernels rather than regress to per-point mutation.
+- GPBoost’s cover tree baseline is sequential and Euclidean-only: it inserts points one at a time, mutates its structure in-place, and never builds a conflict graph or MIS. PCCT’s batch design (exact Euclidean checks + MIS + immutable journals) is inherently heavier; the optimisation path is to trim traversal/mask overhead, not to regress to per-point mutation.
+
+### Residual-correlation metric (synthetic RBF caches, 2025-11-06)
+
+- First end-to-end synthetic run (32 768 tree points / 2 048 queries / k=16, seed 42) with `--metric residual` reports **290.64 s build / 156.51 s query (13.1 q/s)** using the NumPy backend and streamed residual caches.
+- Average dominated batch wall time is 4.33 s with the following split: `conflict_graph_ms` 72.5 %, `traversal_ms` 24.7 %, `mis_ms` 2.4 %. Despite streaming, each batch still materialises the full 512×511 edge set (261 632 pairs).
+- Conflict graph time is consumed almost entirely by residual adjacency filtering (`conflict_adjacency_ms` ≈ 3.12 s, 99.5 % of the conflict phase). The per-source residual distance recomputation costs ~0.59 s inside that filter even though the dense residual matrix is already in memory.
+- Traversal remains costly: chunked residual pairwise work averages 0.39 s (36 % of traversal), with semisort (~0.36 s) and CSR assembly (~0.32 s) indicating we are still emitting near-dense scopes. Residual scope groups average 16 384 entries with a single unique parent chain, so pruning is effectively inactive.
+- Residual telemetry shows sustained RSS deltas of ~288 MB per dominated batch (peaking ~703 MB) alongside repeated 64–132 MB host→CPU kernel transfers (`conflict_scope_bytes_d2h`).
+- Priority fixes:
+  1. Reuse the precomputed `residual_pairwise` matrix inside `_build_dense_adjacency` / filter to eliminate redundant kernel-provider calls and their 0.6 s per-batch cost.
+  2. Tighten `_collect_residual_scopes_streaming` (radius guards / partial dot-product bounds) to cap scope sizes and reduce the 3.1 s adjacency workload.
+  3. Land the partial dot-product early-exit in `compute_residual_distances_with_radius` so `traversal_pairwise_ms` stops drifting toward 0.7–0.8 s on the later batches.
+
+## Residual-Correlation Metric Benchmark Status (2025-11-06)
+
+**Source overview**
+- `covertreex/metrics/residual.py`, `covertreex/metrics/_residual_numba.py`, and the hooks in `covertreex/algo/{traverse,conflict_graph}.py` implement the host-side residual metric, streaming scopes, and adjacency reuse.
+- `benchmarks/queries.py` builds synthetic RBF caches (lines 77–170) and exposes `--metric residual` plus the `--residual-*` tuning flags. The script now forces `JAX_PLATFORM_NAME=cpu` / `XLA_PYTHON_CLIENT_PREALLOCATE=false` so the MIS helper cannot reserve GPU memory when we are on the NumPy backend.
+- Host cache construction mirrors the VIF pipeline: RBF kernel factors, `ResidualCorrHostData` configuration, and a hashed `point_decoder` that maps tree payloads back to dataset indices.
+
+**Benchmark recipe**
+
+```
+COVERTREEX_BACKEND=numpy \
+COVERTREEX_ENABLE_NUMBA=1 \
+COVERTREEX_METRIC=residual_correlation \
+UV_CACHE_DIR=$PWD/.uv-cache \
+python -m benchmarks.queries \
+  --metric residual \
+  --dimension 8 --tree-points 32768 \
+  --batch-size 512 --queries 2048 --k 16 \
+  --seed 42 --residual-inducing 512 \
+  --residual-lengthscale 1.0 --residual-variance 1.0
+```
+
+**Telemetry snapshot (dominated batches, averages over 63 batches)**
+
+| Metric | Mean | Share of phase |
+|--------|------|----------------|
+| Wall time per dominated batch | 4.33 s | — |
+| `traversal_ms` | 1.07 s | 24.7 % of wall |
+| • `traversal_pairwise_ms` | 0.39 s | 36.3 % of traversal |
+| • `traversal_semisort_ms` | 0.36 s | 33.3 % of traversal |
+| • `traversal_assemble_ms` | 0.32 s | 30.1 % of traversal |
+| `conflict_graph_ms` | 3.14 s | 72.5 % of wall |
+| • `conflict_adjacency_ms` | 3.12 s | 99.5 % of conflict graph |
+| • `conflict_adj_filter_ms` | 0.59 s | 18.9 % of conflict graph |
+| `mis_ms` | 0.10 s | 2.4 % of wall |
+| Residual scope size (`conflict_scope_groups`) | 16 384 | — |
+| Host transfer (`conflict_scope_bytes_d2h`) | 67 MB | — |
+| RSS delta per batch | 288 MB | — |
+
+**Status & follow-up**
+- The residual path is functionally correct but lacks pruning: every dominated batch processes the full 512×511 edge set.
+- Adjacency filtering recomputes residual distances even when the dense matrix is already available; caching/backing-array reuse should trim ≥0.6 s per batch.
+- Once pruning and reuse land, rerun the benchmark to give auditors an updated telemetry sheet and reconcile the Euclidean vs residual bottlenecks.
+
+### Residual-correlation machinery — key source excerpts
+
+```python
+# covertreex/metrics/residual.py (excerpt)
+@dataclass(frozen=True)
+class ResidualCorrHostData:
+    v_matrix: np.ndarray
+    p_diag: np.ndarray
+    kernel_diag: np.ndarray
+    kernel_provider: KernelProvider
+    point_decoder: PointDecoder = _default_point_decoder
+    chunk_size: int = 512
+
+def compute_residual_distances_with_radius(
+    backend: ResidualCorrHostData,
+    query_index: int,
+    chunk_indices: np.ndarray,
+    kernel_row: np.ndarray,
+    radius: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    distances, mask = compute_distance_chunk(
+        v_query=backend.v_matrix[query_index],
+        v_chunk=backend.v_matrix[chunk_indices],
+        kernel_chunk=kernel_row,
+        p_i=float(backend.p_diag[query_index]),
+        p_chunk=backend.p_diag[chunk_indices],
+        norm_query=float(backend.v_norm_sq[query_index]),
+        norm_chunk=backend.v_norm_sq[chunk_indices],
+        radius=float(radius),
+        eps=_EPS,
+    )
+    return distances, mask
+
+def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
+    set_residual_backend(backend)
+    def pairwise_kernel(tree_backend, lhs, rhs):
+        host_backend = get_residual_backend()
+        lhs_idx = decode_indices(host_backend, lhs)
+        rhs_idx = decode_indices(host_backend, rhs)
+        distances = compute_residual_distances(host_backend, lhs_idx, rhs_idx)
+        return tree_backend.asarray(distances, dtype=tree_backend.default_float)
+    def pointwise_kernel(tree_backend, lhs, rhs):
+        host_backend = get_residual_backend()
+        lhs_idx = decode_indices(host_backend, lhs)
+        rhs_idx = decode_indices(host_backend, rhs)
+        value = compute_residual_distance_single(host_backend, int(lhs_idx[0]), int(rhs_idx[0]))
+        return tree_backend.asarray(value, dtype=tree_backend.default_float)
+    configure_residual_metric(pairwise=pairwise_kernel, pointwise=pointwise_kernel)
+```
+
+```python
+# covertreex/metrics/_residual_numba.py (excerpt)
+@njit(cache=True)
+def _distance_chunk(
+    v_query: np.ndarray,
+    v_chunk: np.ndarray,
+    kernel_chunk: np.ndarray,
+    p_i: float,
+    p_chunk: np.ndarray,
+    norm_query: float,
+    norm_chunk: np.ndarray,
+    radius: float,
+    eps: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    threshold = 1.0 - radius * radius
+    for j in range(v_chunk.shape[0]):
+        denom = math.sqrt(max(p_i * p_chunk[j], eps * eps))
+        # partial dot-product accumulation with residual bound pruning
+        ...
+        numerator = kernel_chunk[j] - partial
+        rho = max(min(numerator / denom if denom else 0.0, 1.0), -1.0)
+        distances[j] = math.sqrt(max(0.0, 1.0 - abs(rho)))
+        within[j] = 1 if distances[j] <= radius + eps else 0
+    return distances, within
+
+def compute_distance_chunk(...):
+    if NUMBA_RESIDUAL_AVAILABLE:
+        return _distance_chunk(...)
+    # NumPy fallback matches the Numba kernel semantics
+```
 
 ### Persistence journal (NumPy backend)
 
@@ -84,7 +222,7 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 - The first PCCT build in any fresh Python session pays the full Numba compilation cost plus the actual 32 k build (≈40 s in the latest 8-dim profile). Subsequent builds reuse the cached kernels and drop to the steady-state numbers shown above (sub-second per batch).
 - To hide the one-time hit in production pipelines, kick off a tiny “warm-up” batch during process start-up—for example, build a 64-point tree with the same runtime flags before ingesting real data. This compiles all hot kernels without noticeably touching RSS or wall time.
 - To quantify the difference in practice, run `benchmarks.runtime_breakdown` with `--runs 5` (or similar). The CSV now includes a `run` column, letting you compare the first-build warm-up against subsequent steady-state runs directly.
-- When running synthetic benchmarks we keep `COVERTREEX_METRIC` at its default (`euclidean`). The residual-correlation metric is registered but not active until you install custom kernels via `configure_residual_metric`. If you flip the runtime metric to `residual_correlation` without registering handlers, the run will raise.
+- Quick sanity runs still default to `COVERTREEX_METRIC=euclidean`. Use `benchmarks.queries --metric residual` (which auto-builds synthetic caches) when you need the residual path; the script now forces JAX onto the CPU so the MIS helper cannot grab GPU memory.
 
 ### Threading defaults
 
