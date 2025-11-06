@@ -112,11 +112,17 @@ def test_runtime_breakdown_csv_output(tmp_path, monkeypatch):
     cx_config.reset_runtime_config_cache()
     assert csv_path.exists()
     contents = csv_path.read_text().strip().splitlines()
-    assert (
-        contents[0]
-        == "label,build_warmup_seconds,build_steady_seconds,build_total_seconds,"
-        "query_warmup_seconds,query_steady_seconds,build_cpu_seconds,build_cpu_utilisation,"
-        "build_rss_delta_bytes,build_max_rss_bytes,query_cpu_seconds,query_cpu_utilisation,"
-        "query_rss_delta_bytes,query_max_rss_bytes"
+    expected_tail = (
+        "label,build_warmup_seconds,build_steady_seconds,build_total_seconds," "query_warmup_seconds,"
+        "query_steady_seconds,build_cpu_seconds,build_cpu_utilisation," "build_rss_delta_bytes,"
+        "build_max_rss_bytes,query_cpu_seconds,query_cpu_utilisation," "query_rss_delta_bytes,"
+        "query_max_rss_bytes"
     )
-    assert any(row.startswith("PCCT") for row in contents[1:])
+    header = contents[0]
+    if header.startswith("run,"):
+        assert header == f"run,{expected_tail}"
+        data_rows = [row.split(",", 1)[1] for row in contents[1:] if "," in row]
+    else:
+        assert header == expected_tail
+        data_rows = contents[1:]
+    assert any(row.startswith("PCCT") for row in data_rows)
