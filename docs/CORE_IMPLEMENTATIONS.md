@@ -69,6 +69,7 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 - MIS is effectively free (`mis_ms ≤ 0.2 ms`). Remaining variation comes from first-call warm-up; post-compilation runs stay under 0.1 ms.
 - Running strictly on the CPU (NumPy backend, diagnostics optional) keeps comparisons against the GPBoost baseline reproducible while avoiding the slower sequential/external references that we now skip by default.
 - GPBoost’s cover tree baseline is sequential and Euclidean-only: it inserts points one at a time, mutates its structure in-place, and never builds a conflict graph or MIS. PCCT, by design, processes large batches (typically 256 points) with exact Euclidean distance checks, parallel MIS, and immutable journals, so even with the same metric the PCCT build is ~15× heavier. Once we port the residual-correlation kernels, expect the gap to widen unless we land the traversal optimisations outlined below.
+- We keep the sequential baseline around for comparison, but reusing its in-place mutation pattern inside PCCT is a non-starter: it would throw away batch safety (no MIS), break the immutable snapshot contract that enables concurrent queries/diagnostics, and undermine the compressed layout bookkeeping that our journals maintain. If the goal is a fast sequential tree, extend the GPBoost baseline; if we want PCCT to be faster, we need to optimise its traversal/persistence kernels rather than regress to per-point mutation.
 
 ### Persistence journal (NumPy backend)
 
