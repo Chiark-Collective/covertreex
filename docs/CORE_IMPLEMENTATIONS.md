@@ -34,7 +34,10 @@ _Set `COVERTREEX_ENABLE_DIAGNOSTICS=1` to collect the instrumentation counters (
 | Workload (tree pts / queries / k) | PCCT Build (s) | PCCT Query (s) | PCCT q/s | Sequential Build (s) | Sequential q/s | GPBoost Build (s) | GPBoost q/s | External Build (s) | External q/s |
 |-----------------------------------|----------------|----------------|----------|----------------------|----------------|-------------------|-------------|--------------------|---------------|
 | 8 192 / 1 024 / 16                | 4.03           | 0.934          | 1 096    | 33.65               | 5 327         | 0.569             | 306         | 14.14              | 122           |
-| 32 768 / 2 048 / 16               | 41.01          | 0.419          | 4 889    | —                   | —             | 2.80              | 98          | —                  | —             |
+| 32 768 / 1 024 / 8 (Euclidean)    | 42.13          | 0.217          | 4 724    | —                   | —             | 2.55              | 95.2        | —                  | —             |
+| 32 768 / 1 024 / 8 (Residual)*    | 56.09          | 0.229          | 4 469    | —                   | —             | 2.51              | 91.6        | —                  | —             |
+
+_*GPBoost remains Euclidean-only; the baseline numbers in the residual row are provided for throughput context only._
 
 The 32 768-point run currently logs PCCT and the GPBoost baseline; sequential/external baselines are still pending optimisations to keep runtime manageable at that scale.
 
@@ -49,15 +52,22 @@ uv run python -m benchmarks.queries \
   --batch-size 256 --queries 1024 --k 16 \
   --seed 12345 --baseline gpboost
 
-# GPBoost-only 32k run
+# 32k Euclidean vs GPBoost
 COVERTREEX_BACKEND=numpy \
 COVERTREEX_ENABLE_NUMBA=1 \
-COVERTREEX_ENABLE_DIAGNOSTICS=1 \
-UV_CACHE_DIR=$PWD/.uv-cache \
-uv run python -m benchmarks.queries \
+python -m benchmarks.queries \
   --dimension 8 --tree-points 32768 \
-  --batch-size 256 --queries 2048 --k 16 \
-  --seed 1337 --baseline gpboost
+  --batch-size 512 --queries 1024 --k 8 \
+  --seed 42 --baseline gpboost
+
+# 32k residual vs GPBoost (baseline remains Euclidean-only)
+COVERTREEX_BACKEND=numpy \
+COVERTREEX_ENABLE_NUMBA=1 \
+python -m benchmarks.queries \
+  --dimension 8 --tree-points 32768 \
+  --batch-size 512 --queries 1024 --k 8 \
+  --seed 42 --baseline gpboost \
+  --metric residual
 ```
 
 To capture warm-up versus steady-state timings for plotting, append `--csv-output runtime_breakdown_metrics.csv` when running `benchmarks.runtime_breakdown`.
@@ -66,27 +76,17 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 
 ### Euclidean metric (NumPy backend)
 
-- Fresh 32 768-point benchmark on 2025-11-06 lands at **41.01 s build / 0.42 s query (4 889 q/s)** for PCCT with NumPy+Numba, while the GPBoost baseline stays at 2.80 s build / 20.94 s query (98 q/s).
-- Dominated batches still spend ~200 ms in `traversal_pairwise_ms` and ~300 ms in `traversal_assemble_ms` at this scale; conflict-graph construction remains ~59 ms per dominated batch, so traversal continues to be the limiting factor for the Euclidean path.
-- The Numba conflict-graph builder (segment dedupe + directed pair expansion) holds steady at 3–4 ms per dominated batch with `conflict_scope_group_ms < 0.01 ms` and `conflict_adj_scatter_ms ≈ 1.0–1.3 ms`.
-- MIS is effectively free (`mis_ms ≤ 0.2 ms`) once the initial JIT completes. Remaining variation comes from the first-build warm-up.
-- Running strictly on the CPU (NumPy backend, diagnostics optional) keeps comparisons against the GPBoost baseline reproducible while avoiding the slower sequential/external references that we now skip by default.
-- GPBoost’s cover tree baseline is sequential and Euclidean-only: it inserts points one at a time, mutates its structure in-place, and never builds a conflict graph or MIS. PCCT’s batch design (exact Euclidean checks + MIS + immutable journals) is inherently heavier; the optimisation path is to trim traversal/mask overhead, not to regress to per-point mutation.
-- Sparse traversal now exposes `tile_seconds` along with `scope_chunk_segments`, `scope_chunk_emitted`, and `scope_chunk_max_members` inside `TraversalTimings` whenever the CSR chunking path is active. This makes it obvious when traversal chunking is actually engaged before we enter the conflict-graph builder.
-- Chunked traversal is opt-in: the default runtime keeps `COVERTREEX_SCOPE_CHUNK_TARGET=0`, so dense traversal remains the baseline until the chunked pipeline is tuned. Set the env var (or pass `chunk_target` through `RuntimeConfig`) to activate segmentation for experiments.
+- Fresh 32 768-point benchmark (dimension 8, batch 512, 1 024 queries, k = 8, seed 42) lands at **42.13 s build / 0.217 s query (4 724 q/s)** for PCCT with NumPy+Numba, while the GPBoost baseline sits at **2.55 s build / 10.75 s query (95.2 q/s)**—a 49.6× throughput gap in favour of PCCT.
+- Batch logs show `traversal_ms` hovering between 20–118 ms on dominated batches, whereas `conflict_graph_ms` stays in the 9–18 ms range and MIS remains sub-millisecond. The journal pipeline eliminated repeated array slices, so traversal/mask assembly is once again the limiting factor at 32 k.
+- Conflict-graph builders now live in `conflict_graph_builders.py`; dense vs segmented vs residual paths report distinct telemetry. Dense remains the default until scope chunk limits (see Next Steps) are dialled in.
+- GPBoost’s cover tree baseline is sequential and Euclidean-only (no conflict graphs, no MIS). We continue to keep comparisons on the CPU/NumPy backend so wall-clock deltas stay reproducible without JAX/GPU variability.
 
 ### Residual-correlation metric (synthetic RBF caches, 2025-11-06)
 
-- First end-to-end synthetic run (32 768 tree points / 2 048 queries / k=16, seed 42) with `--metric residual` reports **290.64 s build / 156.51 s query (13.1 q/s)** using the NumPy backend and streamed residual caches.
-- Average dominated batch wall time is 4.33 s with the following split: `conflict_graph_ms` 72.5 %, `traversal_ms` 24.7 %, `mis_ms` 2.4 %. Despite streaming, each batch still materialises the full 512×511 edge set (261 632 pairs).
-- Conflict graph time is consumed almost entirely by residual adjacency filtering (`conflict_adjacency_ms` ≈ 3.12 s, 99.5 % of the conflict phase). The per-source residual distance recomputation costs ~0.59 s inside that filter even though the dense residual matrix is already in memory.
-- Traversal remains costly: chunked residual pairwise work averages 0.39 s (36 % of traversal), with semisort (~0.36 s) and CSR assembly (~0.32 s) indicating we are still emitting near-dense scopes. Residual scope groups average 16 384 entries with a single unique parent chain, so pruning is effectively inactive.
-- Residual telemetry shows sustained RSS deltas of ~288 MB per dominated batch (peaking ~703 MB) alongside repeated 64–132 MB host→CPU kernel transfers (`conflict_scope_bytes_d2h`).
-- Priority fixes:
-  1. Reuse the precomputed `residual_pairwise` matrix inside `_build_dense_adjacency` / filter to eliminate redundant kernel-provider calls and their 0.6 s per-batch cost.
-  2. Tighten `_collect_residual_scopes_streaming` (radius guards / partial dot-product bounds) to cap scope sizes and reduce the 3.1 s adjacency workload.
-  3. Land the partial dot-product early-exit in `compute_residual_distances_with_radius` so `traversal_pairwise_ms` stops drifting toward 0.7–0.8 s on the later batches.
-- The scope adjacency builder now respects `_chunk_ranges_from_indptr(scope_indptr, scope_chunk_target)`: each chunk emits its CSR page independently, and `ConflictGraphTimings` reports `scope_chunk_segments`, `scope_chunk_emitted`, and `scope_chunk_max_members` so large residual batches show when backpressure or segmentation kicks in. This trimmed the scratch RSS spikes during dominated batches and exposes whether chunk caps are actually being exercised.
+- Synthetic run (same dataset as above, dimension 8, batch 512, 1 024 queries, k = 8, seed 42, `--metric residual`) now reports **56.09 s build / 0.229 s query (4 469 q/s)** for PCCT. The GPBoost baseline remains Euclidean-only but is included for throughput context at **2.51 s build / 11.18 s query (91.6 q/s)**.
+- Per-batch logs show `traversal_ms` between 33–118 ms and `conflict_graph_ms` between 22–30 ms despite the journal/builder refactor, highlighting that residual scopes are still nearly dense (all 261 632 candidate edges survive). MIS continues to be negligible (<0.2 ms).
+- The residual adjacency filter currently recomputes pairwise kernels even when the dense `residual_pairwise` matrix is available from traversal. Reusing that matrix inside `_build_dense_adjacency`/`filter_csr_by_radii_from_pairwise` is the next low-hanging win.
+- Scope chunking remains disabled by default; wiring `scope_chunk_target` through the new builder split (and exposing hit/miss telemetry) is the follow-up to keep RSS deltas in check and to pave the way for tighter residual radius guards.
 
 ## Residual-Correlation Metric Benchmark Status (2025-11-06)
 
@@ -105,32 +105,13 @@ UV_CACHE_DIR=$PWD/.uv-cache \
 python -m benchmarks.queries \
   --metric residual \
   --dimension 8 --tree-points 32768 \
-  --batch-size 512 --queries 2048 --k 16 \
-  --seed 42 --residual-inducing 512 \
+  --batch-size 512 --queries 1024 --k 8 \
+  --seed 42 --baseline gpboost \
+  --residual-inducing 512 \
   --residual-lengthscale 1.0 --residual-variance 1.0
 ```
 
-**Telemetry snapshot (dominated batches, averages over 63 batches)**
-
-| Metric | Mean | Share of phase |
-|--------|------|----------------|
-| Wall time per dominated batch | 0.90 s | — |
-| `traversal_ms` | 0.79 s | 87.4 % of wall |
-| • `traversal_pairwise_ms` | 0.43 s | 54.4 % of traversal |
-| • `traversal_semisort_ms` | 0.027 s | 3.4 % of traversal |
-| • `traversal_assemble_ms` | 0.33 s | 42.2 % of traversal |
-| `conflict_graph_ms` | 0.092 s | 10.2 % of wall |
-| • `conflict_adjacency_ms` | 0.075 s | 81.4 % of conflict graph |
-| • `conflict_adj_filter_ms` | ~0.000 s | ≈0 % of conflict graph |
-| `mis_ms` | 0.0002 s (0.20 ms) | <0.1 % of wall |
-| Residual scope size (`conflict_scope_groups`) | 16 384 | — |
-| Host transfer (`conflict_scope_bytes_d2h`) | 67 MB | — |
-| RSS delta per batch | 288 MB | — |
-
-**Status & follow-up**
-- Reusing the dense residual matrix for CSR filtering eliminates the 0.6 s per-batch recomputation; `conflict_adj_filter_ms` now vanishes and conflict graph time drops to ~0.09 s.
-- Early-reject bounds trim residual pairwise work (now ~0.43 s of the 0.79 s traversal block), but scopes are still near-dense (average `conflict_scope_groups` ≈ 16 k). Further pruning must focus on radius tightening or scope segmentation.
-- Memory churn is lower but still sizable (≈ 275 MB RSS delta per dominated batch). Explore segment caps or tile-based adjacency to reduce temporary buffers once the above pruning lands.
+The Euclidean-visible telemetry table from earlier runs is intentionally omitted until we re-run `benchmarks.runtime_breakdown` with the residual metric enabled; the new builder split exposes `scope_chunk_segments`, `scope_chunk_emitted`, and `scope_chunk_max_members`, so refreshing that CSV after the scope-chunk work will give us defensible per-phase averages again.
 
 ### Residual-correlation machinery — key source excerpts
 
