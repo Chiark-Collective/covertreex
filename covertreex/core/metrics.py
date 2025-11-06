@@ -174,6 +174,12 @@ def reset_residual_metric() -> None:
     global _RESIDUAL_PAIRWISE_IMPL, _RESIDUAL_POINTWISE_IMPL
     _RESIDUAL_PAIRWISE_IMPL = None
     _RESIDUAL_POINTWISE_IMPL = None
+    try:  # keep optional to avoid circular import issues during interpreter teardown
+        from covertreex.metrics.residual import set_residual_backend  # type: ignore
+
+        set_residual_backend(None)
+    except Exception:  # pragma: no cover - defensive
+        pass
 
 
 def available_metrics() -> Tuple[str, ...]:

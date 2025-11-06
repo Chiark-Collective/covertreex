@@ -16,6 +16,11 @@ from covertreex.algo._scope_numba import (
 from covertreex.algo.traverse import TraversalResult
 from covertreex.core.metrics import get_metric
 from covertreex.core.tree import PCCTree, TreeBackend
+from covertreex.metrics.residual import (
+    compute_residual_distances_from_kernel,
+    decode_indices,
+    get_residual_backend,
+)
 
 
 @dataclass(frozen=True)
@@ -108,6 +113,7 @@ def _build_dense_adjacency(
     scope_indices: Any,
     pairwise: Any | None = None,
     radii: Any | None = None,
+    residual_pairwise: np.ndarray | None = None,
 ) -> _AdjacencyBuild:
     xp = backend.xp
     membership_seconds = 0.0
@@ -140,16 +146,19 @@ def _build_dense_adjacency(
 
         if runtime.enable_numba and NUMBA_SCOPE_AVAILABLE:
             warmup_scope_builder()
-            if pairwise is None or radii is None:
+            if pairwise is None and residual_pairwise is None or radii is None:
                 raise ValueError(
                     "pairwise distances and radii must be provided when using the "
                     "Numba conflict-graph builder"
                 )
-            pairwise_np = (
-                pairwise
-                if isinstance(pairwise, np.ndarray)
-                else np.asarray(backend.to_numpy(pairwise), dtype=np.float64)
-            )
+            if residual_pairwise is not None:
+                pairwise_np = residual_pairwise
+            else:
+                pairwise_np = (
+                    pairwise
+                    if isinstance(pairwise, np.ndarray)
+                    else np.asarray(backend.to_numpy(pairwise), dtype=np.float64)
+                )
             radii_np = (
                 radii
                 if isinstance(radii, np.ndarray)
@@ -391,6 +400,28 @@ def _build_dense_adjacency(
     )
 
 
+def _compute_residual_pairwise_matrix(
+    *,
+    host_backend: "ResidualCorrHostData",
+    batch_indices: np.ndarray,
+) -> np.ndarray:
+    total = batch_indices.shape[0]
+    result = np.empty((total, total), dtype=np.float64)
+    chunk = int(host_backend.chunk_size or 512)
+    for start in range(0, total, chunk):
+        stop = min(start + chunk, total)
+        rows = batch_indices[start:stop]
+        kernel_block = host_backend.kernel_provider(rows, batch_indices)
+        distances = compute_residual_distances_from_kernel(
+            host_backend,
+            rows,
+            batch_indices,
+            kernel_block,
+        )
+        result[start:stop, :] = distances
+    return result
+
+
 def _build_segmented_adjacency(
     *,
     backend: TreeBackend,
@@ -474,14 +505,31 @@ def build_conflict_graph(
     batch = backend.asarray(batch_points, dtype=backend.default_float)
     metric = get_metric()
 
+    runtime = cx_config.runtime_config()
+    residual_mode = (
+        runtime.metric == "residual_correlation" and backend.name == "numpy"
+    )
+
+    residual_pairwise_np: np.ndarray | None = None
+    batch_indices_np: np.ndarray | None = None
+
     pairwise_start = time.perf_counter()
-    pairwise = metric.pairwise(backend, batch, batch)
-    _block_until_ready(pairwise)
+    if residual_mode:
+        host_backend = get_residual_backend()
+        batch_np = np.asarray(backend.to_numpy(batch))
+        batch_indices_np = decode_indices(host_backend, batch_np)
+        residual_pairwise_np = _compute_residual_pairwise_matrix(
+            host_backend=host_backend,
+            batch_indices=batch_indices_np,
+        )
+        pairwise = backend.asarray(residual_pairwise_np, dtype=backend.default_float)
+    else:
+        pairwise = metric.pairwise(backend, batch, batch)
+        _block_until_ready(pairwise)
     pairwise_seconds = time.perf_counter() - pairwise_start
 
     batch_size = int(traversal.parents.shape[0])
 
-    runtime = cx_config.runtime_config()
     scope_group_start = time.perf_counter()
     scope_indptr = backend.asarray(traversal.scope_indptr, dtype=backend.default_int)
     scope_indices = backend.asarray(traversal.scope_indices, dtype=backend.default_int)
@@ -522,9 +570,13 @@ def build_conflict_graph(
 
     pairwise_np: np.ndarray | None = None
     radii_np: np.ndarray | None = None
-    if enable_numba or impl == "segmented":
-        pairwise_np = np.asarray(backend.to_numpy(pairwise), dtype=float)
-        pairwise_np = np.ascontiguousarray(pairwise_np)
+    need_numpy_buffers = enable_numba or impl == "segmented" or residual_mode
+    if need_numpy_buffers:
+        if residual_pairwise_np is not None:
+            pairwise_np = residual_pairwise_np
+        else:
+            pairwise_np = np.asarray(backend.to_numpy(pairwise), dtype=float)
+            pairwise_np = np.ascontiguousarray(pairwise_np)
         radii_np = np.asarray(backend.to_numpy(radii), dtype=float)
 
     adjacency_start = time.perf_counter()
@@ -547,8 +599,9 @@ def build_conflict_graph(
             batch_size=batch_size,
             scope_indptr=scope_indptr,
             scope_indices=scope_indices,
-            pairwise=pairwise_np,
+            pairwise=pairwise,
             radii=radii_np,
+            residual_pairwise=residual_pairwise_np,
         )
 
     sources = adjacency_build.sources
@@ -569,17 +622,48 @@ def build_conflict_graph(
 
     if sources.size and not radius_pruned:
         filter_start = time.perf_counter()
-        src_pts = xp.take(batch, sources, axis=0)
-        tgt_pts = xp.take(batch, targets, axis=0)
-        diff = src_pts - tgt_pts
-        squared_distances = xp.sum(diff * diff, axis=1)
-        min_radii = xp.minimum(radii[sources], radii[targets])
-        squared_bounds = min_radii * min_radii
-        keep_mask = squared_distances <= squared_bounds
-        sources = sources[keep_mask]
-        targets = targets[keep_mask]
-        _block_until_ready(keep_mask)
-        adjacency_filter_seconds = time.perf_counter() - filter_start
+        if residual_mode and batch_indices_np is not None:
+            host_backend = get_residual_backend()
+            sources_np = np.asarray(backend.to_numpy(sources), dtype=np.int64)
+            targets_np = np.asarray(backend.to_numpy(targets), dtype=np.int64)
+            keep_mask_np = np.zeros(sources_np.shape[0], dtype=np.bool_)
+            unique_sources = np.unique(sources_np)
+            for src in unique_sources:
+                mask_indices = np.where(sources_np == src)[0]
+                if mask_indices.size == 0:
+                    continue
+                src_dataset = int(batch_indices_np[src])
+                tgt_batch_ids = targets_np[mask_indices]
+                tgt_dataset = batch_indices_np[tgt_batch_ids]
+                kernel_block = host_backend.kernel_provider(
+                    np.asarray([src_dataset], dtype=np.int64),
+                    tgt_dataset,
+                )
+                distances = compute_residual_distances_from_kernel(
+                    host_backend,
+                    np.asarray([src_dataset], dtype=np.int64),
+                    tgt_dataset,
+                    kernel_block,
+                )[0]
+                min_radii = np.minimum(radii_np[src], radii_np[tgt_batch_ids])
+                keep = distances <= (min_radii + RESIDUAL_FILTER_EPS)
+                keep_mask_np[mask_indices] = keep
+            keep_mask = backend.asarray(keep_mask_np, dtype=backend.xp.bool_)
+            sources = sources[keep_mask]
+            targets = targets[keep_mask]
+            adjacency_filter_seconds = time.perf_counter() - filter_start
+        else:
+            src_pts = xp.take(batch, sources, axis=0)
+            tgt_pts = xp.take(batch, targets, axis=0)
+            diff = src_pts - tgt_pts
+            squared_distances = xp.sum(diff * diff, axis=1)
+            min_radii = xp.minimum(radii[sources], radii[targets])
+            squared_bounds = min_radii * min_radii
+            keep_mask = squared_distances <= squared_bounds
+            sources = sources[keep_mask]
+            targets = targets[keep_mask]
+            _block_until_ready(keep_mask)
+            adjacency_filter_seconds = time.perf_counter() - filter_start
     else:
         adjacency_filter_seconds = 0.0
 
@@ -698,3 +782,4 @@ def build_conflict_graph(
             scope_domination_ratio=scope_domination_ratio,
         ),
     )
+RESIDUAL_FILTER_EPS = 1e-9

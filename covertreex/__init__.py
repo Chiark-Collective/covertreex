@@ -16,6 +16,10 @@ from .core import (
     get_metric,
     reset_residual_metric,
 )
+from .metrics.residual import (
+    ResidualCorrHostData,
+    configure_residual_correlation,
+)
 from .baseline import (
     BaselineCoverTree,
     BaselineNode,
@@ -32,8 +36,10 @@ __all__ = [
     "TreeLogStats",
     "available_metrics",
     "configure_residual_metric",
+    "configure_residual_correlation",
     "get_metric",
     "reset_residual_metric",
+    "ResidualCorrHostData",
     "BaselineCoverTree",
     "BaselineNode",
     "ExternalCoverTreeBaseline",

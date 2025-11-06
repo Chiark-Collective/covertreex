@@ -10,6 +10,13 @@ from covertreex import config as cx_config
 from covertreex.core.metrics import get_metric
 from covertreex.core.tree import PCCTree, TreeBackend
 from covertreex.logging import get_logger
+from covertreex.metrics.residual import (
+    ResidualCorrHostData,
+    compute_residual_distances_from_kernel,
+    compute_residual_distances_with_radius,
+    decode_indices,
+    get_residual_backend,
+)
 from ._traverse_numba import NUMBA_TRAVERSAL_AVAILABLE, build_scopes_numba
 from ._traverse_sparse_numba import (
     NUMBA_SPARSE_TRAVERSAL_AVAILABLE,
@@ -21,6 +28,7 @@ from covertreex.queries._knn_numba import (
 )
 
 LOGGER = get_logger("algo.traverse")
+_RESIDUAL_SCOPE_EPS = 1e-9
 
 
 @dataclass(frozen=True)
@@ -117,6 +125,129 @@ def _collect_next_chain(
     return tuple(chain)
 
 
+def _residual_find_parents(
+    *,
+    host_backend: ResidualCorrHostData,
+    query_indices: np.ndarray,
+    tree_indices: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    batch_size = int(query_indices.shape[0])
+    best_dist = np.full(batch_size, np.inf, dtype=np.float64)
+    best_idx = np.full(batch_size, -1, dtype=np.int64)
+
+    chunk = int(host_backend.chunk_size or 512)
+    total = int(tree_indices.shape[0])
+    query_arr = np.asarray(query_indices, dtype=np.int64)
+
+    for start in range(0, total, chunk):
+        stop = min(start + chunk, total)
+        chunk_ids = tree_indices[start:stop]
+        kernel_block = host_backend.kernel_provider(query_arr, chunk_ids)
+        distances_block = compute_residual_distances_from_kernel(
+            host_backend,
+            query_arr,
+            chunk_ids,
+            kernel_block,
+        )
+        row_min_idx = np.argmin(distances_block, axis=1)
+        row_min_val = distances_block[np.arange(batch_size), row_min_idx]
+        improved = row_min_val < best_dist
+        if np.any(improved):
+            best_dist[improved] = row_min_val[improved]
+            best_idx[improved] = chunk_ids[row_min_idx[improved]]
+
+    return best_idx, best_dist
+
+
+def _collect_residual_scopes_streaming(
+    *,
+    tree: PCCTree,
+    host_backend: ResidualCorrHostData,
+    query_indices: np.ndarray,
+    tree_indices: np.ndarray,
+    parent_positions: np.ndarray,
+    radii: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, Tuple[Tuple[int, ...], ...]]:
+    batch_size = int(query_indices.shape[0])
+    total_points = int(tree_indices.shape[0])
+    next_cache_np = np.asarray(tree.next_cache, dtype=np.int64)
+    top_levels_np = np.asarray(tree.top_levels, dtype=np.int64)
+    tree_id_to_pos = {int(tree_indices[i]): int(i) for i in range(total_points)}
+
+    scopes: list[np.ndarray] = []
+    scope_indptr = np.zeros(batch_size + 1, dtype=np.int64)
+    chunk = int(host_backend.chunk_size or 512)
+
+    for qi in range(batch_size):
+        parent_pos = int(parent_positions[qi])
+        if parent_pos < 0:
+            scopes.append(np.empty(0, dtype=np.int64))
+            scope_indptr[qi + 1] = scope_indptr[qi]
+            continue
+
+        query_id = int(query_indices[qi])
+        radius = float(radii[qi])
+        collected: set[int] = set()
+
+        query_idx_arr = np.asarray([query_id], dtype=np.int64)
+        for start in range(0, total_points, chunk):
+            stop = min(start + chunk, total_points)
+            chunk_ids = tree_indices[start:stop]
+            if chunk_ids.size == 0:
+                continue
+            kernel_block = host_backend.kernel_provider(
+                query_idx_arr,
+                chunk_ids,
+            )[0]
+            distances, mask = compute_residual_distances_with_radius(
+                backend=host_backend,
+                query_index=query_id,
+                chunk_indices=chunk_ids,
+                kernel_row=kernel_block,
+                radius=radius,
+            )
+            if mask.size == 0:
+                continue
+            include_idx = np.nonzero(mask)[0]
+            if include_idx.size == 0 and radius >= 1.0:
+                include_idx = np.arange(chunk_ids.size, dtype=np.int64)
+            for idx_local in include_idx:
+                cid = chunk_ids[idx_local]
+                pos = tree_id_to_pos.get(int(cid))
+                if pos is not None:
+                    collected.add(int(pos))
+
+        collected.add(parent_pos)
+        chain = _collect_next_chain(tree, parent_pos, next_cache=next_cache_np)
+        for node in chain:
+            collected.add(int(node))
+
+        if collected:
+            scope_vec = np.fromiter(collected, dtype=np.int64)
+            scope_vec.sort()
+            order = np.lexsort((scope_vec, -top_levels_np[scope_vec]))
+            scope_vec = scope_vec[order]
+        else:
+            scope_vec = np.empty(0, dtype=np.int64)
+
+        scopes.append(scope_vec)
+        scope_indptr[qi + 1] = scope_indptr[qi] + scope_vec.size
+
+    total_scope = int(scope_indptr[-1])
+    scope_indices = np.empty(total_scope, dtype=np.int64)
+    cursor = 0
+    conflict_scopes: list[Tuple[int, ...]] = []
+    for scope_vec in scopes:
+        if scope_vec.size:
+            scope_indices[cursor : cursor + scope_vec.size] = scope_vec
+            conflict_scopes.append(tuple(int(x) for x in scope_vec.tolist()))
+            cursor += scope_vec.size
+        else:
+            conflict_scopes.append(())
+
+    return scope_indptr, scope_indices, tuple(conflict_scopes)
+
+
 def _traverse_collect_sparse(
     tree: PCCTree,
     batch_points: Any,
@@ -200,6 +331,100 @@ def _traverse_collect_sparse(
         ),
     )
 
+def _traverse_collect_residual(
+    tree: PCCTree,
+    batch_points: Any,
+    *,
+    backend: TreeBackend,
+) -> TraversalResult:
+    queries_np = np.asarray(backend.to_numpy(batch_points), dtype=np.float64)
+    if queries_np.ndim == 1:
+        queries_np = queries_np[None, :]
+
+    batch_size = int(queries_np.shape[0])
+    if batch_size == 0:
+        return _empty_result(backend, 0)
+
+    host_backend = get_residual_backend()
+    query_indices = decode_indices(host_backend, queries_np)
+    tree_points_np = np.asarray(backend.to_numpy(tree.points))
+    tree_indices = decode_indices(host_backend, tree_points_np)
+    if tree_indices.shape[0] != tree.num_points:
+        raise ValueError(
+            "Residual metric decoder produced inconsistent tree indices. "
+            f"Expected {tree.num_points}, received {tree_indices.shape[0]}."
+        )
+
+    pairwise_start = time.perf_counter()
+    parent_dataset_idx, _parent_distances = _residual_find_parents(
+        host_backend=host_backend,
+        query_indices=np.asarray(query_indices, dtype=np.int64),
+        tree_indices=np.asarray(tree_indices, dtype=np.int64),
+    )
+    pairwise_seconds = time.perf_counter() - pairwise_start
+
+    tree_indices_np = np.asarray(tree_indices, dtype=np.int64)
+    dataset_to_pos = {int(tree_indices_np[i]): int(i) for i in range(tree_indices_np.shape[0])}
+    parents_np = np.array(
+        [dataset_to_pos.get(int(idx), -1) for idx in parent_dataset_idx],
+        dtype=np.int64,
+    )
+
+    if np.any(parents_np < 0):
+        raise ValueError(
+            "Residual traversal produced parent identifiers not present in the tree."
+        )
+
+    top_levels_np = np.asarray(tree.top_levels, dtype=np.int64)
+    levels_np = np.full(batch_size, -1, dtype=np.int64)
+    valid_mask = parents_np >= 0
+    if np.any(valid_mask):
+        levels_np[valid_mask] = top_levels_np[parents_np[valid_mask]]
+
+    base_radii = np.zeros(batch_size, dtype=np.float64)
+    base_radii[valid_mask] = np.power(
+        2.0, levels_np[valid_mask].astype(np.float64) + 1.0
+    )
+    si_cache_np = np.asarray(tree.si_cache, dtype=np.float64)
+    si_values = np.zeros(batch_size, dtype=np.float64)
+    if si_cache_np.size:
+        si_values[valid_mask] = si_cache_np[parents_np[valid_mask]]
+    radii_np = np.maximum(base_radii, si_values)
+
+    scope_start = time.perf_counter()
+    scope_indptr_np, scope_indices_np, conflict_scopes = _collect_residual_scopes_streaming(
+        tree=tree,
+        host_backend=host_backend,
+        query_indices=np.asarray(query_indices, dtype=np.int64),
+        tree_indices=tree_indices_np,
+        parent_positions=parents_np,
+        radii=radii_np,
+    )
+    semisort_seconds = time.perf_counter() - scope_start
+
+    parents_arr = backend.asarray(parents_np.astype(np.int64), dtype=backend.default_int)
+    levels_arr = backend.asarray(levels_np.astype(np.int64), dtype=backend.default_int)
+    scope_indptr_arr = backend.asarray(scope_indptr_np.astype(np.int64), dtype=backend.default_int)
+    scope_indices_arr = backend.asarray(scope_indices_np.astype(np.int64), dtype=backend.default_int)
+
+    return TraversalResult(
+        parents=backend.device_put(parents_arr),
+        levels=backend.device_put(levels_arr),
+        conflict_scopes=conflict_scopes,
+        scope_indptr=backend.device_put(scope_indptr_arr),
+        scope_indices=backend.device_put(scope_indices_arr),
+        timings=TraversalTimings(
+            pairwise_seconds=pairwise_seconds,
+            mask_seconds=0.0,
+            semisort_seconds=semisort_seconds,
+            chain_seconds=0.0,
+            nonzero_seconds=0.0,
+            sort_seconds=0.0,
+            assemble_seconds=0.0,
+        ),
+    )
+
+
 
 def traverse_collect_scopes(
     tree: PCCTree,
@@ -220,6 +445,14 @@ def traverse_collect_scopes(
         return _empty_result(backend, batch_size)
 
     runtime = cx_config.runtime_config()
+
+    if (
+        runtime.metric == "residual_correlation"
+        and runtime.enable_sparse_traversal
+        and runtime.enable_numba
+        and backend.name == "numpy"
+    ):
+        return _traverse_collect_residual(tree, batch, backend=backend)
 
     if (
         runtime.enable_sparse_traversal
@@ -250,13 +483,13 @@ def traverse_collect_scopes(
     _block_until_ready(mask)
     mask_seconds = time.perf_counter() - start
 
-    start = time.perf_counter()
     parents_np = np.asarray(parents, dtype=np.int64)
     top_levels_np = np.asarray(tree.top_levels, dtype=np.int64)
+    next_cache_np = np.asarray(tree.next_cache, dtype=np.int64)
+
     mask_np = np.asarray(backend.to_numpy(mask), dtype=bool)
     if mask_np.ndim != 2:
         mask_np = np.reshape(mask_np, (batch_size, tree.num_points))
-    next_cache_np = np.asarray(tree.next_cache, dtype=np.int64)
 
     use_numba = runtime.enable_numba and NUMBA_TRAVERSAL_AVAILABLE
 
@@ -320,6 +553,11 @@ def traverse_collect_scopes(
     scope_indptr_arr = backend.asarray(scope_indptr_np, dtype=backend.default_int)
     scope_indices_arr = backend.asarray(scope_indices_np, dtype=backend.default_int)
     assemble_seconds = time.perf_counter() - assemble_start
+
+    assemble_start = time.perf_counter()
+    scope_indptr_arr = backend.asarray(scope_indptr_np, dtype=backend.default_int)
+    scope_indices_arr = backend.asarray(scope_indices_np, dtype=backend.default_int)
+    assemble_seconds += time.perf_counter() - assemble_start
 
     LOGGER.debug(
         "Traversal assigned parents %s at levels %s",

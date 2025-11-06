@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 jax = pytest.importorskip("jax")
@@ -5,7 +6,13 @@ jnp = pytest.importorskip("jax.numpy")
 
 from covertreex import config as cx_config
 from covertreex.algo.traverse import TraversalResult, traverse_collect_scopes
+from covertreex.core.metrics import reset_residual_metric
 from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
+from covertreex.metrics.residual import (
+    ResidualCorrHostData,
+    configure_residual_correlation,
+    set_residual_backend,
+)
 
 
 def _sample_tree():
@@ -135,6 +142,83 @@ def test_sparse_traversal_matches_dense(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", raising=False)
     monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
     cx_config.reset_runtime_config_cache()
+
+
+def test_residual_sparse_traversal_matches_dense(monkeypatch: pytest.MonkeyPatch):
+    backend = DEFAULT_BACKEND
+    points = backend.asarray([[0.0], [1.0], [2.0]], dtype=backend.default_float)
+    top_levels = backend.asarray([1, 0, 0], dtype=backend.default_int)
+    parents = backend.asarray([-1, 0, 0], dtype=backend.default_int)
+    children = backend.asarray([1, 2, -1], dtype=backend.default_int)
+    level_offsets = backend.asarray([0, 1, 3, 3], dtype=backend.default_int)
+    si_cache = backend.asarray([0.0, 0.0, 0.0], dtype=backend.default_float)
+    next_cache = backend.asarray([1, 2, -1], dtype=backend.default_int)
+    tree = PCCTree(
+        points=points,
+        top_levels=top_levels,
+        parents=parents,
+        children=children,
+        level_offsets=level_offsets,
+        si_cache=si_cache,
+        next_cache=next_cache,
+        backend=backend,
+    )
+
+    v_matrix = np.array(
+        [
+            [1.0, 0.0],
+            [0.5, 0.5],
+            [0.2, 0.8],
+        ],
+        dtype=np.float64,
+    )
+    p_diag = np.array([0.9, 1.1, 1.2], dtype=np.float64)
+    kernel_diag = np.array([1.1, 1.0, 1.2], dtype=np.float64)
+    kernel_full = np.array(
+        [
+            [1.1, 0.7, 0.4],
+            [0.7, 1.0, 0.6],
+            [0.4, 0.6, 1.2],
+        ],
+        dtype=np.float64,
+    )
+
+    def kernel_provider(rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+        return kernel_full[np.ix_(rows, cols)]
+
+    backend_state = ResidualCorrHostData(
+        v_matrix=v_matrix,
+        p_diag=p_diag,
+        kernel_diag=kernel_diag,
+        kernel_provider=kernel_provider,
+        chunk_size=2,
+    )
+    configure_residual_correlation(backend_state)
+
+    batch_points = [[1.0], [2.0]]
+
+    monkeypatch.setenv("COVERTREEX_METRIC", "residual_correlation")
+    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
+    monkeypatch.delenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", raising=False)
+    cx_config.reset_runtime_config_cache()
+    dense_result = traverse_collect_scopes(tree, batch_points)
+
+    monkeypatch.setenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", "1")
+    cx_config.reset_runtime_config_cache()
+    sparse_result = traverse_collect_scopes(tree, batch_points)
+
+    assert sparse_result.parents.tolist() == dense_result.parents.tolist()
+    assert sparse_result.levels.tolist() == dense_result.levels.tolist()
+    assert sparse_result.conflict_scopes == dense_result.conflict_scopes
+    assert sparse_result.scope_indptr.tolist() == dense_result.scope_indptr.tolist()
+    assert sparse_result.scope_indices.tolist() == dense_result.scope_indices.tolist()
+
+    monkeypatch.delenv("COVERTREEX_METRIC", raising=False)
+    monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
+    monkeypatch.delenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", raising=False)
+    cx_config.reset_runtime_config_cache()
+    reset_residual_metric()
+    set_residual_backend(None)
     dense_result = traverse_collect_scopes(tree, batch_points)
 
     monkeypatch.setenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", "1")
