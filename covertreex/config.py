@@ -16,10 +16,26 @@ _JAX_WARNING_EMITTED = False
 
 _SUPPORTED_BACKENDS = {"jax", "numpy"}
 _SUPPORTED_PRECISION = {"float32", "float64"}
-_CONFLICT_GRAPH_IMPLS = {"dense", "segmented", "auto"}
+_CONFLICT_GRAPH_IMPLS = {"dense", "segmented", "auto", "grid"}
+_BATCH_ORDER_STRATEGIES = {"natural", "random", "hilbert"}
+_PREFIX_SCHEDULES = {"doubling", "adaptive"}
 _DEFAULT_SCOPE_CHUNK_TARGET = 0
 _DEFAULT_SCOPE_CHUNK_MAX_SEGMENTS = 512
 _DEFAULT_NUMBA_THREADING_LAYER = "tbb"
+_DEFAULT_BATCH_ORDER_STRATEGY = "hilbert"
+_DEFAULT_PREFIX_SCHEDULE = "adaptive"
+_DEFAULT_PREFIX_DENSITY_LOW = 0.15
+_DEFAULT_PREFIX_DENSITY_HIGH = 0.55
+_DEFAULT_PREFIX_GROWTH_SMALL = 1.25
+_DEFAULT_PREFIX_GROWTH_MID = 1.75
+_DEFAULT_PREFIX_GROWTH_LARGE = 2.25
+_DEFAULT_RESIDUAL_GATE1_ALPHA = 4.0
+_DEFAULT_RESIDUAL_GATE1_MARGIN = 0.05
+_DEFAULT_RESIDUAL_GATE1_EPS = 1e-6
+_DEFAULT_RESIDUAL_GATE1_RADIUS_CAP = 1.0
+_DEFAULT_RESIDUAL_RADIUS_FLOOR = 1e-3
+_DEFAULT_RESIDUAL_GATE1_PROFILE_BINS = 256
+_DEFAULT_RESIDUAL_GATE1_LOOKUP_MARGIN = 0.02
 
 
 def _ensure_env(var: str, value: str) -> None:
@@ -93,6 +109,37 @@ def _parse_conflict_graph_impl(value: str | None) -> str:
     return impl
 
 
+def _parse_batch_order_strategy(value: str | None) -> str:
+    if value is None:
+        return _DEFAULT_BATCH_ORDER_STRATEGY
+    strategy = value.strip().lower()
+    if strategy not in _BATCH_ORDER_STRATEGIES:
+        raise ValueError(
+            f"Unsupported batch order strategy '{strategy}'. Expected one of {_BATCH_ORDER_STRATEGIES}."
+        )
+    return strategy
+
+
+def _parse_prefix_schedule(value: str | None) -> str:
+    if value is None:
+        return _DEFAULT_PREFIX_SCHEDULE
+    schedule = value.strip().lower()
+    if schedule not in _PREFIX_SCHEDULES:
+        raise ValueError(
+            f"Unsupported prefix schedule '{schedule}'. Expected one of {_PREFIX_SCHEDULES}."
+        )
+    return schedule
+
+
+def _parse_optional_float(raw: str | None, *, default: float) -> float:
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid float value '{raw}'") from exc
+
+
 def _infer_precision_from_env() -> str:
     precision = os.getenv("COVERTREEX_PRECISION")
     if precision:
@@ -156,6 +203,25 @@ class RuntimeConfig:
     scope_chunk_target: int
     scope_chunk_max_segments: int
     metric: str
+    batch_order_strategy: str
+    batch_order_seed: int | None
+    prefix_schedule: str
+    prefix_density_low: float
+    prefix_density_high: float
+    prefix_growth_small: float
+    prefix_growth_mid: float
+    prefix_growth_large: float
+    residual_gate1_enabled: bool
+    residual_gate1_alpha: float
+    residual_gate1_margin: float
+    residual_gate1_eps: float
+    residual_gate1_audit: bool
+    residual_gate1_radius_cap: float
+    residual_radius_floor: float
+    residual_gate1_profile_path: str | None
+    residual_gate1_profile_bins: int
+    residual_gate1_lookup_path: str | None
+    residual_gate1_lookup_margin: float
 
     @property
     def jax_enable_x64(self) -> bool:
@@ -207,6 +273,76 @@ class RuntimeConfig:
         else:
             scope_chunk_max_segments = raw_chunk_segments
         metric = os.getenv("COVERTREEX_METRIC", "euclidean").strip().lower() or "euclidean"
+        batch_order_strategy = _parse_batch_order_strategy(
+            os.getenv("COVERTREEX_BATCH_ORDER")
+        )
+        batch_order_seed = _parse_optional_int(
+            os.getenv("COVERTREEX_BATCH_ORDER_SEED")
+        )
+        prefix_schedule = _parse_prefix_schedule(
+            os.getenv("COVERTREEX_PREFIX_SCHEDULE")
+        )
+        prefix_density_low = _parse_optional_float(
+            os.getenv("COVERTREEX_PREFIX_DENSITY_LOW"),
+            default=_DEFAULT_PREFIX_DENSITY_LOW,
+        )
+        prefix_density_high = _parse_optional_float(
+            os.getenv("COVERTREEX_PREFIX_DENSITY_HIGH"),
+            default=_DEFAULT_PREFIX_DENSITY_HIGH,
+        )
+        prefix_growth_small = _parse_optional_float(
+            os.getenv("COVERTREEX_PREFIX_GROWTH_SMALL"),
+            default=_DEFAULT_PREFIX_GROWTH_SMALL,
+        )
+        prefix_growth_mid = _parse_optional_float(
+            os.getenv("COVERTREEX_PREFIX_GROWTH_MID"),
+            default=_DEFAULT_PREFIX_GROWTH_MID,
+        )
+        prefix_growth_large = _parse_optional_float(
+            os.getenv("COVERTREEX_PREFIX_GROWTH_LARGE"),
+            default=_DEFAULT_PREFIX_GROWTH_LARGE,
+        )
+        residual_gate1_enabled = _bool_from_env(
+            os.getenv("COVERTREEX_RESIDUAL_GATE1"),
+            default=False,
+        )
+        residual_gate1_alpha = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_GATE1_ALPHA"),
+            default=_DEFAULT_RESIDUAL_GATE1_ALPHA,
+        )
+        residual_gate1_margin = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_GATE1_MARGIN"),
+            default=_DEFAULT_RESIDUAL_GATE1_MARGIN,
+        )
+        residual_gate1_eps = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_GATE1_EPS"),
+            default=_DEFAULT_RESIDUAL_GATE1_EPS,
+        )
+        residual_gate1_audit = _bool_from_env(
+            os.getenv("COVERTREEX_RESIDUAL_GATE1_AUDIT"),
+            default=False,
+        )
+        residual_gate1_radius_cap = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP"),
+            default=_DEFAULT_RESIDUAL_GATE1_RADIUS_CAP,
+        )
+        residual_radius_floor = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_RADIUS_FLOOR"),
+            default=_DEFAULT_RESIDUAL_RADIUS_FLOOR,
+        )
+        residual_gate1_profile_path = os.getenv("COVERTREEX_RESIDUAL_GATE1_PROFILE_PATH")
+        raw_profile_bins = _parse_optional_int(
+            os.getenv("COVERTREEX_RESIDUAL_GATE1_PROFILE_BINS")
+        )
+        if raw_profile_bins is None or raw_profile_bins <= 0:
+            residual_gate1_profile_bins = _DEFAULT_RESIDUAL_GATE1_PROFILE_BINS
+        else:
+            residual_gate1_profile_bins = raw_profile_bins
+        residual_gate1_lookup_path = os.getenv("COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH")
+        residual_gate1_lookup_margin = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN"),
+            default=_DEFAULT_RESIDUAL_GATE1_LOOKUP_MARGIN,
+        )
         return cls(
             backend=backend,
             precision=precision,
@@ -221,6 +357,25 @@ class RuntimeConfig:
             scope_chunk_target=scope_chunk_target,
             scope_chunk_max_segments=scope_chunk_max_segments,
             metric=metric,
+            batch_order_strategy=batch_order_strategy,
+            batch_order_seed=batch_order_seed,
+            prefix_schedule=prefix_schedule,
+            prefix_density_low=prefix_density_low,
+            prefix_density_high=prefix_density_high,
+            prefix_growth_small=prefix_growth_small,
+            prefix_growth_mid=prefix_growth_mid,
+            prefix_growth_large=prefix_growth_large,
+            residual_gate1_enabled=residual_gate1_enabled,
+            residual_gate1_alpha=residual_gate1_alpha,
+            residual_gate1_margin=residual_gate1_margin,
+            residual_gate1_eps=residual_gate1_eps,
+            residual_gate1_audit=residual_gate1_audit,
+            residual_gate1_radius_cap=residual_gate1_radius_cap,
+            residual_radius_floor=residual_radius_floor,
+            residual_gate1_profile_path=residual_gate1_profile_path,
+            residual_gate1_profile_bins=residual_gate1_profile_bins,
+            residual_gate1_lookup_path=residual_gate1_lookup_path,
+            residual_gate1_lookup_margin=residual_gate1_lookup_margin,
         )
 
 
@@ -341,4 +496,23 @@ def describe_runtime() -> Dict[str, Any]:
         "scope_chunk_target": config.scope_chunk_target,
         "scope_chunk_max_segments": config.scope_chunk_max_segments,
         "metric": config.metric,
+        "batch_order_strategy": config.batch_order_strategy,
+        "batch_order_seed": config.batch_order_seed,
+        "prefix_schedule": config.prefix_schedule,
+        "prefix_density_low": config.prefix_density_low,
+        "prefix_density_high": config.prefix_density_high,
+        "prefix_growth_small": config.prefix_growth_small,
+        "prefix_growth_mid": config.prefix_growth_mid,
+        "prefix_growth_large": config.prefix_growth_large,
+        "residual_gate1_enabled": config.residual_gate1_enabled,
+        "residual_gate1_alpha": config.residual_gate1_alpha,
+        "residual_gate1_margin": config.residual_gate1_margin,
+        "residual_gate1_eps": config.residual_gate1_eps,
+        "residual_gate1_audit": config.residual_gate1_audit,
+        "residual_gate1_radius_cap": config.residual_gate1_radius_cap,
+        "residual_radius_floor": config.residual_radius_floor,
+        "residual_gate1_profile_path": config.residual_gate1_profile_path,
+        "residual_gate1_profile_bins": config.residual_gate1_profile_bins,
+        "residual_gate1_lookup_path": config.residual_gate1_lookup_path,
+        "residual_gate1_lookup_margin": config.residual_gate1_lookup_margin,
     }

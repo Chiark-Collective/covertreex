@@ -20,6 +20,17 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "COVERTREEX_SCOPE_CHUNK_TARGET",
         "COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS",
         "COVERTREEX_METRIC",
+        "COVERTREEX_RESIDUAL_GATE1",
+        "COVERTREEX_RESIDUAL_GATE1_ALPHA",
+        "COVERTREEX_RESIDUAL_GATE1_MARGIN",
+        "COVERTREEX_RESIDUAL_GATE1_EPS",
+        "COVERTREEX_RESIDUAL_GATE1_AUDIT",
+        "COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP",
+        "COVERTREEX_RESIDUAL_RADIUS_FLOOR",
+        "COVERTREEX_RESIDUAL_GATE1_PROFILE_PATH",
+        "COVERTREEX_RESIDUAL_GATE1_PROFILE_BINS",
+        "COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH",
+        "COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN",
         "JAX_ENABLE_X64",
         "JAX_PLATFORM_NAME",
     ]:
@@ -40,6 +51,25 @@ def test_runtime_config_defaults(monkeypatch: pytest.MonkeyPatch):
     assert runtime.enable_sparse_traversal is False
     assert runtime.scope_chunk_target == 0
     assert runtime.metric == "euclidean"
+    assert runtime.batch_order_strategy == "hilbert"
+    assert runtime.batch_order_seed is None
+    assert runtime.prefix_schedule == "adaptive"
+    assert runtime.prefix_density_low == pytest.approx(0.15)
+    assert runtime.prefix_density_high == pytest.approx(0.55)
+    assert runtime.prefix_growth_small == pytest.approx(1.25)
+    assert runtime.prefix_growth_mid == pytest.approx(1.75)
+    assert runtime.prefix_growth_large == pytest.approx(2.25)
+    assert runtime.residual_gate1_enabled is False
+    assert runtime.residual_gate1_alpha == pytest.approx(4.0)
+    assert runtime.residual_gate1_margin == pytest.approx(0.05)
+    assert runtime.residual_gate1_eps == pytest.approx(1e-6)
+    assert runtime.residual_gate1_audit is False
+    assert runtime.residual_gate1_radius_cap == pytest.approx(1.0)
+    assert runtime.residual_radius_floor == pytest.approx(1e-3)
+    assert runtime.residual_gate1_profile_path is None
+    assert runtime.residual_gate1_profile_bins == 256
+    assert runtime.residual_gate1_lookup_path is None
+    assert runtime.residual_gate1_lookup_margin == pytest.approx(0.02)
 
 
 def test_runtime_context_uses_numpy_backend_by_default(monkeypatch: pytest.MonkeyPatch):
@@ -132,6 +162,16 @@ def test_describe_runtime_reports_expected_fields(monkeypatch: pytest.MonkeyPatc
     assert summary["scope_chunk_target"] == 0
     assert summary["scope_chunk_max_segments"] == 512
     assert summary["metric"] == "euclidean"
+    assert summary["residual_gate1_enabled"] is False
+    assert summary["residual_gate1_alpha"] == pytest.approx(4.0)
+    assert summary["residual_gate1_margin"] == pytest.approx(0.05)
+    assert summary["residual_gate1_eps"] == pytest.approx(1e-6)
+    assert summary["residual_gate1_radius_cap"] == pytest.approx(1.0)
+    assert summary["residual_radius_floor"] == pytest.approx(1e-3)
+    assert summary["residual_gate1_profile_path"] is None
+    assert summary["residual_gate1_profile_bins"] == 256
+    assert summary["residual_gate1_lookup_path"] is None
+    assert summary["residual_gate1_lookup_margin"] == pytest.approx(0.02)
 
 
 def test_conflict_graph_impl_override(monkeypatch: pytest.MonkeyPatch):
@@ -141,6 +181,45 @@ def test_conflict_graph_impl_override(monkeypatch: pytest.MonkeyPatch):
 
     runtime = cx_config.runtime_config()
     assert runtime.conflict_graph_impl == "segmented"
+
+
+def test_conflict_graph_impl_grid(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("COVERTREEX_CONFLICT_GRAPH_IMPL", "grid")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.conflict_graph_impl == "grid"
+
+
+def test_batch_order_override(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("COVERTREEX_BATCH_ORDER", "hilbert")
+    monkeypatch.setenv("COVERTREEX_BATCH_ORDER_SEED", "42")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.batch_order_strategy == "hilbert"
+    assert runtime.batch_order_seed == 42
+
+
+def test_prefix_schedule_override(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("COVERTREEX_PREFIX_SCHEDULE", "adaptive")
+    monkeypatch.setenv("COVERTREEX_PREFIX_DENSITY_LOW", "0.1")
+    monkeypatch.setenv("COVERTREEX_PREFIX_DENSITY_HIGH", "0.7")
+    monkeypatch.setenv("COVERTREEX_PREFIX_GROWTH_SMALL", "0.4")
+    monkeypatch.setenv("COVERTREEX_PREFIX_GROWTH_MID", "1.2")
+    monkeypatch.setenv("COVERTREEX_PREFIX_GROWTH_LARGE", "1.8")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.prefix_schedule == "adaptive"
+    assert runtime.prefix_density_low == pytest.approx(0.1)
+    assert runtime.prefix_density_high == pytest.approx(0.7)
+    assert runtime.prefix_growth_small == pytest.approx(0.4)
+    assert runtime.prefix_growth_mid == pytest.approx(1.2)
+    assert runtime.prefix_growth_large == pytest.approx(1.8)
 
 
 def test_scope_segment_dedupe_toggle(monkeypatch: pytest.MonkeyPatch):
@@ -204,3 +283,32 @@ def test_sparse_traversal_toggle(monkeypatch: pytest.MonkeyPatch):
 
     runtime = cx_config.runtime_config()
     assert runtime.enable_sparse_traversal is True
+
+
+def test_residual_gate1_env_overrides(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1", "1")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_ALPHA", "1.5")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_MARGIN", "0.2")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_EPS", "0.001")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_AUDIT", "1")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP", "0.75")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_RADIUS_FLOOR", "0.25")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_PROFILE_PATH", "/tmp/profile.json")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_PROFILE_BINS", "64")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH", "/tmp/lookup.json")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN", "0.5")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.residual_gate1_enabled is True
+    assert runtime.residual_gate1_alpha == pytest.approx(1.5)
+    assert runtime.residual_gate1_margin == pytest.approx(0.2)
+    assert runtime.residual_gate1_eps == pytest.approx(0.001)
+    assert runtime.residual_gate1_audit is True
+    assert runtime.residual_gate1_radius_cap == pytest.approx(0.75)
+    assert runtime.residual_radius_floor == pytest.approx(0.25)
+    assert runtime.residual_gate1_profile_path == "/tmp/profile.json"
+    assert runtime.residual_gate1_profile_bins == 64
+    assert runtime.residual_gate1_lookup_path == "/tmp/lookup.json"
+    assert runtime.residual_gate1_lookup_margin == pytest.approx(0.5)

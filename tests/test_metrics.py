@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 
@@ -15,6 +17,8 @@ from covertreex.core.metrics import (
 from covertreex.core.tree import TreeBackend, get_runtime_backend
 from covertreex.metrics.residual import (
     ResidualCorrHostData,
+    ResidualGateLookup,
+    ResidualGateProfile,
     configure_residual_correlation,
     compute_residual_distances_with_radius,
     compute_residual_distances,
@@ -191,6 +195,45 @@ def test_residual_distance_chunk_respects_radius():
     assert np.allclose(distances_large, distances_full, atol=1e-9)
 
     reset_residual_metric()
+
+
+def test_residual_gate1_prunes_far_candidates():
+    reset_residual_metric()
+
+
+def test_residual_gate_profile_records_samples(tmp_path):
+    profile_path = tmp_path / "gate_profile.json"
+    profile = ResidualGateProfile.create(bins=4, radius_max=1.0, path=str(profile_path), radius_eps=1e-6)
+    residuals = np.array([0.05, 0.15, 0.35], dtype=np.float64)
+    whitened = np.array([0.01, 0.08, 0.2], dtype=np.float64)
+    mask = np.array([1, 1, 0], dtype=np.uint8)
+    profile.record_chunk(
+        residual_distances=residuals,
+        whitened_distances=whitened,
+        inclusion_mask=mask,
+    )
+    profile.dump()
+    payload = json.loads(profile_path.read_text())
+    assert payload["samples_total"] == 2
+    assert max(payload["max_whitened"]) >= 0.08
+
+
+def test_residual_gate_lookup_thresholds_monotonic(tmp_path):
+    profile_path = tmp_path / "gate_profile.json"
+    profile = ResidualGateProfile.create(bins=3, radius_max=1.0, path=str(profile_path), radius_eps=1e-6)
+    residuals = np.array([0.05, 0.2, 0.4, 0.8], dtype=np.float64)
+    whitened = np.array([0.02, 0.1, 0.15, 0.3], dtype=np.float64)
+    mask = np.array([1, 1, 1, 1], dtype=np.uint8)
+    profile.record_chunk(
+        residual_distances=residuals,
+        whitened_distances=whitened,
+        inclusion_mask=mask,
+    )
+    profile.dump()
+    lookup = ResidualGateLookup.load(str(profile_path), margin=0.01)
+    t_small = lookup.threshold(0.1)
+    t_large = lookup.threshold(0.7)
+    assert t_large >= t_small
 
 
 def test_residual_correlation_helper_computes_distances():

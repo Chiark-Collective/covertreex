@@ -91,6 +91,36 @@ if NUMBA_RESIDUAL_AVAILABLE:
 
         return distances, within
 
+    @njit(cache=True, fastmath=True, parallel=True)
+    def _gate1_whitened_chunk(
+        v_query: np.ndarray,
+        v_chunk: np.ndarray,
+        threshold_sq: float,
+    ) -> np.ndarray:
+        chunk_size = v_chunk.shape[0]
+        rank = v_query.shape[0]
+        keep = np.zeros(chunk_size, dtype=np.uint8)
+
+        if not np.isfinite(threshold_sq):
+            for j in range(chunk_size):
+                keep[j] = 1
+            return keep
+
+        if threshold_sq <= 0.0:
+            return keep
+
+        for j in prange(chunk_size):
+            dist_sq = 0.0
+            for d in range(rank):
+                diff = v_chunk[j, d] - v_query[d]
+                dist_sq += diff * diff
+                if dist_sq > threshold_sq:
+                    break
+            if dist_sq <= threshold_sq:
+                keep[j] = 1
+
+        return keep
+
 
 def compute_distance_chunk(
     v_query: np.ndarray,
@@ -167,7 +197,32 @@ def compute_distance_chunk(
     return distances, within
 
 
+def gate1_whitened_mask(
+    v_query: np.ndarray,
+    v_chunk: np.ndarray,
+    threshold: float,
+) -> np.ndarray:
+    """Return a uint8 mask indicating which candidates pass gate-1."""
+
+    if not np.isfinite(threshold):
+        return np.ones(v_chunk.shape[0], dtype=np.uint8)
+    threshold = float(max(threshold, 0.0))
+    threshold_sq = threshold * threshold
+
+    if v_chunk.size == 0 or threshold_sq <= 0.0:
+        return np.zeros(v_chunk.shape[0], dtype=np.uint8)
+
+    if NUMBA_RESIDUAL_AVAILABLE:
+        return _gate1_whitened_chunk(v_query, v_chunk, threshold_sq)
+
+    diff = v_chunk - v_query
+    dist_sq = np.sum(diff * diff, axis=1, dtype=np.float32)
+    keep = dist_sq <= threshold_sq
+    return keep.astype(np.uint8, copy=False)
+
+
 __all__ = [
     "NUMBA_RESIDUAL_AVAILABLE",
     "compute_distance_chunk",
+    "gate1_whitened_mask",
 ]

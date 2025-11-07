@@ -34,8 +34,8 @@ _Set `COVERTREEX_ENABLE_DIAGNOSTICS=1` to collect the instrumentation counters (
 | Workload (tree pts / queries / k) | PCCT Build (s) | PCCT Query (s) | PCCT q/s | Sequential Build (s) | Sequential q/s | GPBoost Build (s) | GPBoost q/s | External Build (s) | External q/s |
 |-----------------------------------|----------------|----------------|----------|----------------------|----------------|-------------------|-------------|--------------------|---------------|
 | 8 192 / 1 024 / 16                | 4.03           | 0.934          | 1 096    | 33.65               | 5 327         | 0.569             | 306         | 14.14              | 122           |
-| 32 768 / 1 024 / 8 (Euclidean)    | 44.22          | 0.284          | 3 611    | —                   | —             | 2.55              | 95.2        | —                  | —             |
-| 32 768 / 1 024 / 8 (Residual)*    | 70.26          | 0.275          | 3 723    | —                   | —             | 2.51              | 91.6        | —                  | —             |
+| 32 768 / 1 024 / 8 (Euclidean)    | 37.73          | 0.262          | 3 914    | —                   | —             | 2.55              | 95.2        | —                  | —             |
+| 32 768 / 1 024 / 8 (Residual)*    | 66.25          | 0.305          | 3 358    | —                   | —             | 2.51              | 91.6        | —                  | —             |
 
 _*GPBoost remains Euclidean-only; the baseline numbers in the residual row are provided for throughput context only._
 
@@ -43,15 +43,15 @@ The 32 768-point run currently logs PCCT and the GPBoost baseline; sequential/
 
 ### Gold-standard residual benchmark (default path)
 
-Fresh artefacts: `benchmark_euclidean_clamped_20251107_fix_run2.jsonl` (with `benchmark_euclidean_clamped_20251107_fix.log`) and `benchmark_residual_clamped_20251107_fix_run2.jsonl` (with `benchmark_residual_clamped_20251107_fix.log`) capture the PCCT rows above with `COVERTREEX_ENABLE_NUMBA=1`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`, and `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256`.
+Fresh artefacts: `benchmark_grid_32768_default_run2.jsonl` (with `run_grid_32768_default_run2.txt`) and `benchmark_residual_32768_default.jsonl` (with `run_residual_32768_default.txt`) capture the PCCT rows above using the new defaults (`COVERTREEX_BATCH_ORDER=hilbert`, `COVERTREEX_PREFIX_SCHEDULE=adaptive`, `COVERTREEX_ENABLE_NUMBA=1`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`, `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256`).
 
-The legacy **56.09 s / 0.229 s (4 469 q/s)** residual result remains our canonical “gold standard” for dense traversal with chunking disabled. It uses the default dense traversal (no scope chunking, diagnostics off) and the synthetic RBF cache configuration shipped in `benchmarks/queries.py`. To reproduce it exactly—and to ensure no environment overrides sneak in—run:
+The historical **56.09 s / 0.229 s (4 469 q/s)** residual run (captured 2025‑11‑06) predates the grid/batch-order refresh but remains our “gold standard” regression target. The maintained harness now pins the closest available configuration—Numba enabled, natural batch order, doubling prefix schedule, diagnostics off, and no scope chunking—and currently measures **≈71.8 s build / 0.272 s query (3 762 q/s)**. To regenerate the artefact (and keep the environment consistent) run:
 
 ```
 ./benchmarks/run_residual_gold_standard.sh [optional_log_path]
 ```
 
-By default the script writes `bench_residual.log` in the repo root and resets the environment (`COVERTREEX_SCOPE_CHUNK_TARGET=0`, sparse/Numba knobs unset) so the output stays comparable across machines. Treat this log as the reference artefact when auditing regressions or publishing updated numbers.
+By default the script writes `bench_residual.log` in the repo root and sets `COVERTREEX_ENABLE_NUMBA=1`, `COVERTREEX_BATCH_ORDER=natural`, `COVERTREEX_PREFIX_SCHEDULE=doubling`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`, and `COVERTREEX_ENABLE_DIAGNOSTICS=0` so the output stays comparable across machines. Treat this log as the reference artefact when auditing regressions or publishing updated numbers (refer back to the 2025‑11‑06 56.09 s run when you need the historical pre-grid baseline).
 
 To reproduce the clamped adjacency run captured on 2025‑11‑07 (matching `benchmark_residual_clamped_20251107_fix_run2.jsonl`), invoke:
 
@@ -66,6 +66,8 @@ uv run python -m benchmarks.queries \
   --seed 42 --metric residual --baseline none \
   --log-file benchmark_residual_clamped_20251107_fix_run2.jsonl
 ```
+
+> **Baseline note:** The `_diag0` artefacts from 2025‑11‑07 (`benchmark_residual_clamped_20251107_diag0.jsonl`, `benchmark_residual_chunked_20251107_diag0.jsonl`) are the preferred reference logs whenever you need to compare against GPBoost or older “*_fix_run2” runs. They disable diagnostics to match the baseline settings but still include the new `gate1_*` and `traversal_scope_chunk_{scans,points,dedupe,saturated}` counters, so keep using them for apples-to-apples regressions going forward.
 
 _Command (8 192 row):_
 ```
@@ -102,14 +104,14 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 
 ### Euclidean metric (NumPy backend)
 
-- Fresh 32 768-point benchmark (dimension 8, batch 512, 1 024 queries, k = 8, seed 42, `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`) now lands at **44.22 s build / 0.284 s query (3 611 q/s)** for PCCT with NumPy+Numba (`benchmark_euclidean_clamped_20251107_fix_run2.jsonl` / `.log`), while the GPBoost baseline remains at **2.55 s build / 10.75 s query (95.2 q/s)**—a 37.8× throughput gap in favour of PCCT.
+- Fresh 32 768-point benchmark (dimension 8, batch 512, 1 024 queries, k = 8, seed 42, Hilbert ordering + grid conflict builder) now lands at **37.73 s build / 0.262 s query (3 914 q/s)** for PCCT with NumPy+Numba (`benchmark_grid_32768_default_run2.jsonl` / `run_grid_32768_default_run2.txt`), while the GPBoost baseline remains at **2.55 s build / 10.75 s query (95.2 q/s)**—a 41× throughput gap in favour of PCCT.
 - Batch logs show `traversal_ms` hovering between 20–118 ms on dominated batches, whereas `conflict_graph_ms` stays in the 9–18 ms range and MIS remains sub-millisecond. The journal pipeline eliminated repeated array slices, so traversal/mask assembly is once again the limiting factor at 32 k.
 - Conflict-graph builders now live in `conflict_graph_builders.py`; dense vs segmented vs residual paths report distinct telemetry. Dense remains the default until scope chunk limits (see Next Steps) are dialled in.
 - GPBoost’s cover tree baseline is sequential and Euclidean-only (no conflict graphs, no MIS). We continue to keep comparisons on the CPU/NumPy backend so wall-clock deltas stay reproducible without JAX/GPU variability.
 
 ### Residual-correlation metric (synthetic RBF caches, 2025-11-07)
 
-- Synthetic run (same dataset as above, dimension 8, batch 512, 1 024 queries, k = 8, seed 42, `--metric residual`, `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`) now reports **70.26 s build / 0.275 s query (3 723 q/s)** for PCCT (`benchmark_residual_clamped_20251107_fix_run2.jsonl`). The GPBoost baseline remains Euclidean-only and is included for throughput context at **2.51 s build / 11.18 s query (91.6 q/s)**.
+- Synthetic run (same dataset as above, dimension 8, batch 512, 1 024 queries, k = 8, seed 42, `--metric residual`, Hilbert ordering + grid builder) now reports **66.25 s build / 0.305 s query (3 358 q/s)** for PCCT (`benchmark_residual_32768_default.jsonl` / `run_residual_32768_default.txt`). The GPBoost baseline remains Euclidean-only and is included for throughput context at **2.51 s build / 11.18 s query (91.6 q/s)**.
 - Per-batch logs show `traversal_ms` between 33–118 ms and `conflict_graph_ms` between 22–30 ms despite the journal/builder refactor, highlighting that residual scopes are still nearly dense (all 261 632 candidate edges survive). MIS continues to be negligible (<0.2 ms).
 - The residual adjacency filter currently recomputes pairwise kernels even when the dense `residual_pairwise` matrix is available from traversal. Reusing that matrix inside `_build_dense_adjacency`/`filter_csr_by_radii_from_pairwise` is the next low-hanging win, especially now that steady-state `conflict_adj_scatter_ms` sits around 80 ms despite the clamp.
 - Scope chunking remains disabled by default; wiring `scope_chunk_target` through the new builder split (and exposing hit/miss telemetry) is the follow-up to keep RSS deltas in check and to pave the way for tighter residual radius guards.
@@ -152,6 +154,14 @@ class ResidualCorrHostData:
     point_decoder: PointDecoder = _default_point_decoder
     chunk_size: int = 512
     v_norm_sq: np.ndarray = None  # type: ignore[misc]
+    gate1_enabled: bool | None = None
+    gate1_alpha: float | None = None
+    gate1_margin: float | None = None
+    gate1_eps: float | None = None
+    gate1_audit: bool | None = None
+    gate_v32: np.ndarray | None = None
+    gate_norm32: np.ndarray | None = None
+    gate_stats: ResidualGateTelemetry = field(default_factory=ResidualGateTelemetry)
 
 def compute_residual_distances_with_radius(
     backend: ResidualCorrHostData,
@@ -160,17 +170,55 @@ def compute_residual_distances_with_radius(
     kernel_row: np.ndarray,
     radius: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    distances, mask = compute_distance_chunk(
+    indices = np.asarray(chunk_indices, dtype=np.int64)
+    kernel_vals = np.asarray(kernel_row, dtype=np.float64)
+    enabled, alpha, margin, eps, audit = _resolve_gate1_config(backend)
+    gate_mask: np.ndarray | None = None
+    if enabled and backend.gate_v32 is not None:
+        threshold = alpha * float(radius) + margin
+        keep_uint8 = gate1_whitened_mask(
+            backend.gate_v32[query_index],
+            backend.gate_v32[indices],
+            threshold,
+        )
+        gate_mask = keep_uint8.astype(bool, copy=False)
+        backend.gate_stats.candidates += int(indices.size)
+        backend.gate_stats.kept += int(np.count_nonzero(gate_mask))
+        backend.gate_stats.pruned += int(indices.size - np.count_nonzero(gate_mask))
+    if gate_mask is None or gate_mask.all():
+        return compute_distance_chunk(
+            v_query=backend.v_matrix[query_index],
+            v_chunk=backend.v_matrix[indices],
+            kernel_chunk=kernel_vals,
+            p_i=float(backend.p_diag[query_index]),
+            p_chunk=backend.p_diag[indices],
+            norm_query=float(backend.v_norm_sq[query_index]),
+            norm_chunk=backend.v_norm_sq[indices],
+            radius=float(radius),
+            eps=_EPS,
+        )
+    survivors = np.nonzero(gate_mask)[0]
+    if survivors.size == 0:
+        empty_dist = np.full(indices.size, float(radius) + eps, dtype=np.float64)
+        empty_mask = np.zeros(indices.size, dtype=np.uint8)
+        return empty_dist, empty_mask
+    distances = np.full(indices.size, float(radius) + eps, dtype=np.float64)
+    mask = np.zeros(indices.size, dtype=np.uint8)
+    sub_dist, sub_mask = compute_distance_chunk(
         v_query=backend.v_matrix[query_index],
-        v_chunk=backend.v_matrix[chunk_indices],
-        kernel_chunk=kernel_row,
+        v_chunk=backend.v_matrix[indices[survivors]],
+        kernel_chunk=kernel_vals[survivors],
         p_i=float(backend.p_diag[query_index]),
-        p_chunk=backend.p_diag[chunk_indices],
+        p_chunk=backend.p_diag[indices[survivors]],
         norm_query=float(backend.v_norm_sq[query_index]),
-        norm_chunk=backend.v_norm_sq[chunk_indices],
+        norm_chunk=backend.v_norm_sq[indices[survivors]],
         radius=float(radius),
         eps=_EPS,
     )
+    distances[survivors] = sub_dist
+    mask[survivors] = sub_mask
+    if audit and np.any(~gate_mask):
+        _audit_gate1_pruned(...)
     return distances, mask
 
 def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
@@ -243,6 +291,13 @@ def compute_distance_chunk(...):
     # NumPy fallback matches the Numba kernel semantics
 ```
 
+Environment knobs
+
+- `COVERTREEX_RESIDUAL_GATE1` (default `0`) enables the whitened float32 gate globally.
+- `COVERTREEX_RESIDUAL_GATE1_ALPHA`, `..._MARGIN`, and `..._EPS` control the linear threshold mapping and the sentinel used for pruned entries.
+- `COVERTREEX_RESIDUAL_GATE1_AUDIT=1` reruns the precise kernel on pruned entries and raises if any lie within the requested residual radius; this is wired into the regression tests and benchmark telemetry as `traversal_gate1_*` counters.
+- `COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH` points at an empirical lookup table (for example `docs/data/residual_gate_profile_diag0.json`, generated by `tools/build_residual_gate_profile.py`). When present, the lookup supplies per-radius thresholds directly, so the linear α/margin knobs become safety fallbacks rather than the primary tuneable.
+
 ### Persistence journal (NumPy backend)
 
 - With `COVERTREEX_BACKEND=numpy` and `COVERTREEX_ENABLE_NUMBA=1`, batch inserts now route through a Numba “journal” kernel that clones the parent/child/next arrays once per batch and applies updates in a single sweep. When the flag is disabled or a non-NumPy backend is selected, the legacy SliceUpdate path is used automatically.
@@ -261,6 +316,19 @@ def compute_distance_chunk(...):
 
 - On import we clamp `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, and `NUMEXPR_NUM_THREADS` to 1 so NumPy/BLAS libraries do not oversubscribe the worker pool. We also set `NUMBA_THREADING_LAYER=tbb` and default `NUMBA_NUM_THREADS` to the host CPU count (override any of these via environment variables before importing `covertreex`).
 - For heavier boxes increase `NUMBA_NUM_THREADS` and, if needed, batch size (`--batch-size`) and `COVERTREEX_SCOPE_CHUNK_TARGET` to keep each worker busy. The TBB threading layer provides work-stealing, so threads redistribute skewed batches automatically once these pools are configured.
+
+### Grid conflict builder + batch ordering knobs (2025‑11‑07)
+
+- Setting `COVERTREEX_CONFLICT_GRAPH_IMPL=grid` switches the dominated-batch path to a hash-grid leader election that bypasses CSR + MIS. Leaders are selected per cell via mixed 64-bit priorities and greedily filtered before insertion; MIS still runs but sees a trivially independent set. Telemetry published via `conflict_grid_cells`, `*_leaders_*`, and `grid_local_edges` counters in diagnostics/JSONL logs.
+- Benchmark snapshot (NumPy backend, diagnostics off, hilbert disabled):
+  - **8 192 / 1 024 / k=16**: build **5.20 s**, query **0.085 s** (12.0 k q/s) with `grid` vs 4.03 s/0.934 s on the legacy dense path.
+  - **32 768 / 1 024 / k=8**: build **37.7 s**, query **0.262 s** (3.9 k q/s). The grid path removes MIS time entirely (0 edges) while keeping per-batch scatter ≤6.7 ms once Hilbert ordering is enabled (see `benchmark_grid_32768_default_run2.jsonl`).
+- Batch-order controls ship as both env vars and CLI overrides in `benchmarks/queries.py`:
+  - `COVERTREEX_BATCH_ORDER={natural|random|hilbert}` or `--batch-order …` sets the per-batch permutation; `hilbert` compacts domination-friendly prefixes and logs spread via `batch_order_hilbert_code_spread`.
+  - `COVERTREEX_PREFIX_SCHEDULE={doubling|adaptive}` / `--prefix-schedule …` toggles density-aware prefix growth (see `COVERTREEX_PREFIX_DENSITY_*` + `COVERTREEX_PREFIX_GROWTH_*` envs for thresholds).
+  - Example CLI: `uv run python -m benchmarks.queries … --batch-order hilbert --prefix-schedule adaptive` (Hilbert run above yielded the same 5.20 s build with steadier per-batch scatter and domination ratios logged inline).
+- **Hilbert becomes the default batch order (2025‑11‑07).** Fresh 32 768-point logs (`benchmark_grid_32768_natural.jsonl`, `benchmark_grid_32768_default_run2.jsonl`) show the first dominated batch’s scatter dropping from **3 951 ms → 6.6 ms**, average scatter falling **62 ms → 0.55 ms**, and `conflict_graph_ms` shrinking **83.7 ms → 22.4 ms** when Hilbert ordering is enabled alongside the grid builder. Because the domination ratio and leader counts stay unchanged (≈0.984 and ≈202 leaders/batch), we now default `COVERTREEX_BATCH_ORDER=hilbert` and updated the scaling table above (Euclidean build **37.7 s**, query **0.262 s**, `~3.9 k q/s`).
+- **Adaptive prefix growth defaults tuned + exposed via `--build-mode prefix`.** Use `python -m benchmarks.queries … --build-mode prefix` to route construction through `batch_insert_prefix_doubling` and emit per-prefix telemetry (`prefix_factor`, `prefix_domination_ratio`, `prefix_schedule`) into the JSONL log. The 32 k Hilbert+grid run in this mode (`benchmark_grid_32768_prefix.jsonl`) produced **16 385 adaptive groups** with scatter averaging **0.047 ms** (median 0.043 ms, max 12.2 ms) and domination ratio ≈1.0 while keeping the prefix-factor blend at 1.25/2.25. These numbers justify the new `_DEFAULT_PREFIX_*` constants and give auditors a structured artefact when analysing prefix shaping; the residual variant still needs follow-up because the clamped run exceeds 20 minutes under this schedule (see plan §2).
 
 ## Parallel Compressed Cover Tree — Conflict Graph Builder (dense + segmented)
 
