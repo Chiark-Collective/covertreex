@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
+from pathlib import Path
+from typing import Any, List, Tuple
+
+try:  # pragma: no cover - platform specific fallback
+    import resource
+except ImportError:  # pragma: no cover - Windows fallback
+    resource = None  # type: ignore
 
 os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 from dataclasses import dataclass
-from typing import List, Tuple
 
 import numpy as np
 from numpy.random import Generator, default_rng
@@ -25,6 +32,95 @@ from covertreex.baseline import (
     has_external_cover_tree,
     has_gpboost_cover_tree,
 )
+
+
+def _read_rss_bytes() -> int | None:
+    try:
+        with open("/proc/self/statm", "r", encoding="utf-8") as handle:
+            contents = handle.readline().strip().split()
+        if len(contents) >= 2:
+            rss_pages = int(contents[1])
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            return int(rss_pages * page_size)
+    except (OSError, ValueError, AttributeError):
+        pass
+    if resource is None:  # pragma: no cover - Windows fallback
+        return None
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    if getattr(usage, "ru_maxrss", 0):
+        return int(usage.ru_maxrss * 1024)
+    return None
+
+
+def _ms(value: float) -> float:
+    return float(value) * 1e3
+
+
+class BenchmarkLogWriter:
+    def __init__(self, path: str):
+        self._path = Path(path).expanduser()
+        if self._path.parent:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = self._path.open("a", encoding="utf-8")
+        self._previous_rss = _read_rss_bytes()
+
+    def close(self) -> None:
+        if self._handle and not self._handle.closed:
+            self._handle.close()
+
+    def record_batch(self, *, batch_index: int, batch_size: int, plan: Any) -> None:
+        traversal_timings = plan.traversal.timings
+        conflict_timings = plan.conflict_graph.timings
+        rss_now = _read_rss_bytes()
+        rss_delta = None
+        if rss_now is not None and self._previous_rss is not None:
+            rss_delta = rss_now - self._previous_rss
+        self._previous_rss = rss_now
+
+        record = {
+            "timestamp": time.time(),
+            "batch_index": int(batch_index),
+            "batch_size": int(batch_size),
+            "candidates": int(plan.traversal.parents.shape[0]),
+            "selected": int(plan.selected_indices.size),
+            "dominated": int(plan.dominated_indices.size),
+            "mis_iterations": int(getattr(plan.mis_result, "iterations", 0)),
+            "traversal_ms": _ms(plan.timings.traversal_seconds),
+            "conflict_graph_ms": _ms(plan.timings.conflict_graph_seconds),
+            "mis_ms": _ms(plan.timings.mis_seconds),
+            "traversal_pairwise_ms": _ms(traversal_timings.pairwise_seconds),
+            "traversal_mask_ms": _ms(traversal_timings.mask_seconds),
+            "traversal_semisort_ms": _ms(traversal_timings.semisort_seconds),
+            "traversal_tile_ms": _ms(traversal_timings.tile_seconds),
+            "conflict_pairwise_ms": _ms(conflict_timings.pairwise_seconds),
+            "conflict_scope_group_ms": _ms(conflict_timings.scope_group_seconds),
+            "conflict_adjacency_ms": _ms(conflict_timings.adjacency_seconds),
+            "conflict_annulus_ms": _ms(conflict_timings.annulus_seconds),
+            "conflict_adj_scatter_ms": _ms(conflict_timings.adjacency_scatter_seconds),
+            "conflict_adj_filter_ms": _ms(conflict_timings.adjacency_filter_seconds),
+            "conflict_adj_pairs": int(conflict_timings.adjacency_total_pairs),
+            "conflict_adj_candidates": int(conflict_timings.adjacency_candidate_pairs),
+            "traversal_scope_chunk_segments": int(traversal_timings.scope_chunk_segments),
+            "traversal_scope_chunk_emitted": int(traversal_timings.scope_chunk_emitted),
+            "traversal_scope_chunk_max_members": int(traversal_timings.scope_chunk_max_members),
+            "conflict_scope_chunk_segments": int(conflict_timings.scope_chunk_segments),
+            "conflict_scope_chunk_emitted": int(conflict_timings.scope_chunk_emitted),
+            "conflict_scope_chunk_max_members": int(conflict_timings.scope_chunk_max_members),
+        }
+        if rss_now is not None:
+            record["rss_bytes"] = int(rss_now)
+        if rss_delta is not None:
+            record["rss_delta_bytes"] = int(rss_delta)
+
+        self._handle.write(json.dumps(record, sort_keys=True))
+        self._handle.write("\n")
+        self._handle.flush()
+
+    def __enter__(self) -> "BenchmarkLogWriter":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
 
 @dataclass(frozen=True)
@@ -163,6 +259,7 @@ def _build_tree(
     batch_size: int,
     seed: int,
     prebuilt_points: np.ndarray | None = None,
+    log_writer: BenchmarkLogWriter | None = None,
 ) -> Tuple[PCCTree, np.ndarray, float]:
     backend = _resolve_backend()
     tree = PCCTree.empty(dimension=dimension, backend=backend)
@@ -178,7 +275,13 @@ def _build_tree(
             end_idx = min(start_idx + batch_size, total)
             batch_np = points_np[start_idx:end_idx]
             batch = backend.asarray(batch_np, dtype=backend.default_float)
-            tree, _ = batch_insert(tree, batch, mis_seed=seed + idx)
+            tree, plan = batch_insert(tree, batch, mis_seed=seed + idx)
+            if log_writer is not None:
+                log_writer.record_batch(
+                    batch_index=idx,
+                    batch_size=int(batch_np.shape[0]),
+                    plan=plan,
+                )
             buffers.append(np.asarray(batch))
             idx += 1
     else:
@@ -187,7 +290,13 @@ def _build_tree(
         while remaining > 0:
             current = min(batch_size, remaining)
             batch = _generate_points_backend(rng, current, dimension)
-            tree, _ = batch_insert(tree, batch, mis_seed=seed + idx)
+            tree, plan = batch_insert(tree, batch, mis_seed=seed + idx)
+            if log_writer is not None:
+                log_writer.record_batch(
+                    batch_index=idx,
+                    batch_size=current,
+                    plan=plan,
+                )
             buffers.append(np.asarray(batch))
             remaining -= current
             idx += 1
@@ -212,6 +321,7 @@ def benchmark_knn_latency(
     prebuilt_tree: PCCTree | None = None,
     prebuilt_queries: np.ndarray | None = None,
     build_seconds: float | None = None,
+    log_writer: BenchmarkLogWriter | None = None,
 ) -> Tuple[PCCTree, QueryBenchmarkResult]:
     tree_build_seconds: float | None = None
     if prebuilt_tree is None:
@@ -221,6 +331,7 @@ def benchmark_knn_latency(
             batch_size=batch_size,
             seed=seed,
             prebuilt_points=prebuilt_points,
+            log_writer=log_writer,
         )
     else:
         tree = prebuilt_tree
@@ -314,6 +425,12 @@ def _parse_args() -> argparse.Namespace:
             "'external', 'both' (sequential + external), 'all' (sequential + gpboost + external)."
         ),
     )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Write per-batch telemetry as JSON lines to the specified path.",
+    )
     return parser.parse_args()
 
 
@@ -401,8 +518,11 @@ def main() -> None:
     args = _parse_args()
     previous_metric = os.environ.get("COVERTREEX_METRIC")
     previous_backend = os.environ.get("COVERTREEX_BACKEND")
+    log_writer: BenchmarkLogWriter | None = None
 
     try:
+        if args.log_file:
+            log_writer = BenchmarkLogWriter(args.log_file)
         if args.metric == "residual":
             os.environ["COVERTREEX_METRIC"] = "residual_correlation"
             os.environ["COVERTREEX_BACKEND"] = "numpy"
@@ -434,6 +554,7 @@ def main() -> None:
             seed=args.seed,
             prebuilt_points=points_np,
             prebuilt_queries=queries_np,
+            log_writer=log_writer,
         )
 
         print(
@@ -474,6 +595,8 @@ def main() -> None:
         else:
             os.environ.pop("COVERTREEX_BACKEND", None)
         cx_config.reset_runtime_config_cache()
+        if log_writer is not None:
+            log_writer.close()
 
 
 if __name__ == "__main__":

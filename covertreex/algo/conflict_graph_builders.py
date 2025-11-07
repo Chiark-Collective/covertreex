@@ -117,6 +117,7 @@ def build_dense_adjacency(
                 batch_size,
                 segment_dedupe=runtime.scope_segment_dedupe,
                 chunk_target=runtime.scope_chunk_target,
+                chunk_max_segments=runtime.scope_chunk_max_segments,
                 pairwise=pairwise_np,
                 radii=radii_np,
             )

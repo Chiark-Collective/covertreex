@@ -11,7 +11,7 @@ from covertreex.algo.traverse import traverse_collect_scopes
 from covertreex.core.metrics import reset_residual_metric
 from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
 from covertreex.algo import batch_insert
-from covertreex.algo._scope_numba import NUMBA_SCOPE_AVAILABLE
+from covertreex.algo._scope_numba import NUMBA_SCOPE_AVAILABLE, _chunk_ranges_from_indptr
 from covertreex.metrics.residual import (
     ResidualCorrHostData,
     configure_residual_correlation,
@@ -40,6 +40,18 @@ def _sample_tree():
         stats=TreeLogStats(num_batches=1),
         backend=backend,
     )
+
+
+def test_chunk_range_builder_honours_max_segments():
+    indptr = np.array([0, 5, 10, 15, 20, 25], dtype=np.int64)
+
+    ranges_unbounded = _chunk_ranges_from_indptr(indptr, chunk_target=4, max_segments=0)
+    ranges_capped = _chunk_ranges_from_indptr(indptr, chunk_target=4, max_segments=2)
+
+    assert len(ranges_unbounded) > 2
+    assert len(ranges_capped) == 2
+    assert ranges_capped[0] == (0, 3)
+    assert ranges_capped[1] == (3, 5)
 
 
 def test_conflict_graph_builds_edges_from_shared_scopes():

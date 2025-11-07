@@ -18,6 +18,7 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "COVERTREEX_CONFLICT_GRAPH_IMPL",
         "COVERTREEX_SCOPE_SEGMENT_DEDUP",
         "COVERTREEX_SCOPE_CHUNK_TARGET",
+        "COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS",
         "COVERTREEX_METRIC",
         "JAX_ENABLE_X64",
         "JAX_PLATFORM_NAME",
@@ -129,6 +130,7 @@ def test_describe_runtime_reports_expected_fields(monkeypatch: pytest.MonkeyPatc
     assert summary["primary_platform"] is None
     assert summary["conflict_graph_impl"] == "dense"
     assert summary["scope_chunk_target"] == 0
+    assert summary["scope_chunk_max_segments"] == 512
     assert summary["metric"] == "euclidean"
 
 
@@ -166,6 +168,24 @@ def test_scope_chunk_target_disable(monkeypatch: pytest.MonkeyPatch):
 
     runtime = cx_config.runtime_config()
     assert runtime.scope_chunk_target == 0
+
+
+def test_scope_chunk_max_segments_override(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS", "128")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.scope_chunk_max_segments == 128
+
+
+def test_scope_chunk_max_segments_disable(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS", "0")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.scope_chunk_max_segments == 0
 
 
 def test_metric_override(monkeypatch: pytest.MonkeyPatch):

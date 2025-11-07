@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import sys
 import pytest
@@ -5,7 +6,12 @@ import pytest
 jax = pytest.importorskip("jax")
 
 from benchmarks.batch_ops import benchmark_delete, benchmark_insert
-from benchmarks.queries import benchmark_knn_latency, run_baseline_comparisons
+from benchmarks.queries import (
+    BenchmarkLogWriter,
+    _build_tree,
+    benchmark_knn_latency,
+    run_baseline_comparisons,
+)
 from benchmarks import runtime_breakdown
 from covertreex import config as cx_config
 from covertreex.baseline import has_gpboost_cover_tree
@@ -142,3 +148,25 @@ def test_runtime_breakdown_csv_output(tmp_path, monkeypatch):
         assert header == expected_tail
         data_rows = contents[1:]
     assert any(row.startswith("PCCT") for row in data_rows)
+
+
+def test_benchmark_log_writer_emits_json(tmp_path):
+    log_path = tmp_path / "batches.jsonl"
+    writer = BenchmarkLogWriter(str(log_path))
+    try:
+        _build_tree(
+            dimension=2,
+            tree_points=8,
+            batch_size=4,
+            seed=0,
+            log_writer=writer,
+        )
+    finally:
+        writer.close()
+
+    contents = log_path.read_text().strip().splitlines()
+    assert contents
+    first_entry = json.loads(contents[0])
+    assert first_entry["batch_index"] == 0
+    assert "traversal_ms" in first_entry
+    assert "rss_bytes" in first_entry or "rss_delta_bytes" in first_entry

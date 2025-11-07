@@ -18,6 +18,7 @@ _SUPPORTED_BACKENDS = {"jax", "numpy"}
 _SUPPORTED_PRECISION = {"float32", "float64"}
 _CONFLICT_GRAPH_IMPLS = {"dense", "segmented", "auto"}
 _DEFAULT_SCOPE_CHUNK_TARGET = 0
+_DEFAULT_SCOPE_CHUNK_MAX_SEGMENTS = 512
 _DEFAULT_NUMBA_THREADING_LAYER = "tbb"
 
 
@@ -153,6 +154,7 @@ class RuntimeConfig:
     conflict_graph_impl: str
     scope_segment_dedupe: bool
     scope_chunk_target: int
+    scope_chunk_max_segments: int
     metric: str
 
     @property
@@ -195,6 +197,15 @@ class RuntimeConfig:
             scope_chunk_target = 0
         else:
             scope_chunk_target = raw_chunk_target
+        raw_chunk_segments = _parse_optional_int(
+            os.getenv("COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS")
+        )
+        if raw_chunk_segments is None:
+            scope_chunk_max_segments = _DEFAULT_SCOPE_CHUNK_MAX_SEGMENTS
+        elif raw_chunk_segments <= 0:
+            scope_chunk_max_segments = 0
+        else:
+            scope_chunk_max_segments = raw_chunk_segments
         metric = os.getenv("COVERTREEX_METRIC", "euclidean").strip().lower() or "euclidean"
         return cls(
             backend=backend,
@@ -208,6 +219,7 @@ class RuntimeConfig:
             conflict_graph_impl=conflict_graph_impl,
             scope_segment_dedupe=scope_segment_dedupe,
             scope_chunk_target=scope_chunk_target,
+            scope_chunk_max_segments=scope_chunk_max_segments,
             metric=metric,
         )
 
@@ -327,5 +339,6 @@ def describe_runtime() -> Dict[str, Any]:
         "conflict_graph_impl": config.conflict_graph_impl,
         "scope_segment_dedupe": config.scope_segment_dedupe,
         "scope_chunk_target": config.scope_chunk_target,
+        "scope_chunk_max_segments": config.scope_chunk_max_segments,
         "metric": config.metric,
     }

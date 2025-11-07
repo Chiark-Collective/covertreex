@@ -379,6 +379,8 @@ def _collect_residual_scopes_streaming(
         query_id = int(query_indices[qi])
         radius = float(radii[qi])
         collected: set[int] = set()
+        saturated = False
+        fully_scanned = True
 
         query_idx_arr = np.asarray([query_id], dtype=np.int64)
         for start in range(0, total_points, chunk):
@@ -407,6 +409,14 @@ def _collect_residual_scopes_streaming(
                 pos = tree_id_to_pos.get(int(cid))
                 if pos is not None:
                     collected.add(int(pos))
+                if limit and len(collected) >= limit:
+                    saturated = True
+                    break
+            if saturated:
+                fully_scanned = False
+                break
+        # `saturated` indicates we bailed early; keep track of full scans so
+        # telemetry can distinguish true caps from naturally small scopes.
 
         collected.add(parent_pos)
         chain = _collect_next_chain(tree, parent_pos, next_cache=next_cache_np)
@@ -432,6 +442,11 @@ def _collect_residual_scopes_streaming(
                 top_levels_np,
                 limit,
             )
+        elif limit and saturated and not fully_scanned:
+            # If we bailed early because the scope hit the limit but adding
+            # the parent/chain kept us within bounds, still mark this scope as
+            # clamped so telemetry reflects the cap taking effect.
+            trimmed_scopes += 1
 
         max_scope_after = max(max_scope_after, scope_vec.size)
 

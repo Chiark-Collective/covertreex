@@ -36,8 +36,12 @@ class ScopeAdjacencyResult:
     chunk_max_members: int = 0
 
 
-def _chunk_ranges_from_indptr(indptr: np.ndarray, chunk_target: int) -> list[tuple[int, int]]:
-    """Return (start, end) node ranges whose membership volume stays under chunk_target."""
+def _chunk_ranges_from_indptr(
+    indptr: np.ndarray,
+    chunk_target: int,
+    max_segments: int = 0,
+) -> list[tuple[int, int]]:
+    """Return (start, end) node ranges bounded by the configured chunk target."""
 
     num_nodes = indptr.size - 1
     if num_nodes <= 0:
@@ -45,12 +49,19 @@ def _chunk_ranges_from_indptr(indptr: np.ndarray, chunk_target: int) -> list[tup
     if chunk_target <= 0:
         return [(0, num_nodes)]
 
+    total_volume = int(indptr[-1] - indptr[0]) if indptr.size else 0
+    effective_target = max(1, int(chunk_target))
+    if max_segments > 0 and total_volume > 0:
+        min_target = (total_volume + max_segments - 1) // max_segments
+        if min_target > effective_target:
+            effective_target = max(1, min_target)
+
     ranges: list[tuple[int, int]] = []
     start = 0
     accum = 0
     for node in range(num_nodes):
         accum += int(indptr[node + 1] - indptr[node])
-        if accum >= chunk_target:
+        if accum >= effective_target:
             ranges.append((start, node + 1))
             start = node + 1
             accum = 0
@@ -541,6 +552,7 @@ if NUMBA_SCOPE_AVAILABLE:
         *,
         segment_dedupe: bool = True,
         chunk_target: int = 0,
+        chunk_max_segments: int = 0,
         pairwise: np.ndarray | None = None,
         radii: np.ndarray | None = None,
     ) -> ScopeAdjacencyResult:
@@ -622,7 +634,11 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_max_members=0,
             )
 
-        chunk_ranges_list = _chunk_ranges_from_indptr(indptr_nodes, chunk_target)
+        chunk_ranges_list = _chunk_ranges_from_indptr(
+            indptr_nodes,
+            chunk_target,
+            chunk_max_segments,
+        )
         chunk_count = len(chunk_ranges_list)
         if chunk_count:
             chunk_ranges_arr = np.asarray(chunk_ranges_list, dtype=np.int64).reshape(chunk_count, 2)
@@ -754,6 +770,7 @@ else:  # pragma: no cover - executed when numba missing
         *,
         segment_dedupe: bool = True,
         chunk_target: int = 0,
+        chunk_max_segments: int = 0,
         pairwise: np.ndarray | None = None,
         radii: np.ndarray | None = None,
     ) -> ScopeAdjacencyResult:
