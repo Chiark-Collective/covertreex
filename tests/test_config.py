@@ -31,6 +31,8 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "COVERTREEX_RESIDUAL_GATE1_PROFILE_BINS",
         "COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH",
         "COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN",
+        "COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH",
+        "COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT",
         "JAX_ENABLE_X64",
         "JAX_PLATFORM_NAME",
     ]:
@@ -190,6 +192,19 @@ def test_conflict_graph_impl_grid(monkeypatch: pytest.MonkeyPatch):
 
     runtime = cx_config.runtime_config()
     assert runtime.conflict_graph_impl == "grid"
+
+
+def test_residual_scope_cap_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _clear_env(monkeypatch)
+    cap_path = tmp_path / "caps.json"
+    cap_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH", str(cap_path))
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT", "3.25")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.residual_scope_cap_path == str(cap_path)
+    assert runtime.residual_scope_cap_default == pytest.approx(3.25)
 
 
 def test_batch_order_override(monkeypatch: pytest.MonkeyPatch):

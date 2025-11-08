@@ -15,6 +15,7 @@ from covertreex.algo.conflict_graph_builders import (
     AdjacencyBuild,
     block_until_ready,
     build_dense_adjacency,
+    build_grid_adjacency,
     build_residual_adjacency,
     build_segmented_adjacency,
 )
@@ -46,6 +47,12 @@ class ConflictGraph:
     annulus_bin_indices: Any
     annulus_bin_ids: Any
     timings: "ConflictGraphTimings"
+    forced_selected: Any | None = None
+    forced_dominated: Any | None = None
+    grid_cells: int = 0
+    grid_leaders_raw: int = 0
+    grid_leaders_after: int = 0
+    grid_local_edges: int = 0
 
     @property
     def num_nodes(self) -> int:
@@ -85,7 +92,14 @@ class ConflictGraphTimings:
     scope_chunk_segments: int = 0
     scope_chunk_emitted: int = 0
     scope_chunk_max_members: int = 0
+    scope_chunk_pair_cap: int = 0
+    scope_chunk_pairs_before: int = 0
+    scope_chunk_pairs_after: int = 0
     mis_seconds: float = 0.0
+    grid_cells: int = 0
+    grid_leaders_raw: int = 0
+    grid_leaders_after: int = 0
+    grid_local_edges: int = 0
 
 
 def build_conflict_graph(
@@ -131,6 +145,15 @@ def build_conflict_graph(
     pairwise_seconds = time.perf_counter() - pairwise_start
 
     batch_size = int(traversal.parents.shape[0])
+    residual_scope_radii_np: np.ndarray | None = None
+    if (
+        residual_mode
+        and residual_cache is not None
+        and getattr(residual_cache, "scope_radii", None) is not None
+    ):
+        scope_arr = np.asarray(residual_cache.scope_radii, dtype=np.float64)
+        if scope_arr.shape[0] == batch_size:
+            residual_scope_radii_np = scope_arr
 
     scope_group_start = time.perf_counter()
     scope_indptr = backend.asarray(traversal.scope_indptr, dtype=backend.default_int)
@@ -160,13 +183,25 @@ def build_conflict_graph(
     if si_cache.size:
         si_values = xp.take(si_cache, safe_parents, mode="clip")
         si_values = xp.where(parent_valid, si_values, xp.zeros_like(si_values))
+        si_values = xp.where(
+            xp.isfinite(si_values),
+            si_values,
+            base,
+        )
     else:
         si_values = xp.zeros(parents.shape, dtype=backend.default_float)
-    radii = xp.where(
-        parent_valid,
-        xp.maximum(base, si_values),
-        xp.full_like(base, float("inf")),
-    )
+    fallback_radii = xp.where(parent_valid, xp.maximum(base, si_values), base)
+    if residual_scope_radii_np is not None:
+        scope_radii_backend = backend.asarray(
+            residual_scope_radii_np,
+            dtype=backend.default_float,
+        )
+        min_floor = xp.asarray(runtime.residual_radius_floor, dtype=backend.default_float)
+        scope_radii_backend = xp.maximum(scope_radii_backend, min_floor)
+        finite_mask = xp.logical_and(parent_valid, xp.isfinite(scope_radii_backend))
+        radii = xp.where(finite_mask, scope_radii_backend, fallback_radii)
+    else:
+        radii = fallback_radii
     radii = backend.device_put(radii)
     impl = runtime.conflict_graph_impl
 
@@ -194,6 +229,15 @@ def build_conflict_graph(
             point_ids=point_ids,
             pairwise_np=pairwise_np,
             radii_np=radii_np,
+        )
+    elif impl == "grid":
+        adjacency_build = build_grid_adjacency(
+            backend=backend,
+            batch_points=batch,
+            batch_levels=levels,
+            radii=radii,
+            scope_indptr=scope_indptr,
+            scope_indices=scope_indices,
         )
     elif residual_mode and residual_pairwise_np is not None:
         adjacency_build = build_residual_adjacency(
@@ -253,10 +297,38 @@ def build_conflict_graph(
     scope_chunk_segments = adjacency_build.scope_chunk_segments
     scope_chunk_emitted = adjacency_build.scope_chunk_emitted
     scope_chunk_max_members = adjacency_build.scope_chunk_max_members
+    scope_chunk_pair_cap = adjacency_build.scope_chunk_pair_cap
+    scope_chunk_pairs_before = adjacency_build.scope_chunk_pairs_before
+    scope_chunk_pairs_after = adjacency_build.scope_chunk_pairs_after
+    forced_selected = adjacency_build.forced_selected
+    forced_dominated = adjacency_build.forced_dominated
+    grid_cells = adjacency_build.grid_cells
+    grid_leaders_raw = adjacency_build.grid_leaders_raw
+    grid_leaders_after = adjacency_build.grid_leaders_after
+    grid_local_edges = adjacency_build.grid_local_edges
 
     if sources.size and not radius_pruned:
         filter_start = time.perf_counter()
-        if residual_mode and batch_indices_np is not None:
+        if residual_mode and residual_pairwise_np is not None:
+            sources_np = np.asarray(backend.to_numpy(sources), dtype=np.int64)
+            targets_np = np.asarray(backend.to_numpy(targets), dtype=np.int64)
+            keep_mask_np = np.zeros(sources_np.shape[0], dtype=np.bool_)
+            unique_sources = np.unique(sources_np)
+            for src in unique_sources:
+                mask_indices = np.where(sources_np == src)[0]
+                if mask_indices.size == 0:
+                    continue
+                tgt_batch_ids = targets_np[mask_indices]
+                distances = residual_pairwise_np[src, tgt_batch_ids]
+                min_radii = np.minimum(radii_np[src], radii_np[tgt_batch_ids])
+                keep = distances <= (min_radii + RESIDUAL_FILTER_EPS)
+                keep_mask_np[mask_indices] = keep
+            keep_mask = backend.asarray(keep_mask_np, dtype=backend.xp.bool_)
+            sources = sources[keep_mask]
+            targets = targets[keep_mask]
+            block_until_ready(keep_mask)
+            adjacency_filter_seconds = time.perf_counter() - filter_start
+        elif residual_mode and batch_indices_np is not None:
             host_backend = get_residual_backend()
             sources_np = np.asarray(backend.to_numpy(sources), dtype=np.int64)
             targets_np = np.asarray(backend.to_numpy(targets), dtype=np.int64)
@@ -417,6 +489,19 @@ def build_conflict_graph(
             scope_chunk_segments=scope_chunk_segments,
             scope_chunk_emitted=scope_chunk_emitted,
             scope_chunk_max_members=scope_chunk_max_members,
+            scope_chunk_pair_cap=scope_chunk_pair_cap,
+            scope_chunk_pairs_before=scope_chunk_pairs_before,
+            scope_chunk_pairs_after=scope_chunk_pairs_after,
+            grid_cells=grid_cells,
+            grid_leaders_raw=grid_leaders_raw,
+            grid_leaders_after=grid_leaders_after,
+            grid_local_edges=grid_local_edges,
         ),
+        forced_selected=forced_selected,
+        forced_dominated=forced_dominated,
+        grid_cells=grid_cells,
+        grid_leaders_raw=grid_leaders_raw,
+        grid_leaders_after=grid_leaders_after,
+        grid_local_edges=grid_local_edges,
     )
 RESIDUAL_FILTER_EPS = 1e-9

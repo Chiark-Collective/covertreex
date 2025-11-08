@@ -34,6 +34,17 @@ class ScopeAdjacencyResult:
     chunk_count: int = 1
     chunk_emitted: int = 0
     chunk_max_members: int = 0
+    chunk_pairs_cap: int = 0
+    chunk_pairs_before: int = 0
+    chunk_pairs_after: int = 0
+
+
+@dataclass(frozen=True)
+class ChunkRangeStats:
+    pair_cap: int = 0
+    pair_tail_threshold: int = 0
+    pair_max_before: int = 0
+    pair_max_after: int = 0
 
 
 _TAIL_MERGE_DIVISOR = 4
@@ -44,12 +55,13 @@ def _chunk_ranges_from_indptr(
     chunk_target: int,
     max_segments: int = 0,
     keep_mask: np.ndarray | None = None,
-) -> list[tuple[int, int]]:
+    pair_counts: np.ndarray | None = None,
+) -> tuple[list[tuple[int, int]], ChunkRangeStats]:
     """Return (start, end) node ranges bounded by the configured chunk target."""
 
     num_nodes = indptr.size - 1
     if num_nodes <= 0:
-        return [(0, 0)]
+        return [(0, 0)], ChunkRangeStats()
 
     node_weights = np.diff(indptr).astype(np.int64, copy=False)
     if keep_mask is not None:
@@ -60,10 +72,10 @@ def _chunk_ranges_from_indptr(
 
     total_volume = int(node_weights.sum())
     if total_volume <= 0:
-        return [(0, num_nodes)]
+        return [(0, num_nodes)], ChunkRangeStats()
 
     if chunk_target <= 0 and max_segments <= 0:
-        return [(0, num_nodes)]
+        return [(0, num_nodes)], ChunkRangeStats()
 
     if chunk_target <= 0:
         effective_target = max(1, (total_volume + max_segments - 1) // max(1, max_segments))
@@ -92,24 +104,57 @@ def _chunk_ranges_from_indptr(
     if not ranges:
         ranges.append((0, num_nodes))
 
+    raw_ranges = list(ranges)
     if len(ranges) > 1:
         last_start, last_end = ranges[-1]
         last_volume = int(weights_prefix[last_end] - weights_prefix[last_start])
         if last_volume == 0:
             ranges.pop()
             if not ranges:
-                return [(0, num_nodes)]
+                return [(0, num_nodes)], ChunkRangeStats()
 
     if effective_target > 0 and len(ranges) > 1:
         tail_threshold = max(1, (effective_target + _TAIL_MERGE_DIVISOR - 1) // _TAIL_MERGE_DIVISOR)
+    else:
+        tail_threshold = 0
+
+    pair_stats = ChunkRangeStats()
+    pair_prefix = None
+    pair_cap = 0
+    pair_tail_threshold = 0
+    pair_max_before = 0
+    pair_max_after = 0
+    if pair_counts is not None and pair_counts.size == num_nodes:
+        pair_prefix = np.empty(num_nodes + 1, dtype=np.int64)
+        pair_prefix[0] = 0
+        np.cumsum(pair_counts.astype(np.int64, copy=False), out=pair_prefix[1:])
+        if pair_prefix[-1] > 0 and len(raw_ranges) > 0:
+            approx_segments = len(raw_ranges)
+            pair_cap = max(1, int((pair_prefix[-1] + approx_segments - 1) // approx_segments))
+            pair_tail_threshold = max(1, int((pair_cap + _TAIL_MERGE_DIVISOR - 1) // _TAIL_MERGE_DIVISOR))
+            pair_max_before = _max_range_pairs(raw_ranges, pair_prefix)
+
+    if effective_target > 0 and len(ranges) > 1:
         ranges = _merge_tail_ranges(
             ranges,
             weights_prefix,
             effective_target,
             tail_threshold,
+            pair_prefix=pair_prefix,
+            pair_cap=pair_cap,
+            pair_tail_threshold=pair_tail_threshold,
         )
 
-    return ranges
+    if pair_prefix is not None and pair_prefix[-1] > 0:
+        pair_max_after = _max_range_pairs(ranges, pair_prefix)
+        pair_stats = ChunkRangeStats(
+            pair_cap=int(pair_cap),
+            pair_tail_threshold=int(pair_tail_threshold),
+            pair_max_before=int(pair_max_before),
+            pair_max_after=int(pair_max_after),
+        )
+
+    return ranges, pair_stats
 
 
 def _merge_tail_ranges(
@@ -117,8 +162,12 @@ def _merge_tail_ranges(
     weights_prefix: np.ndarray,
     chunk_cap: int,
     tail_threshold: int,
+    *,
+    pair_prefix: np.ndarray | None = None,
+    pair_cap: int = 0,
+    pair_tail_threshold: int = 0,
 ) -> list[tuple[int, int]]:
-    if tail_threshold <= 0 or chunk_cap <= 0 or len(ranges) <= 1:
+    if chunk_cap <= 0 or len(ranges) <= 1:
         return ranges
 
     merged = list(ranges)
@@ -126,7 +175,16 @@ def _merge_tail_ranges(
     while idx > 0:
         start, end = merged[idx]
         volume = int(weights_prefix[end] - weights_prefix[start])
-        if volume >= tail_threshold:
+        pair_volume = 0
+        if pair_prefix is not None:
+            pair_volume = int(pair_prefix[end] - pair_prefix[start])
+        small_tail = tail_threshold > 0 and volume < tail_threshold
+        small_pair_tail = (
+            pair_prefix is not None
+            and pair_tail_threshold > 0
+            and pair_volume < pair_tail_threshold
+        )
+        if not small_tail and not small_pair_tail:
             idx -= 1
             continue
         prev_start, prev_end = merged[idx - 1]
@@ -140,10 +198,26 @@ def _merge_tail_ranges(
         if combined > chunk_cap:
             idx -= 1
             continue
+        if pair_prefix is not None and pair_cap > 0:
+            combined_pairs = int(pair_prefix[end] - pair_prefix[prev_start])
+            if combined_pairs > pair_cap:
+                idx -= 1
+                continue
         merged[idx - 1] = (prev_start, end)
         merged.pop(idx)
         idx -= 1
     return merged
+
+
+def _max_range_pairs(ranges: list[tuple[int, int]], pair_prefix: np.ndarray | None) -> int:
+    if pair_prefix is None or pair_prefix.size == 0 or not ranges:
+        return 0
+    peak = 0
+    for start, end in ranges:
+        count = int(pair_prefix[end] - pair_prefix[start])
+        if count > peak:
+            peak = count
+    return peak
 
 
 def _require_numba() -> None:
@@ -641,6 +715,9 @@ if NUMBA_SCOPE_AVAILABLE:
                 candidate_pairs=0,
                 num_groups=0,
                 num_unique_groups=0,
+                chunk_pairs_cap=0,
+                chunk_pairs_before=0,
+                chunk_pairs_after=0,
             )
 
         if pairwise is None or radii is None:
@@ -687,6 +764,9 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_count=1,
                 chunk_emitted=0,
                 chunk_max_members=0,
+                chunk_pairs_cap=0,
+                chunk_pairs_before=0,
+                chunk_pairs_after=0,
             )
 
         directed_total_pairs = int(total_pairs * 2)
@@ -707,14 +787,21 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_count=1,
                 chunk_emitted=0,
                 chunk_max_members=0,
+                chunk_pairs_cap=0,
+                chunk_pairs_before=0,
+                chunk_pairs_after=0,
             )
 
-        chunk_ranges_list = _chunk_ranges_from_indptr(
+        chunk_ranges_list, chunk_stats = _chunk_ranges_from_indptr(
             indptr_nodes,
             chunk_target,
             chunk_max_segments,
             keep_mask,
+            pair_counts=pair_counts,
         )
+        chunk_pairs_cap = int(chunk_stats.pair_cap)
+        chunk_pairs_before = int(chunk_stats.pair_max_before)
+        chunk_pairs_after = int(chunk_stats.pair_max_after)
         chunk_count = len(chunk_ranges_list)
         if chunk_count:
             chunk_ranges_arr = np.asarray(chunk_ranges_list, dtype=np.int64).reshape(chunk_count, 2)
@@ -742,6 +829,9 @@ if NUMBA_SCOPE_AVAILABLE:
                     chunk_count=chunk_count,
                     chunk_emitted=0,
                     chunk_max_members=full_volume,
+                    chunk_pairs_cap=chunk_pairs_cap,
+                    chunk_pairs_before=chunk_pairs_before,
+                    chunk_pairs_after=chunk_pairs_after,
                 )
 
             sources, targets, used_counts = _expand_pairs_directed(
@@ -773,6 +863,9 @@ if NUMBA_SCOPE_AVAILABLE:
                     chunk_count=chunk_count,
                     chunk_emitted=0,
                     chunk_max_members=full_volume,
+                    chunk_pairs_cap=chunk_pairs_cap,
+                    chunk_pairs_before=chunk_pairs_before,
+                    chunk_pairs_after=chunk_pairs_after,
                 )
             return ScopeAdjacencyResult(
                 sources=np.empty(0, dtype=I32),
@@ -787,6 +880,9 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_count=chunk_count,
                 chunk_emitted=chunk_count if actual_pairs > 0 else 0,
                 chunk_max_members=full_volume,
+                chunk_pairs_cap=chunk_pairs_cap,
+                chunk_pairs_before=chunk_pairs_before,
+                chunk_pairs_after=chunk_pairs_after,
             )
 
         (
@@ -819,6 +915,9 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_count=chunk_count,
                 chunk_emitted=chunk_emitted,
                 chunk_max_members=int(chunk_max_members),
+                chunk_pairs_cap=chunk_pairs_cap,
+                chunk_pairs_before=chunk_pairs_before,
+                chunk_pairs_after=chunk_pairs_after,
             )
 
         return ScopeAdjacencyResult(
@@ -834,6 +933,9 @@ if NUMBA_SCOPE_AVAILABLE:
             chunk_count=chunk_count,
             chunk_emitted=chunk_emitted,
             chunk_max_members=int(chunk_max_members),
+            chunk_pairs_cap=chunk_pairs_cap,
+            chunk_pairs_before=chunk_pairs_before,
+            chunk_pairs_after=chunk_pairs_after,
         )
 
 else:  # pragma: no cover - executed when numba missing

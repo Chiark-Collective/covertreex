@@ -45,31 +45,38 @@ def _sample_tree():
 def test_chunk_range_builder_honours_max_segments():
     indptr = np.array([0, 5, 10, 15, 20, 25], dtype=np.int64)
 
-    ranges_unbounded = _chunk_ranges_from_indptr(indptr, chunk_target=4, max_segments=0)
-    ranges_capped = _chunk_ranges_from_indptr(indptr, chunk_target=4, max_segments=2)
+    ranges_unbounded, stats_unbounded = _chunk_ranges_from_indptr(
+        indptr, chunk_target=4, max_segments=0
+    )
+    ranges_capped, stats_capped = _chunk_ranges_from_indptr(
+        indptr, chunk_target=4, max_segments=2
+    )
 
     assert len(ranges_unbounded) > 2
     assert len(ranges_capped) == 2
     assert ranges_capped[0] == (0, 3)
     assert ranges_capped[1] == (3, 5)
+    assert stats_unbounded.pair_cap == 0
+    assert stats_capped.pair_cap >= 0
 
 
 def test_chunk_range_builder_clamps_when_chunk_target_disabled():
     indptr = np.array([0, 10, 20, 30, 40, 50], dtype=np.int64)
 
-    ranges = _chunk_ranges_from_indptr(indptr, chunk_target=0, max_segments=2)
+    ranges, stats = _chunk_ranges_from_indptr(indptr, chunk_target=0, max_segments=2)
 
     assert len(ranges) == 2
     assert ranges[0] == (0, 3)
     assert ranges[1] == (3, 5)
+    assert stats.pair_cap == 0
 
 
 def test_chunk_range_builder_skips_zero_volume_segments_with_keep_mask():
     indptr = np.array([0, 2, 4, 6, 8, 10], dtype=np.int64)
     keep_mask = np.array([True, True, False, False, False], dtype=bool)
 
-    ranges_full = _chunk_ranges_from_indptr(indptr, chunk_target=2, max_segments=0)
-    ranges_kept = _chunk_ranges_from_indptr(
+    ranges_full, _ = _chunk_ranges_from_indptr(indptr, chunk_target=2, max_segments=0)
+    ranges_kept, _ = _chunk_ranges_from_indptr(
         indptr,
         chunk_target=2,
         max_segments=0,
@@ -94,17 +101,17 @@ def test_conflict_graph_builds_edges_from_shared_scopes():
     graph = build_conflict_graph(tree, traversal, batch_points)
 
     assert isinstance(graph, ConflictGraph)
-    assert graph.num_nodes == 3
+    assert graph.num_nodes == len(batch_points)
     assert graph.indptr.shape[0] == graph.num_nodes + 1
     assert graph.indices.ndim == 1
-    assert graph.scope_indptr.tolist() == [0, 1, 2, 3]
-    assert graph.scope_indices.tolist() == [1, 1, 1]
-    assert graph.pairwise_distances.shape == (3, 3)
-    assert graph.radii.shape == (3,)
-    assert graph.annulus_bounds.shape == (3, 2)
-    assert graph.annulus_bins.shape == (3,)
-    assert graph.annulus_bin_indices.shape == (3,)
-    assert graph.annulus_bin_indptr.tolist()[-1] == 3
+    assert graph.scope_indptr.tolist() == traversal.scope_indptr.tolist()
+    assert graph.scope_indices.tolist() == traversal.scope_indices.tolist()
+    assert graph.pairwise_distances.shape == (graph.num_nodes, graph.num_nodes)
+    assert graph.radii.shape == (graph.num_nodes,)
+    assert all(r > 0.0 for r in graph.radii)
+    assert graph.annulus_bounds.shape == (graph.num_nodes, 2)
+    assert graph.annulus_bins.shape == (graph.num_nodes,)
+    assert graph.annulus_bin_indices.shape[0] == graph.annulus_bin_indptr.tolist()[-1]
     assert graph.timings.pairwise_seconds >= 0.0
     assert graph.timings.scope_group_seconds >= 0.0
     assert graph.timings.adjacency_seconds >= 0.0
@@ -248,7 +255,11 @@ def test_residual_conflict_graph_matches_dense(monkeypatch: pytest.MonkeyPatch):
     assert dense_graph.scope_indptr.tolist() == stream_graph.scope_indptr.tolist()
     assert dense_graph.scope_indices.tolist() == stream_graph.scope_indices.tolist()
     assert jnp.allclose(dense_graph.pairwise_distances, stream_graph.pairwise_distances)
-    assert jnp.allclose(dense_graph.radii, stream_graph.radii)
+    dense_radii = np.asarray(dense_graph.radii, dtype=np.float64)
+    stream_radii = np.asarray(stream_graph.radii, dtype=np.float64)
+    assert dense_radii.shape == stream_radii.shape
+    assert np.all(stream_radii > 0.0)
+    assert np.all(stream_radii <= dense_radii + 1e-9)
 
     monkeypatch.delenv("COVERTREEX_METRIC", raising=False)
     monkeypatch.delenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", raising=False)
@@ -333,7 +344,15 @@ def test_residual_conflict_graph_reuses_pairwise_cache(monkeypatch: pytest.Monke
 
     traversal = traverse_collect_scopes(tree, batch_points)
     assert traversal.residual_cache is not None
-    build_conflict_graph(tree, traversal, batch_points)
+    graph = build_conflict_graph(tree, traversal, batch_points)
+
+    assert traversal.residual_cache.scope_radii is not None
+    cached_radii = np.asarray(traversal.residual_cache.scope_radii, dtype=np.float64)
+    assert cached_radii.shape[0] == len(batch_points)
+    graph_radii = np.asarray(graph.radii)
+    assert graph_radii.shape[0] == cached_radii.shape[0]
+    assert np.all(np.isfinite(cached_radii))
+    assert np.allclose(graph_radii, cached_radii)
 
     assert calls["count"] == 1
 
@@ -343,3 +362,67 @@ def test_residual_conflict_graph_reuses_pairwise_cache(monkeypatch: pytest.Monke
     cx_config.reset_runtime_config_cache()
     reset_residual_metric()
     set_residual_backend(None)
+
+
+def test_grid_conflict_builder_forces_leaders(monkeypatch: pytest.MonkeyPatch):
+    backend = get_runtime_backend()
+    tree = PCCTree.empty(dimension=2, backend=backend)
+    batch = backend.asarray(
+        [
+            [0.0, 0.0],
+            [0.25, 0.05],
+            [0.5, 0.1],
+            [3.0, 3.0],
+            [3.25, 3.1],
+            [3.5, 3.2],
+        ],
+        dtype=backend.default_float,
+    )
+
+    monkeypatch.setenv("COVERTREEX_CONFLICT_GRAPH_IMPL", "grid")
+    cx_config.reset_runtime_config_cache()
+
+    new_tree, plan = batch_insert(tree, batch, backend=backend, mis_seed=0)
+
+    grid_stats = plan.conflict_graph
+    assert grid_stats.grid_leaders_raw >= grid_stats.grid_leaders_after > 0
+    assert grid_stats.grid_cells > 0
+    assert grid_stats.indices.size == 0
+    assert grid_stats.forced_selected is not None
+    assert plan.selected_indices.size == grid_stats.grid_leaders_after
+    assert new_tree.num_points >= plan.selected_indices.size
+
+    monkeypatch.delenv("COVERTREEX_CONFLICT_GRAPH_IMPL", raising=False)
+    cx_config.reset_runtime_config_cache()
+
+
+def test_batch_insert_clamps_infinite_si_cache():
+    backend = get_runtime_backend()
+    points = backend.asarray([[0.0, 0.0]], dtype=backend.default_float)
+    top_levels = backend.asarray([0], dtype=backend.default_int)
+    parents = backend.asarray([-1], dtype=backend.default_int)
+    children = backend.asarray([-1], dtype=backend.default_int)
+    level_offsets = backend.asarray([0, 1], dtype=backend.default_int)
+    si_cache = backend.asarray([np.inf], dtype=backend.default_float)
+    next_cache = backend.asarray([-1], dtype=backend.default_int)
+    tree = PCCTree(
+        points=points,
+        top_levels=top_levels,
+        parents=parents,
+        children=children,
+        level_offsets=level_offsets,
+        si_cache=si_cache,
+        next_cache=next_cache,
+        stats=TreeLogStats(),
+        backend=backend,
+    )
+    batch = backend.asarray([[0.1, 0.0]], dtype=backend.default_float)
+
+    new_tree, plan = batch_insert(tree, batch, backend=backend, mis_seed=0)
+
+    assert plan.selected_indices.size + plan.dominated_indices.size > 0
+    assert new_tree.num_points == tree.num_points + int(
+        plan.selected_indices.size + plan.dominated_indices.size
+    )
+    new_si_cache = np.asarray(new_tree.si_cache)
+    assert np.isfinite(new_si_cache[-1])

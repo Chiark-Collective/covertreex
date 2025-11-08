@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -34,13 +35,15 @@ from covertreex.baseline import (
 )
 
 
-_RESIDUAL_GATE_ENV_VARS = (
+_RESIDUAL_RUNTIME_ENV_VARS = (
     "COVERTREEX_ENABLE_SPARSE_TRAVERSAL",
     "COVERTREEX_RESIDUAL_GATE1",
     "COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH",
     "COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN",
     "COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP",
     "COVERTREEX_RESIDUAL_GATE1_AUDIT",
+    "COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH",
+    "COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT",
 )
 
 
@@ -85,6 +88,77 @@ def _read_rss_bytes() -> int | None:
 
 def _ms(value: float) -> float:
     return float(value) * 1e3
+
+
+def _summarise_metric(record: Dict[str, Any], prefix: str, values: np.ndarray) -> None:
+    if values.size == 0:
+        return
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return
+    record[f"{prefix}_samples"] = int(finite.size)
+    record[f"{prefix}_min"] = float(np.min(finite))
+    record[f"{prefix}_max"] = float(np.max(finite))
+    record[f"{prefix}_mean"] = float(np.mean(finite))
+    for pct in (50, 90, 95, 99):
+        record[f"{prefix}_p{pct}"] = float(np.percentile(finite, pct))
+
+
+def _metric_summary(values: np.ndarray) -> Dict[str, float]:
+    arr = np.asarray(values, dtype=np.float64)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return {}
+    summary: Dict[str, float] = {
+        "samples": float(finite.size),
+        "min": float(np.min(finite)),
+        "max": float(np.max(finite)),
+        "mean": float(np.mean(finite)),
+    }
+    for pct in (50, 90, 95, 99):
+        summary[f"p{pct}"] = float(np.percentile(finite, pct))
+    return summary
+
+
+def _augment_residual_scope_metrics(record: Dict[str, Any], residual_cache: Any) -> None:
+    scope_radii = getattr(residual_cache, "scope_radii", None)
+    if scope_radii is not None:
+        _summarise_metric(
+            record,
+            "traversal_scope_radius_obs",
+            np.asarray(scope_radii, dtype=np.float64),
+        )
+    initial = getattr(residual_cache, "scope_radius_initial", None)
+    if initial is not None:
+        _summarise_metric(
+            record,
+            "traversal_scope_radius_initial",
+            np.asarray(initial, dtype=np.float64),
+        )
+    limits = getattr(residual_cache, "scope_radius_limits", None)
+    if limits is not None:
+        _summarise_metric(
+            record,
+            "traversal_scope_radius_limit",
+            np.asarray(limits, dtype=np.float64),
+        )
+    caps = getattr(residual_cache, "scope_radius_caps", None)
+    if caps is not None:
+        _summarise_metric(
+            record,
+            "traversal_scope_radius_cap_values",
+            np.asarray(caps, dtype=np.float64),
+        )
+    if initial is not None and limits is not None:
+        init_np = np.asarray(initial, dtype=np.float64)
+        limit_np = np.asarray(limits, dtype=np.float64)
+        clamp_mask = np.isfinite(init_np) & np.isfinite(limit_np) & (init_np > limit_np + 1e-12)
+        if clamp_mask.size:
+            record["traversal_scope_radius_cap_hits"] = int(np.count_nonzero(clamp_mask))
+            if np.any(clamp_mask):
+                delta = init_np[clamp_mask] - limit_np[clamp_mask]
+                record["traversal_scope_radius_cap_delta_mean"] = float(np.mean(delta))
+                record["traversal_scope_radius_cap_delta_max"] = float(np.max(delta))
 
 
 class BenchmarkLogWriter:
@@ -148,6 +222,9 @@ class BenchmarkLogWriter:
             "conflict_scope_chunk_segments": int(conflict_timings.scope_chunk_segments),
             "conflict_scope_chunk_emitted": int(conflict_timings.scope_chunk_emitted),
             "conflict_scope_chunk_max_members": int(conflict_timings.scope_chunk_max_members),
+            "conflict_scope_chunk_pair_cap": int(conflict_timings.scope_chunk_pair_cap),
+            "conflict_scope_chunk_pairs_before": int(conflict_timings.scope_chunk_pairs_before),
+            "conflict_scope_chunk_pairs_after": int(conflict_timings.scope_chunk_pairs_after),
             "conflict_scope_domination_ratio": float(conflict_timings.scope_domination_ratio),
             "traversal_gate1_candidates": int(traversal_timings.gate1_candidates),
             "traversal_gate1_kept": int(traversal_timings.gate1_kept),
@@ -169,6 +246,9 @@ class BenchmarkLogWriter:
                 / traversal_timings.gate1_candidates
             )
             record["traversal_gate1_pruned_ratio"] = float(ratio)
+        residual_cache = getattr(plan.traversal, "residual_cache", None)
+        if residual_cache is not None:
+            _augment_residual_scope_metrics(record, residual_cache)
         if extra:
             for key, value in extra.items():
                 if isinstance(value, (int, float)):
@@ -189,6 +269,97 @@ class BenchmarkLogWriter:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
+
+
+class ResidualScopeCapRecorder:
+    def __init__(self, *, output: str, percentile: float, margin: float, radius_floor: float):
+        self._path = Path(output).expanduser()
+        self._percentile = max(0.0, min(1.0, float(percentile)))
+        self._margin = float(margin)
+        self._radius_floor = float(radius_floor)
+        self._levels: Dict[int, Dict[str, List[np.ndarray]]] = defaultdict(lambda: {"obs": [], "limit": [], "cap": []})
+        self._metadata: Dict[str, Any] = {}
+
+    def annotate(self, **metadata: Any) -> None:
+        for key, value in metadata.items():
+            if value is None:
+                continue
+            self._metadata[str(key)] = value
+
+    def capture(self, plan: Any) -> None:
+        cache = getattr(plan.traversal, "residual_cache", None)
+        if cache is None or cache.scope_radii is None:
+            return
+        obs = np.asarray(cache.scope_radii, dtype=np.float64)
+        limits = (
+            np.asarray(cache.scope_radius_limits, dtype=np.float64)
+            if cache.scope_radius_limits is not None
+            else None
+        )
+        caps = (
+            np.asarray(cache.scope_radius_caps, dtype=np.float64)
+            if cache.scope_radius_caps is not None
+            else None
+        )
+        for summary in getattr(plan, "level_summaries", ()):  # defensive for legacy plans
+            candidate_idx = np.asarray(summary.candidates, dtype=np.int64)
+            if candidate_idx.size == 0:
+                continue
+            level_entry = self._levels[int(summary.level)]
+            level_entry["obs"].append(obs[candidate_idx])
+            if limits is not None:
+                level_entry["limit"].append(limits[candidate_idx])
+            if caps is not None:
+                level_entry["cap"].append(caps[candidate_idx])
+
+    def dump(self) -> None:
+        if not self._levels:
+            return
+        payload: Dict[str, Any] = {
+            "schema": 1,
+            "generated_at": float(time.time()),
+            "percentile": self._percentile,
+            "margin": self._margin,
+            "radius_floor": self._radius_floor,
+            "metadata": self._metadata,
+            "levels": {},
+        }
+        combined_samples: List[np.ndarray] = []
+        percentile_pct = self._percentile * 100.0
+        for level, data in sorted(self._levels.items()):
+            obs_chunks = data.get("obs", [])
+            if not obs_chunks:
+                continue
+            obs_values = np.concatenate(obs_chunks)
+            obs_summary = _metric_summary(obs_values)
+            if not obs_summary:
+                continue
+            combined_samples.append(obs_values)
+            percentile_value = float(np.percentile(obs_values, percentile_pct))
+            suggested_cap = max(percentile_value + self._margin, self._radius_floor)
+            level_payload: Dict[str, Any] = {
+                "cap": suggested_cap,
+                "obs": obs_summary,
+            }
+            limit_chunks = data.get("limit", [])
+            if limit_chunks:
+                level_payload["limit"] = _metric_summary(np.concatenate(limit_chunks))
+            cap_chunks = data.get("cap", [])
+            if cap_chunks:
+                level_payload["applied_caps"] = _metric_summary(np.concatenate(cap_chunks))
+            payload["levels"][str(level)] = level_payload
+        if combined_samples:
+            combined = np.concatenate(combined_samples)
+            payload["overview"] = _metric_summary(combined)
+            payload["default"] = max(
+                float(np.percentile(combined, percentile_pct)) + self._margin,
+                self._radius_floor,
+            )
+        else:
+            payload["overview"] = {}
+            payload["default"] = None
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 @dataclass(frozen=True)
@@ -328,6 +499,7 @@ def _build_tree(
     seed: int,
     prebuilt_points: np.ndarray | None = None,
     log_writer: BenchmarkLogWriter | None = None,
+    scope_cap_recorder: "ResidualScopeCapRecorder | None" = None,
     build_mode: str = "batch",
 ) -> Tuple[PCCTree, np.ndarray, float]:
     backend = _resolve_backend()
@@ -370,6 +542,12 @@ def _build_tree(
                     plan=plan,
                     extra=extra,
                 )
+                if scope_cap_recorder is not None:
+                    scope_cap_recorder.capture(plan)
+        else:
+            if scope_cap_recorder is not None:
+                for group in prefix_result.groups:
+                    scope_cap_recorder.capture(group.plan)
         return tree, points_np, build_seconds
 
     start = time.perf_counter()
@@ -391,6 +569,8 @@ def _build_tree(
                     batch_size=int(batch_np.shape[0]),
                     plan=plan,
                 )
+            if scope_cap_recorder is not None:
+                scope_cap_recorder.capture(plan)
             buffers.append(np.asarray(batch))
             idx += 1
     else:
@@ -406,6 +586,8 @@ def _build_tree(
                     batch_size=current,
                     plan=plan,
                 )
+            if scope_cap_recorder is not None:
+                scope_cap_recorder.capture(plan)
             buffers.append(np.asarray(batch))
             remaining -= current
             idx += 1
@@ -431,6 +613,7 @@ def benchmark_knn_latency(
     prebuilt_queries: np.ndarray | None = None,
     build_seconds: float | None = None,
     log_writer: BenchmarkLogWriter | None = None,
+    scope_cap_recorder: "ResidualScopeCapRecorder | None" = None,
     build_mode: str = "batch",
 ) -> Tuple[PCCTree, QueryBenchmarkResult]:
     tree_build_seconds: float | None = None
@@ -442,11 +625,15 @@ def benchmark_knn_latency(
             seed=seed,
             prebuilt_points=prebuilt_points,
             log_writer=log_writer,
+            scope_cap_recorder=scope_cap_recorder,
             build_mode=build_mode,
         )
     else:
         tree = prebuilt_tree
         tree_build_seconds = build_seconds
+
+    if scope_cap_recorder is not None and tree_build_seconds is not None:
+        scope_cap_recorder.annotate(tree_build_seconds=tree_build_seconds)
 
     if prebuilt_queries is None:
         query_rng = default_rng(seed + 1)
@@ -590,6 +777,36 @@ def _parse_args() -> argparse.Namespace:
         default=0.0,
         help="Optional radius cap passed to the lookup preset (0 keeps existing env/default).",
     )
+    parser.add_argument(
+        "--residual-scope-caps",
+        type=str,
+        default=None,
+        help="Residual-only: JSON file describing per-level scope radius caps.",
+    )
+    parser.add_argument(
+        "--residual-scope-cap-default",
+        type=float,
+        default=None,
+        help="Residual-only: fallback radius cap applied when no per-level cap matches.",
+    )
+    parser.add_argument(
+        "--residual-scope-cap-output",
+        type=str,
+        default=None,
+        help="Residual-only: write derived per-level scope caps to this JSON file.",
+    )
+    parser.add_argument(
+        "--residual-scope-cap-percentile",
+        type=float,
+        default=0.5,
+        help="Quantile (0-1) used when deriving new scope caps (default: median).",
+    )
+    parser.add_argument(
+        "--residual-scope-cap-margin",
+        type=float,
+        default=0.05,
+        help="Safety margin added to the sampled percentile when deriving scope caps.",
+    )
     return parser.parse_args()
 
 
@@ -682,8 +899,9 @@ def main() -> None:
     previous_batch_order = os.environ.get("COVERTREEX_BATCH_ORDER")
     previous_batch_order_seed = os.environ.get("COVERTREEX_BATCH_ORDER_SEED")
     previous_prefix_schedule = os.environ.get("COVERTREEX_PREFIX_SCHEDULE")
-    previous_gate_env = {var: os.environ.get(var) for var in _RESIDUAL_GATE_ENV_VARS}
+    previous_gate_env = {var: os.environ.get(var) for var in _RESIDUAL_RUNTIME_ENV_VARS}
     log_writer: BenchmarkLogWriter | None = None
+    scope_cap_recorder: ResidualScopeCapRecorder | None = None
 
     try:
         if args.log_file:
@@ -701,7 +919,29 @@ def main() -> None:
             os.environ["COVERTREEX_PREFIX_SCHEDULE"] = args.prefix_schedule
         if args.metric == "residual":
             _apply_residual_gate_preset(args)
+            if args.residual_scope_caps:
+                os.environ["COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH"] = args.residual_scope_caps
+            if args.residual_scope_cap_default is not None:
+                os.environ["COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT"] = str(args.residual_scope_cap_default)
         cx_config.reset_runtime_config_cache()
+
+        if args.metric == "residual" and args.residual_scope_cap_output:
+            runtime = cx_config.runtime_config()
+            scope_cap_recorder = ResidualScopeCapRecorder(
+                output=args.residual_scope_cap_output,
+                percentile=args.residual_scope_cap_percentile,
+                margin=args.residual_scope_cap_margin,
+                radius_floor=runtime.residual_radius_floor,
+            )
+            scope_cap_recorder.annotate(
+                tree_points=args.tree_points,
+                batch_size=args.batch_size,
+                scope_chunk_target=runtime.scope_chunk_target,
+                scope_chunk_max_segments=runtime.scope_chunk_max_segments,
+                residual_scope_cap_default=args.residual_scope_cap_default,
+                seed=args.seed,
+                build_mode=args.build_mode,
+            )
 
         point_rng = default_rng(args.seed)
         points_np = _generate_points_numpy(point_rng, args.tree_points, args.dimension)
@@ -728,6 +968,7 @@ def main() -> None:
             prebuilt_points=points_np,
             prebuilt_queries=queries_np,
             log_writer=log_writer,
+            scope_cap_recorder=scope_cap_recorder,
             build_mode=args.build_mode,
         )
 
@@ -786,6 +1027,8 @@ def main() -> None:
             else:
                 os.environ[var] = value
         cx_config.reset_runtime_config_cache()
+        if scope_cap_recorder is not None:
+            scope_cap_recorder.dump()
         if log_writer is not None:
             log_writer.close()
 

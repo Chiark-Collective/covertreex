@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict
 
 import numpy as np
 
 from covertreex import config as cx_config
+from covertreex.algo._grid_numba import (
+    NUMBA_GRID_AVAILABLE,
+    grid_select_leaders_numba,
+)
 from covertreex.algo._scope_numba import (
     NUMBA_SCOPE_AVAILABLE,
     build_conflict_graph_numba_dense,
@@ -44,6 +48,15 @@ class AdjacencyBuild:
     scope_chunk_segments: int = 0
     scope_chunk_emitted: int = 0
     scope_chunk_max_members: int = 0
+    scope_chunk_pair_cap: int = 0
+    scope_chunk_pairs_before: int = 0
+    scope_chunk_pairs_after: int = 0
+    forced_selected: Any | None = None
+    forced_dominated: Any | None = None
+    grid_cells: int = 0
+    grid_leaders_raw: int = 0
+    grid_leaders_after: int = 0
+    grid_local_edges: int = 0
 
 
 def build_dense_adjacency(
@@ -79,6 +92,9 @@ def build_dense_adjacency(
     scope_chunk_segments = 1
     scope_chunk_emitted = 0
     scope_chunk_max_members = 0
+    scope_chunk_pair_cap = 0
+    scope_chunk_pairs_before = 0
+    scope_chunk_pairs_after = 0
 
     if batch_size and scope_indices.size:
         runtime = cx_config.runtime_config()
@@ -140,6 +156,9 @@ def build_dense_adjacency(
             scope_chunk_segments = int(adjacency.chunk_count)
             scope_chunk_emitted = int(adjacency.chunk_emitted)
             scope_chunk_max_members = int(adjacency.chunk_max_members)
+            scope_chunk_pair_cap = int(adjacency.chunk_pairs_cap)
+            scope_chunk_pairs_before = int(adjacency.chunk_pairs_before)
+            scope_chunk_pairs_after = int(adjacency.chunk_pairs_after)
         else:
             counts_np = np.diff(scope_indptr_np)
             if scope_indices_np.size == 0:
@@ -160,6 +179,9 @@ def build_dense_adjacency(
                     scope_chunk_segments=scope_chunk_segments,
                     scope_chunk_emitted=scope_chunk_emitted,
                     scope_chunk_max_members=scope_chunk_max_members,
+                    scope_chunk_pair_cap=scope_chunk_pair_cap,
+                    scope_chunk_pairs_before=scope_chunk_pairs_before,
+                    scope_chunk_pairs_after=scope_chunk_pairs_after,
                 )
 
             if counts_np.size and np.max(counts_np) <= 1:
@@ -182,6 +204,9 @@ def build_dense_adjacency(
                     scope_chunk_segments=scope_chunk_segments,
                     scope_chunk_emitted=scope_chunk_emitted,
                     scope_chunk_max_members=int(counts_np.max()) if counts_np.size else scope_chunk_max_members,
+                    scope_chunk_pair_cap=scope_chunk_pair_cap,
+                    scope_chunk_pairs_before=scope_chunk_pairs_before,
+                    scope_chunk_pairs_after=scope_chunk_pairs_after,
                 )
 
             point_ids_np = np.repeat(
@@ -208,6 +233,9 @@ def build_dense_adjacency(
                     scope_chunk_segments=scope_chunk_segments,
                     scope_chunk_emitted=scope_chunk_emitted,
                     scope_chunk_max_members=scope_chunk_max_members,
+                    scope_chunk_pair_cap=scope_chunk_pair_cap,
+                    scope_chunk_pairs_before=scope_chunk_pairs_before,
+                    scope_chunk_pairs_after=scope_chunk_pairs_after,
                 )
 
             counts_by_node = np.bincount(node_ids_np, minlength=max_node + 1)
@@ -230,6 +258,9 @@ def build_dense_adjacency(
                     scope_chunk_segments=scope_chunk_segments,
                     scope_chunk_emitted=scope_chunk_emitted,
                     scope_chunk_max_members=scope_chunk_max_members,
+                    scope_chunk_pair_cap=scope_chunk_pair_cap,
+                    scope_chunk_pairs_before=scope_chunk_pairs_before,
+                    scope_chunk_pairs_after=scope_chunk_pairs_after,
                 )
 
             offsets = np.concatenate(
@@ -286,6 +317,9 @@ def build_dense_adjacency(
                     scope_chunk_segments=scope_chunk_segments,
                     scope_chunk_emitted=scope_chunk_emitted,
                     scope_chunk_max_members=scope_chunk_max_members,
+                    scope_chunk_pair_cap=scope_chunk_pair_cap,
+                    scope_chunk_pairs_before=scope_chunk_pairs_before,
+                    scope_chunk_pairs_after=scope_chunk_pairs_after,
                 )
 
             unique_counts = np.asarray(unique_counts_list, dtype=np.int64)
@@ -309,6 +343,9 @@ def build_dense_adjacency(
                     scope_chunk_segments=scope_chunk_segments,
                     scope_chunk_emitted=scope_chunk_emitted,
                     scope_chunk_max_members=scope_chunk_max_members,
+                    scope_chunk_pair_cap=scope_chunk_pair_cap,
+                    scope_chunk_pairs_before=scope_chunk_pairs_before,
+                    scope_chunk_pairs_after=scope_chunk_pairs_after,
                 )
 
             scatter_start = time.perf_counter()
@@ -366,6 +403,9 @@ def build_dense_adjacency(
         scope_chunk_segments=scope_chunk_segments,
         scope_chunk_emitted=scope_chunk_emitted,
         scope_chunk_max_members=scope_chunk_max_members,
+        scope_chunk_pair_cap=scope_chunk_pair_cap,
+        scope_chunk_pairs_before=scope_chunk_pairs_before,
+        scope_chunk_pairs_after=scope_chunk_pairs_after,
     )
 
 
@@ -445,6 +485,9 @@ def build_segmented_adjacency(
         scope_chunk_segments=1,
         scope_chunk_emitted=int(np.count_nonzero(counts_np > 0)),
         scope_chunk_max_members=int(counts_np.max()) if counts_np.size else 0,
+        scope_chunk_pair_cap=0,
+        scope_chunk_pairs_before=0,
+        scope_chunk_pairs_after=0,
     )
 
 
@@ -469,10 +512,237 @@ def build_residual_adjacency(
     )
 
 
+def build_grid_adjacency(
+    *,
+    backend: TreeBackend,
+    batch_points: Any,
+    batch_levels: Any,
+    radii: Any,
+    scope_indptr: Any,
+    scope_indices: Any,
+) -> AdjacencyBuild:
+    xp = backend.xp
+    batch_np = np.asarray(backend.to_numpy(batch_points), dtype=np.float64)
+    batch_np = np.ascontiguousarray(batch_np)
+    if batch_np.ndim == 1:
+        batch_np = batch_np.reshape(batch_np.shape[0], 1)
+    levels_np = np.asarray(backend.to_numpy(batch_levels), dtype=np.int64)
+    levels_np = np.ascontiguousarray(levels_np)
+    radii_np = np.asarray(backend.to_numpy(radii), dtype=np.float64)
+    batch_size = batch_np.shape[0]
+
+    membership_start = time.perf_counter()
+    scope_indptr_np = np.asarray(backend.to_numpy(scope_indptr), dtype=np.int64)
+    scope_indices_np = np.asarray(backend.to_numpy(scope_indices), dtype=np.int64)
+    membership_seconds = time.perf_counter() - membership_start
+    counts = scope_indptr_np[1:] - scope_indptr_np[:-1] if scope_indptr_np.size else np.asarray([], dtype=np.int64)
+    scope_groups = int(counts.size)
+    scope_groups_unique = int(np.count_nonzero(counts)) if counts.size else 0
+    scope_domination_ratio = float(scope_groups_unique / scope_groups) if scope_groups else 0.0
+    scope_chunk_segments = scope_groups
+    scope_chunk_emitted = scope_groups_unique
+    scope_chunk_max_members = int(counts.max()) if counts.size else 0
+
+    runtime = cx_config.runtime_config()
+    seed = runtime.mis_seed or 0
+
+    grid_start = time.perf_counter()
+    use_numba_grid = runtime.enable_numba and NUMBA_GRID_AVAILABLE
+
+    if use_numba_grid:
+        (
+            forced_selected_np,
+            forced_dominated_np,
+            grid_stats_arr,
+        ) = grid_select_leaders_numba(
+            batch_np,
+            levels_np,
+            seed=seed,
+            num_shifts=3,
+        )
+        grid_stats = {
+            "cells": int(grid_stats_arr[0]),
+            "leaders_raw": int(grid_stats_arr[1]),
+            "leaders_final": int(grid_stats_arr[2]),
+            "local_edges": int(grid_stats_arr[3]),
+        }
+    else:
+        (
+            forced_selected_np,
+            forced_dominated_np,
+            grid_stats,
+        ) = _grid_select_leaders(
+            points=batch_np,
+            levels=levels_np,
+            radii=radii_np,
+            seed=seed,
+        )
+    scatter_seconds = time.perf_counter() - grid_start
+
+    forced_selected = backend.asarray(forced_selected_np.astype(backend.default_int))
+    forced_selected = backend.device_put(forced_selected)
+    forced_dominated = backend.asarray(forced_dominated_np.astype(backend.default_int))
+    forced_dominated = backend.device_put(forced_dominated)
+
+    indptr_np = np.zeros(batch_size + 1, dtype=np.int64)
+    indices_np = np.empty(0, dtype=np.int32)
+    indptr = backend.asarray(indptr_np, dtype=backend.default_int)
+    indices = backend.asarray(indices_np, dtype=backend.default_int)
+
+    throughput_bytes = int(scope_indptr_np.nbytes + scope_indices_np.nbytes)
+
+    sources = xp.zeros((0,), dtype=backend.default_int)
+    targets = xp.zeros((0,), dtype=backend.default_int)
+    sources = backend.device_put(sources)
+    targets = backend.device_put(targets)
+
+    return AdjacencyBuild(
+        sources=sources,
+        targets=targets,
+        membership_seconds=membership_seconds,
+        targets_seconds=0.0,
+        scatter_seconds=scatter_seconds,
+        dedup_seconds=0.0,
+        csr_indptr=indptr_np,
+        csr_indices=indices_np,
+        total_pairs=0,
+        candidate_pairs=0,
+        max_group_size=scope_chunk_max_members,
+        scope_groups=scope_groups,
+        scope_groups_unique=scope_groups_unique,
+        scope_domination_ratio=scope_domination_ratio,
+        bytes_h2d=0,
+        bytes_d2h=throughput_bytes,
+        radius_pruned=True,
+        scope_chunk_segments=scope_chunk_segments,
+        scope_chunk_emitted=scope_chunk_emitted,
+        scope_chunk_max_members=scope_chunk_max_members,
+        forced_selected=forced_selected,
+        forced_dominated=forced_dominated,
+        grid_cells=grid_stats["cells"],
+        grid_leaders_raw=grid_stats["leaders_raw"],
+        grid_leaders_after=grid_stats["leaders_final"],
+        grid_local_edges=grid_stats["local_edges"],
+        scope_chunk_pair_cap=0,
+        scope_chunk_pairs_before=0,
+        scope_chunk_pairs_after=0,
+    )
+
+
+def _grid_select_leaders(
+    *,
+    points: np.ndarray,
+    levels: np.ndarray,
+    radii: np.ndarray,
+    seed: int,
+    num_shifts: int = 3,
+) -> tuple[np.ndarray, np.ndarray, Dict[str, int]]:
+    batch_size = points.shape[0]
+    forced_selected = np.zeros(batch_size, dtype=np.uint8)
+    forced_dominated = np.ones(batch_size, dtype=np.uint8)
+    stats = {
+        "cells": 0,
+        "leaders_raw": 0,
+        "leaders_final": 0,
+        "local_edges": 0,
+    }
+    if batch_size == 0:
+        return forced_selected, forced_dominated, stats
+
+    dim = points.shape[1]
+    levels_clamped = np.maximum(levels, 0)
+    base_radius = np.power(2.0, levels_clamped.astype(np.float64) + 1.0)
+    width = np.maximum(np.power(2.0, levels_clamped.astype(np.float64)), 1e-6)
+
+    leader_mask = np.zeros(batch_size, dtype=bool)
+    leader_priorities = np.full(batch_size, np.iinfo(np.uint64).max, dtype=np.uint64)
+
+    for shift in range(num_shifts):
+        shift_vec = _shift_vector(dim, seed + shift)
+        scaled = points / width[:, None]
+        coords = np.floor(scaled + shift_vec).astype(np.int64, copy=False)
+        contiguous = np.ascontiguousarray(coords)
+        prior_base = np.arange(batch_size, dtype=np.uint64)
+        level_hash = levels_clamped.astype(np.uint64, copy=False) << np.uint64(33)
+        priorities = _mix_uint64(
+            prior_base ^ level_hash ^ np.uint64(seed + shift + 1)
+        )
+        key_dtype = np.dtype(
+            (np.void, contiguous.dtype.itemsize * contiguous.shape[1])
+        )
+        keys = contiguous.view(key_dtype).ravel()
+        order = np.lexsort((priorities, keys))
+        sorted_keys = keys[order]
+        if order.size == 0:
+            continue
+        unique_mask = np.empty(order.size, dtype=bool)
+        unique_mask[0] = True
+        if order.size > 1:
+            unique_mask[1:] = sorted_keys[1:] != sorted_keys[:-1]
+        chosen = order[unique_mask]
+        stats["cells"] += int(unique_mask.sum())
+        leader_mask[chosen] = True
+        leader_priorities[chosen] = np.minimum(
+            leader_priorities[chosen],
+            priorities[chosen],
+        )
+
+    leader_indices = np.flatnonzero(leader_mask)
+    stats["leaders_raw"] = int(leader_indices.size)
+
+    if leader_indices.size == 0:
+        forced_selected[:] = 1
+        forced_dominated[:] = 0
+        stats["leaders_final"] = batch_size
+        return forced_selected, forced_dominated, stats
+
+    leader_priorities_subset = leader_priorities[leader_indices]
+    order = np.argsort(leader_priorities_subset, kind="mergesort")
+    accepted: list[int] = []
+    for rank in order:
+        candidate = int(leader_indices[rank])
+        candidate_point = points[candidate]
+        candidate_radius = base_radius[candidate]
+        keep = True
+        for accepted_idx in accepted:
+            stats["local_edges"] += 1
+            diff = candidate_point - points[accepted_idx]
+            dist = np.linalg.norm(diff)
+            cutoff = min(candidate_radius, base_radius[accepted_idx])
+            if dist <= cutoff:
+                keep = False
+                break
+        if keep:
+            accepted.append(candidate)
+
+    if not accepted:
+        accepted = [int(leader_indices[order[0]])]
+    forced_selected[accepted] = 1
+    forced_dominated[accepted] = 0
+    stats["leaders_final"] = len(accepted)
+    return forced_selected, forced_dominated, stats
+
+
+def _shift_vector(dim: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return rng.random(dim, dtype=np.float64) - 0.5
+
+
+def _mix_uint64(values: np.ndarray) -> np.ndarray:
+    x = np.uint64(values)
+    x ^= x >> np.uint64(30)
+    x *= np.uint64(0xbf58476d1ce4e5b9)
+    x ^= x >> np.uint64(27)
+    x *= np.uint64(0x94d049bb133111eb)
+    x ^= x >> np.uint64(31)
+    return x
+
+
 __all__ = [
     "AdjacencyBuild",
     "block_until_ready",
     "build_dense_adjacency",
+    "build_grid_adjacency",
     "build_residual_adjacency",
     "build_segmented_adjacency",
 ]

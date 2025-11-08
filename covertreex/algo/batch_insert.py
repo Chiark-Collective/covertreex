@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Tuple
 
 import math
 import time
 
 import numpy as np
 
+from covertreex import config as cx_config
+from covertreex.algo.batch_order import compute_batch_order
 from covertreex.algo.conflict_graph import ConflictGraph, build_conflict_graph
 from covertreex.algo.mis import MISResult, batch_mis_seeds, run_mis
 from covertreex.algo.traverse import TraversalResult, traverse_collect_scopes
@@ -34,6 +36,9 @@ class BatchInsertPlan:
     dominated_indices: Any
     level_summaries: tuple["LevelSummary", ...]
     timings: "BatchInsertTimings"
+    batch_permutation: Any | None = None
+    batch_order_strategy: str = "natural"
+    batch_order_metrics: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -48,12 +53,16 @@ class LevelSummary:
 class PrefixBatchGroup:
     permutation_indices: Any
     plan: BatchInsertPlan
+    prefix_factor: float | None = None
+    domination_ratio: float | None = None
 
 
 @dataclass(frozen=True)
 class PrefixBatchResult:
     permutation: Any
     groups: Tuple[PrefixBatchGroup, ...]
+    order_strategy: str
+    order_metrics: Dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -61,20 +70,69 @@ class BatchInsertTimings:
     traversal_seconds: float
     conflict_graph_seconds: float
     mis_seconds: float
+
+
+def _prepare_batch_points(
+    *,
+    backend: TreeBackend,
+    batch_points: Any,
+    runtime: cx_config.RuntimeConfig,
+    apply_batch_order: bool,
+) -> tuple[Any, Optional[np.ndarray], Dict[str, float]]:
+    batch_array = backend.asarray(batch_points, dtype=backend.default_float)
+    batch_array = backend.device_put(batch_array)
+    num_points = int(batch_array.shape[0]) if batch_array.shape else 0
+    if (
+        not apply_batch_order
+        or runtime.batch_order_strategy == "natural"
+        or num_points <= 1
+    ):
+        return batch_array, None, {}
+    points_np = np.asarray(backend.to_numpy(batch_array), dtype=np.float64)
+    order_result = compute_batch_order(
+        points_np,
+        strategy=runtime.batch_order_strategy,
+        seed=runtime.batch_order_seed if runtime.batch_order_seed is not None else runtime.mis_seed,
+    )
+    permutation = order_result.permutation
+    metrics = dict(order_result.metrics)
+    if permutation is None:
+        return batch_array, None, metrics
+    perm_backend = backend.asarray(permutation, dtype=backend.default_int)
+    perm_backend = backend.device_put(perm_backend)
+    ordered = backend.xp.take(batch_array, perm_backend, axis=0)
+    ordered = backend.device_put(ordered)
+    return ordered, permutation, metrics
+
+
+def _choose_prefix_factor(runtime: cx_config.RuntimeConfig, domination_ratio: float) -> float:
+    if domination_ratio >= runtime.prefix_density_high:
+        return runtime.prefix_growth_small
+    if domination_ratio <= runtime.prefix_density_low:
+        return runtime.prefix_growth_large
+    return runtime.prefix_growth_mid
 def plan_batch_insert(
     tree: PCCTree,
     batch_points: Any,
     *,
     backend: Optional[TreeBackend] = None,
     mis_seed: int | None = None,
+    apply_batch_order: bool = True,
 ) -> BatchInsertPlan:
     backend = backend or tree.backend
+    runtime = cx_config.runtime_config()
+    batch_array, batch_permutation, batch_order_metrics = _prepare_batch_points(
+        backend=backend,
+        batch_points=batch_points,
+        runtime=runtime,
+        apply_batch_order=apply_batch_order,
+    )
     start = time.perf_counter()
-    traversal = traverse_collect_scopes(tree, batch_points, backend=backend)
+    traversal = traverse_collect_scopes(tree, batch_array, backend=backend)
     traversal_seconds = time.perf_counter() - start
 
     start = time.perf_counter()
-    conflict_graph = build_conflict_graph(tree, traversal, batch_points, backend=backend)
+    conflict_graph = build_conflict_graph(tree, traversal, batch_array, backend=backend)
     conflict_graph_seconds = time.perf_counter() - start
 
     start = time.perf_counter()
@@ -83,6 +141,17 @@ def plan_batch_insert(
     xp = backend.xp
     independent = mis_result.independent_set
     indicator_bool = independent.astype(bool)
+    forced_selected = conflict_graph.forced_selected
+    if forced_selected is not None:
+        forced_selected_bool = forced_selected.astype(bool)
+        indicator_bool = xp.logical_or(indicator_bool, forced_selected_bool)
+    forced_dominated = conflict_graph.forced_dominated
+    if forced_dominated is not None:
+        forced_dominated_bool = forced_dominated.astype(bool)
+        indicator_bool = xp.logical_and(
+            indicator_bool,
+            xp.logical_not(forced_dominated_bool),
+        )
     selected_indices = xp.where(indicator_bool)[0]
     dominated_indices = xp.where(xp.logical_not(indicator_bool))[0]
 
@@ -121,6 +190,9 @@ def plan_batch_insert(
             conflict_graph_seconds=conflict_graph_seconds,
             mis_seconds=mis_seconds,
         ),
+        batch_permutation=batch_permutation,
+        batch_order_strategy=runtime.batch_order_strategy if apply_batch_order else "natural",
+        batch_order_metrics=batch_order_metrics,
     )
 
 
@@ -130,6 +202,7 @@ def batch_insert(
     *,
     backend: Optional[TreeBackend] = None,
     mis_seed: int | None = None,
+    apply_batch_order: bool | None = None,
 ) -> tuple[PCCTree, BatchInsertPlan]:
     backend = backend or tree.backend
     with log_operation(LOGGER, "batch_insert") as op_log:
@@ -139,6 +212,7 @@ def batch_insert(
             batch_points,
             backend=backend,
             mis_seed=mis_seed,
+            apply_batch_order=apply_batch_order,
         )
 
 
@@ -149,8 +223,17 @@ def _batch_insert_impl(
     *,
     backend: TreeBackend,
     mis_seed: int | None,
+    apply_batch_order: bool | None,
 ) -> tuple[PCCTree, BatchInsertPlan]:
-    plan = plan_batch_insert(tree, batch_points, backend=backend, mis_seed=mis_seed)
+    runtime = cx_config.runtime_config()
+    apply_order = True if apply_batch_order is None else bool(apply_batch_order)
+    plan = plan_batch_insert(
+        tree,
+        batch_points,
+        backend=backend,
+        mis_seed=mis_seed,
+        apply_batch_order=apply_order,
+    )
 
     total_candidates = int(plan.traversal.parents.shape[0])
     selected_count = int(plan.selected_indices.size)
@@ -229,7 +312,18 @@ def _batch_insert_impl(
             conflict_scope_chunk_emitted=int(conflict_timings.scope_chunk_emitted),
             conflict_scope_chunk_max_members=int(conflict_timings.scope_chunk_max_members),
             conflict_mis_ms=conflict_timings.mis_seconds * 1e3,
+            conflict_grid_cells=int(plan.conflict_graph.grid_cells),
+            conflict_grid_leaders_raw=int(plan.conflict_graph.grid_leaders_raw),
+            conflict_grid_leaders_after=int(plan.conflict_graph.grid_leaders_after),
+            conflict_grid_local_edges=int(plan.conflict_graph.grid_local_edges),
         )
+        op_log.add_metadata(batch_order_strategy=plan.batch_order_strategy)
+        if plan.batch_permutation is not None:
+            op_log.add_metadata(
+                batch_order_permuted=int(len(plan.batch_permutation))
+            )
+        for key, value in plan.batch_order_metrics.items():
+            op_log.add_metadata(**{f"batch_order_{key}": float(value)})
 
     total_new_candidates = int(plan.selected_indices.size + plan.dominated_indices.size)
     if total_new_candidates == 0:
@@ -237,6 +331,12 @@ def _batch_insert_impl(
 
     xp = backend.xp
     batch = backend.asarray(batch_points, dtype=backend.default_float)
+    batch = backend.device_put(batch)
+    if plan.batch_permutation is not None:
+        perm_backend = backend.asarray(plan.batch_permutation, dtype=backend.default_int)
+        perm_backend = backend.device_put(perm_backend)
+        batch = xp.take(batch, perm_backend, axis=0)
+        batch = backend.device_put(batch)
     metric = get_metric()
     selected_points = batch[plan.selected_indices]
     selected_levels = plan.traversal.levels[plan.selected_indices]
@@ -408,6 +508,16 @@ def _batch_insert_impl(
             inserted_levels_np[selected_count + idx_dom] = new_level
 
     inserted_si_np = np.asarray(backend.to_numpy(inserted_si), dtype=float)
+    if inserted_si_np.size:
+        level_floor = np.maximum(inserted_levels_np.astype(np.float64), 0.0)
+        base_radii_np = np.power(2.0, level_floor + 1.0)
+        finite_mask = np.isfinite(inserted_si_np)
+        inserted_si_np = np.where(finite_mask, inserted_si_np, base_radii_np)
+        if runtime.metric == "residual_correlation":
+            inserted_si_np = np.maximum(
+                inserted_si_np,
+                float(runtime.residual_radius_floor),
+            )
 
     journal = build_persistence_journal(
         tree,
@@ -464,44 +574,110 @@ def batch_insert_prefix_doubling(
     tree together with the permutation metadata for downstream inspection."""
 
     backend = backend or tree.backend
+    runtime = cx_config.runtime_config()
     batch_np = np.asarray(backend.to_numpy(batch_points))
     batch_size = batch_np.shape[0]
     if batch_size == 0:
         empty_perm = backend.asarray([], dtype=backend.default_int)
-        return tree, PrefixBatchResult(permutation=empty_perm, groups=tuple())
-
-    rng = np.random.default_rng(shuffle_seed)
-    permutation = np.arange(batch_size, dtype=np.int64)
-    rng.shuffle(permutation)
-
+        return tree, PrefixBatchResult(
+            permutation=empty_perm,
+            groups=tuple(),
+            order_strategy=runtime.batch_order_strategy,
+            order_metrics={},
+        )
+    order_seed = (
+        shuffle_seed
+        if shuffle_seed is not None
+        else runtime.batch_order_seed if runtime.batch_order_seed is not None else runtime.mis_seed
+    )
+    order_points = np.asarray(batch_np, dtype=np.float64)
+    order_result = compute_batch_order(
+        order_points,
+        strategy=runtime.batch_order_strategy,
+        seed=order_seed,
+    )
+    if order_result.permutation is None:
+        permutation = np.arange(batch_size, dtype=np.int64)
+        order_metrics = {}
+    else:
+        permutation = order_result.permutation
+        order_metrics = dict(order_result.metrics)
     permuted = batch_np[permutation]
-    slices = _prefix_slices(batch_size)
 
     current_tree = tree
     groups: list[PrefixBatchGroup] = []
-    seeds: Tuple[int, ...] = batch_mis_seeds(len(slices), seed=mis_seed)
-    for idx, (start, end) in enumerate(slices):
-        sub_batch = permuted[start:end]
-        sub_seed: int | None
-        if seeds:
-            sub_seed = int(seeds[idx])
-        else:
-            sub_seed = None
-        current_tree, plan = batch_insert(
-            current_tree, sub_batch, backend=backend, mis_seed=sub_seed
-        )
-        group_indices = permutation[start:end]
-        groups.append(
-            PrefixBatchGroup(
-                permutation_indices=backend.asarray(
-                    group_indices, dtype=backend.default_int
-                ),
-                plan=plan,
+    schedule = runtime.prefix_schedule
+    if schedule == "doubling":
+        slices = _prefix_slices(batch_size)
+        seeds: Tuple[int, ...] = batch_mis_seeds(len(slices), seed=mis_seed)
+        for idx, (start, end) in enumerate(slices):
+            sub_batch = permuted[start:end]
+            sub_seed: int | None
+            if seeds:
+                sub_seed = int(seeds[idx])
+            else:
+                sub_seed = None
+            current_tree, plan = batch_insert(
+                current_tree,
+                sub_batch,
+                backend=backend,
+                mis_seed=sub_seed,
+                apply_batch_order=False,
             )
-        )
+            dom_ratio = float(plan.conflict_graph.timings.scope_domination_ratio)
+            group_indices = permutation[start:end]
+            groups.append(
+                PrefixBatchGroup(
+                    permutation_indices=backend.asarray(
+                        group_indices, dtype=backend.default_int
+                    ),
+                    plan=plan,
+                    prefix_factor=2.0,
+                    domination_ratio=dom_ratio,
+                )
+            )
+    else:
+        seeds = batch_mis_seeds(batch_size, seed=mis_seed)
+        seed_iter = iter(seeds)
+        start = 0
+        current_size = 1
+        while start < batch_size:
+            end = min(batch_size, start + current_size)
+            sub_batch = permuted[start:end]
+            sub_seed = next(seed_iter, None)
+            current_tree, plan = batch_insert(
+                current_tree,
+                sub_batch,
+                backend=backend,
+                mis_seed=sub_seed,
+                apply_batch_order=False,
+            )
+            dom_ratio = float(plan.conflict_graph.timings.scope_domination_ratio)
+            factor = _choose_prefix_factor(runtime, dom_ratio)
+            group_indices = permutation[start:end]
+            groups.append(
+                PrefixBatchGroup(
+                    permutation_indices=backend.asarray(
+                        group_indices, dtype=backend.default_int
+                    ),
+                    plan=plan,
+                    prefix_factor=factor,
+                    domination_ratio=dom_ratio,
+                )
+            )
+            start = end
+            remaining = batch_size - start
+            if remaining <= 0:
+                break
+            next_size = int(round(current_size * max(factor, 0.1)))
+            if next_size <= 0:
+                next_size = 1
+            current_size = min(next_size, remaining)
 
     return current_tree, PrefixBatchResult(
         permutation=backend.asarray(permutation, dtype=backend.default_int),
         groups=tuple(groups),
+        order_strategy=runtime.batch_order_strategy,
+        order_metrics=order_metrics,
     )
 LOGGER = get_logger("algo.batch_insert")

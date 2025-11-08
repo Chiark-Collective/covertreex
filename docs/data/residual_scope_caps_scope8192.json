@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "generated_from": "docs/data/residual_gate_profile_scope8192.json",
+  "notes": "Scope-wide residual radii are capped near the empirical maximum (<=1.0) observed in the 8-dim diag0 workloads.",
+  "default": 1.25,
+  "levels": {}
+}

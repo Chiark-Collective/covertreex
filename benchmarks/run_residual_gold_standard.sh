@@ -12,8 +12,11 @@ LOG_PATH="${1:-$ROOT_DIR/bench_residual.log}"
 # Ensure we run with the default dense traversal / no chunking knobs, since
 # the reference result was captured before the sparse/Numba paths were enabled.
 unset COVERTREEX_ENABLE_SPARSE_TRAVERSAL
-unset COVERTREEX_ENABLE_NUMBA
 export COVERTREEX_SCOPE_CHUNK_TARGET=0
+export COVERTREEX_ENABLE_NUMBA=1
+export COVERTREEX_BATCH_ORDER=natural
+export COVERTREEX_PREFIX_SCHEDULE=doubling
+export COVERTREEX_ENABLE_DIAGNOSTICS=0
 
 python "$ROOT_DIR/benchmarks/queries.py" \
   --dimension 8 \
