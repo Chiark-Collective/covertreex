@@ -27,6 +27,29 @@ Residual metrics are wired up lazily: call `covertreex.configure_residual_metric
 
 Use `covertreex.config.describe_runtime()` to inspect the active settings.
 
+## High-Level API
+
+The new `covertreex.api` façade keeps ergonomics tight while still delegating to the same batch kernels:
+
+```python
+from covertreex.api import PCCT, Runtime, Residual
+
+rt = Runtime(
+    backend="numpy",
+    precision="float64",
+    conflict_graph="grid",
+    batch_order="hilbert",
+    residual=Residual(gate1_enabled=True, gate1_alpha=2.0),
+)
+
+points = [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]
+tree = PCCT(rt).fit(points)
+tree = PCCT(rt, tree).insert([[2.5, 2.5]])
+indices, distances = PCCT(rt, tree).knn([[0.25, 0.25]], k=2, return_distances=True)
+```
+
+`Runtime.activate()` installs the configuration without fiddling with environment variables, and every `PCCT` method returns immutable `PCCTree` instances so downstream pipelines can treat updates as pure functions.
+
 ## Benchmarks
 
 Smoke benchmarks live under `benchmarks/` and now emit structured telemetry:

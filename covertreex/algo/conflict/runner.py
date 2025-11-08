@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any
 
 import time
@@ -10,14 +10,6 @@ from covertreex import config as cx_config
 from covertreex.algo._scope_numba import (
     NUMBA_SCOPE_AVAILABLE,
     filter_csr_by_radii_from_pairwise,
-)
-from covertreex.algo.conflict_graph_builders import (
-    AdjacencyBuild,
-    block_until_ready,
-    build_dense_adjacency,
-    build_grid_adjacency,
-    build_residual_adjacency,
-    build_segmented_adjacency,
 )
 from covertreex.algo.semisort import group_by_int
 from covertreex.algo.traverse import TraversalResult
@@ -29,77 +21,9 @@ from covertreex.metrics.residual import (
     decode_indices,
     get_residual_backend,
 )
-
-
-@dataclass(frozen=True)
-class ConflictGraph:
-    """Conflict graph encoded in CSR form."""
-
-    indptr: Any
-    indices: Any
-    pairwise_distances: Any
-    scope_indptr: Any
-    scope_indices: Any
-    radii: Any
-    annulus_bounds: Any
-    annulus_bins: Any
-    annulus_bin_indptr: Any
-    annulus_bin_indices: Any
-    annulus_bin_ids: Any
-    timings: "ConflictGraphTimings"
-    forced_selected: Any | None = None
-    forced_dominated: Any | None = None
-    grid_cells: int = 0
-    grid_leaders_raw: int = 0
-    grid_leaders_after: int = 0
-    grid_local_edges: int = 0
-
-    @property
-    def num_nodes(self) -> int:
-        return int(self.indptr.shape[0] - 1)
-
-    @property
-    def num_edges(self) -> int:
-        return int(self.indices.shape[0])
-
-    @property
-    def num_scopes(self) -> int:
-        return int(self.scope_indptr.shape[0] - 1)
-
-
-@dataclass(frozen=True)
-class ConflictGraphTimings:
-    pairwise_seconds: float
-    scope_group_seconds: float
-    adjacency_seconds: float
-    annulus_seconds: float
-    adjacency_membership_seconds: float = 0.0
-    adjacency_targets_seconds: float = 0.0
-    adjacency_scatter_seconds: float = 0.0
-    adjacency_filter_seconds: float = 0.0
-    adjacency_sort_seconds: float = 0.0
-    adjacency_dedup_seconds: float = 0.0
-    adjacency_extract_seconds: float = 0.0
-    adjacency_csr_seconds: float = 0.0
-    adjacency_total_pairs: float = 0.0
-    adjacency_candidate_pairs: float = 0.0
-    adjacency_max_group_size: float = 0.0
-    scope_bytes_h2d: int = 0
-    scope_bytes_d2h: int = 0
-    scope_groups: int = 0
-    scope_groups_unique: int = 0
-    scope_domination_ratio: float = 0.0
-    scope_chunk_segments: int = 0
-    scope_chunk_emitted: int = 0
-    scope_chunk_max_members: int = 0
-    scope_chunk_pair_cap: int = 0
-    scope_chunk_pairs_before: int = 0
-    scope_chunk_pairs_after: int = 0
-    mis_seconds: float = 0.0
-    grid_cells: int = 0
-    grid_leaders_raw: int = 0
-    grid_leaders_after: int = 0
-    grid_local_edges: int = 0
+from .base import ConflictGraph, ConflictGraphContext, ConflictGraphTimings
+from .builders import block_until_ready
+from .strategies import select_conflict_strategy
 
 
 def build_conflict_graph(
@@ -222,42 +146,26 @@ def build_conflict_graph(
     adjacency_sort_seconds = 0.0
     adjacency_csr_seconds = 0.0
 
-    if impl == "segmented":
-        adjacency_build = build_segmented_adjacency(
-            backend=backend,
-            scope_indices=scope_indices,
-            point_ids=point_ids,
-            pairwise_np=pairwise_np,
-            radii_np=radii_np,
-        )
-    elif impl == "grid":
-        adjacency_build = build_grid_adjacency(
-            backend=backend,
-            batch_points=batch,
-            batch_levels=levels,
-            radii=radii,
-            scope_indptr=scope_indptr,
-            scope_indices=scope_indices,
-        )
-    elif residual_mode and residual_pairwise_np is not None:
-        adjacency_build = build_residual_adjacency(
-            backend=backend,
-            batch_size=batch_size,
-            scope_indptr=scope_indptr,
-            scope_indices=scope_indices,
-            pairwise=pairwise,
-            radii=radii_np,
-            residual_pairwise=residual_pairwise_np,
-        )
-    else:
-        adjacency_build = build_dense_adjacency(
-            backend=backend,
-            batch_size=batch_size,
-            scope_indptr=scope_indptr,
-            scope_indices=scope_indices,
-            pairwise=pairwise,
-            radii=radii_np,
-        )
+    context = ConflictGraphContext(
+        backend=backend,
+        batch=batch,
+        batch_size=batch_size,
+        scope_indptr=scope_indptr,
+        scope_indices=scope_indices,
+        radii=radii,
+        radii_np=radii_np,
+        pairwise=pairwise,
+        pairwise_np=pairwise_np,
+        residual_pairwise_np=residual_pairwise_np,
+        point_ids=point_ids,
+        levels=levels,
+    )
+    strategy = select_conflict_strategy(
+        runtime,
+        residual_mode=residual_mode,
+        has_residual_distances=residual_pairwise_np is not None,
+    )
+    adjacency_build = strategy.build(context)
 
     if (
         residual_mode

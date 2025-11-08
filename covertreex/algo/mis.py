@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from covertreex import config as cx_config
-from covertreex.algo.conflict_graph import ConflictGraph
+from covertreex.algo.conflict import ConflictGraph
 from covertreex.core.tree import TreeBackend
 from covertreex.algo._mis_numba import NUMBA_AVAILABLE, run_mis_numba
 

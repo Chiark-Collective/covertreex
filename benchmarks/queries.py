@@ -26,6 +26,7 @@ from covertreex.algo import batch_insert, batch_insert_prefix_doubling
 from covertreex.core.tree import PCCTree, TreeBackend
 from covertreex.metrics import ResidualCorrHostData, configure_residual_correlation
 from covertreex.queries.knn import knn
+from benchmarks.runtime_cli import runtime_from_args
 from covertreex.baseline import (
     BaselineCoverTree,
     ExternalCoverTreeBaseline,
@@ -33,39 +34,6 @@ from covertreex.baseline import (
     has_external_cover_tree,
     has_gpboost_cover_tree,
 )
-
-
-_RESIDUAL_RUNTIME_ENV_VARS = (
-    "COVERTREEX_ENABLE_SPARSE_TRAVERSAL",
-    "COVERTREEX_RESIDUAL_GATE1",
-    "COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH",
-    "COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN",
-    "COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP",
-    "COVERTREEX_RESIDUAL_GATE1_AUDIT",
-    "COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH",
-    "COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT",
-)
-
-
-def _apply_residual_gate_preset(args: argparse.Namespace) -> None:
-    if args.residual_gate is None:
-        return
-    if args.residual_gate == "off":
-        os.environ["COVERTREEX_RESIDUAL_GATE1"] = "0"
-        return
-    if args.residual_gate != "lookup":
-        return
-    os.environ["COVERTREEX_ENABLE_SPARSE_TRAVERSAL"] = "1"
-    os.environ["COVERTREEX_RESIDUAL_GATE1"] = "1"
-    if args.residual_gate_lookup_path:
-        os.environ["COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH"] = args.residual_gate_lookup_path
-    margin = args.residual_gate_margin
-    if margin is not None:
-        os.environ["COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN"] = str(margin)
-    cap = args.residual_gate_cap
-    if cap and cap > 0:
-        os.environ["COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP"] = str(cap)
-    os.environ.setdefault("COVERTREEX_RESIDUAL_GATE1_AUDIT", "1")
 
 
 def _read_rss_bytes() -> int | None:
@@ -894,50 +862,28 @@ def main() -> None:
     args = _parse_args()
     if args.residual_gate and args.metric != "residual":
         raise ValueError("--residual-gate presets are only supported when --metric residual is selected.")
-    previous_metric = os.environ.get("COVERTREEX_METRIC")
-    previous_backend = os.environ.get("COVERTREEX_BACKEND")
-    previous_batch_order = os.environ.get("COVERTREEX_BATCH_ORDER")
-    previous_batch_order_seed = os.environ.get("COVERTREEX_BATCH_ORDER_SEED")
-    previous_prefix_schedule = os.environ.get("COVERTREEX_PREFIX_SCHEDULE")
-    previous_gate_env = {var: os.environ.get(var) for var in _RESIDUAL_RUNTIME_ENV_VARS}
+    cli_runtime = runtime_from_args(args)
+    cli_runtime.activate()
     log_writer: BenchmarkLogWriter | None = None
     scope_cap_recorder: ResidualScopeCapRecorder | None = None
 
     try:
         if args.log_file:
             log_writer = BenchmarkLogWriter(args.log_file)
-        if args.metric == "residual":
-            os.environ["COVERTREEX_METRIC"] = "residual_correlation"
-            os.environ["COVERTREEX_BACKEND"] = "numpy"
-        else:
-            os.environ["COVERTREEX_METRIC"] = "euclidean"
-        if args.batch_order:
-            os.environ["COVERTREEX_BATCH_ORDER"] = args.batch_order
-        if args.batch_order_seed is not None:
-            os.environ["COVERTREEX_BATCH_ORDER_SEED"] = str(args.batch_order_seed)
-        if args.prefix_schedule:
-            os.environ["COVERTREEX_PREFIX_SCHEDULE"] = args.prefix_schedule
-        if args.metric == "residual":
-            _apply_residual_gate_preset(args)
-            if args.residual_scope_caps:
-                os.environ["COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH"] = args.residual_scope_caps
-            if args.residual_scope_cap_default is not None:
-                os.environ["COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT"] = str(args.residual_scope_cap_default)
-        cx_config.reset_runtime_config_cache()
 
         if args.metric == "residual" and args.residual_scope_cap_output:
-            runtime = cx_config.runtime_config()
+            runtime_config = cx_config.runtime_config()
             scope_cap_recorder = ResidualScopeCapRecorder(
                 output=args.residual_scope_cap_output,
                 percentile=args.residual_scope_cap_percentile,
                 margin=args.residual_scope_cap_margin,
-                radius_floor=runtime.residual_radius_floor,
+                radius_floor=runtime_config.residual_radius_floor,
             )
             scope_cap_recorder.annotate(
                 tree_points=args.tree_points,
                 batch_size=args.batch_size,
-                scope_chunk_target=runtime.scope_chunk_target,
-                scope_chunk_max_segments=runtime.scope_chunk_max_segments,
+                scope_chunk_target=runtime_config.scope_chunk_target,
+                scope_chunk_max_segments=runtime_config.scope_chunk_max_segments,
                 residual_scope_cap_default=args.residual_scope_cap_default,
                 seed=args.seed,
                 build_mode=args.build_mode,
@@ -1001,32 +947,7 @@ def main() -> None:
                 )
     finally:
         reset_residual_metric()
-        if previous_metric is not None:
-            os.environ["COVERTREEX_METRIC"] = previous_metric
-        else:
-            os.environ.pop("COVERTREEX_METRIC", None)
-        if previous_backend is not None:
-            os.environ["COVERTREEX_BACKEND"] = previous_backend
-        else:
-            os.environ.pop("COVERTREEX_BACKEND", None)
-        if previous_batch_order is not None:
-            os.environ["COVERTREEX_BATCH_ORDER"] = previous_batch_order
-        else:
-            os.environ.pop("COVERTREEX_BATCH_ORDER", None)
-        if previous_batch_order_seed is not None:
-            os.environ["COVERTREEX_BATCH_ORDER_SEED"] = previous_batch_order_seed
-        else:
-            os.environ.pop("COVERTREEX_BATCH_ORDER_SEED", None)
-        if previous_prefix_schedule is not None:
-            os.environ["COVERTREEX_PREFIX_SCHEDULE"] = previous_prefix_schedule
-        else:
-            os.environ.pop("COVERTREEX_PREFIX_SCHEDULE", None)
-        for var, value in previous_gate_env.items():
-            if value is None:
-                os.environ.pop(var, None)
-            else:
-                os.environ[var] = value
-        cx_config.reset_runtime_config_cache()
+        cx_config.reset_runtime_context()
         if scope_cap_recorder is not None:
             scope_cap_recorder.dump()
         if log_writer is not None:

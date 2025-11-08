@@ -1,27 +1,24 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Protocol, Tuple
+from typing import Any, Dict, Tuple
 
 import time
 import numpy as np
 
-from covertreex import config as cx_config
-from covertreex.core.metrics import get_metric
 from covertreex.core.tree import PCCTree, TreeBackend
 from covertreex.logging import get_logger
+from covertreex.metrics import residual as residual_metrics
 from covertreex.metrics.residual import (
     ResidualCorrHostData,
     ResidualGateTelemetry,
     compute_residual_distances_from_kernel,
     compute_residual_distances_with_radius,
-    compute_residual_pairwise_matrix,
     decode_indices,
     get_residual_backend,
 )
-from covertreex.metrics.residual_scope_caps import get_scope_cap_table
-from ._traverse_numba import NUMBA_TRAVERSAL_AVAILABLE, build_scopes_numba
-from ._traverse_sparse_numba import (
+from covertreex.metrics.residual.scope_caps import get_scope_cap_table
+from .._traverse_numba import NUMBA_TRAVERSAL_AVAILABLE, build_scopes_numba
+from .._traverse_sparse_numba import (
     NUMBA_SPARSE_TRAVERSAL_AVAILABLE,
     collect_sparse_scopes,
     collect_sparse_scopes_csr,
@@ -30,91 +27,19 @@ from covertreex.queries._knn_numba import (
     knn_numba,
     materialise_tree_view_cached,
 )
+from .base import (
+    ResidualTraversalCache,
+    TraversalResult,
+    TraversalTimings,
+    TraversalStrategy,
+    block_until_ready,
+    collect_distances,
+    empty_result,
+)
 
 LOGGER = get_logger("algo.traverse")
 _RESIDUAL_SCOPE_EPS = 1e-9
 _RESIDUAL_SCOPE_DEFAULT_LIMIT = 16_384
-
-
-@dataclass(frozen=True)
-class ResidualTraversalCache:
-    batch_indices: np.ndarray
-    pairwise: np.ndarray
-    scope_radii: np.ndarray | None = None
-    scope_saturated: np.ndarray | None = None
-    scope_chunk_iterations: np.ndarray | None = None
-    scope_chunk_points: np.ndarray | None = None
-    scope_dedupe_hits: np.ndarray | None = None
-    scope_radius_initial: np.ndarray | None = None
-    scope_radius_limits: np.ndarray | None = None
-    scope_radius_caps: np.ndarray | None = None
-
-
-@dataclass(frozen=True)
-class TraversalResult:
-    """Structured output produced by batched traversal."""
-
-    parents: Any
-    levels: Any
-    conflict_scopes: Tuple[Tuple[int, ...], ...]
-    scope_indptr: Any
-    scope_indices: Any
-    timings: "TraversalTimings"
-    residual_cache: ResidualTraversalCache | None = None
-
-
-@dataclass(frozen=True)
-class TraversalTimings:
-    pairwise_seconds: float
-    mask_seconds: float
-    semisort_seconds: float
-    chain_seconds: float = 0.0
-    nonzero_seconds: float = 0.0
-    sort_seconds: float = 0.0
-    assemble_seconds: float = 0.0
-    tile_seconds: float = 0.0
-    scope_chunk_segments: int = 0
-    scope_chunk_emitted: int = 0
-    scope_chunk_max_members: int = 0
-    gate1_candidates: int = 0
-    gate1_kept: int = 0
-    gate1_pruned: int = 0
-    gate1_seconds: float = 0.0
-    scope_chunk_scans: int = 0
-    scope_chunk_points: int = 0
-    scope_chunk_dedupe: int = 0
-    scope_chunk_saturated: int = 0
-    scope_cache_hits: int = 0
-    scope_cache_prefetch: int = 0
-
-
-def _block_until_ready(value: Any) -> None:
-    """Best-effort barrier for asynchronous backends (e.g., JAX)."""
-
-    blocker = getattr(value, "block_until_ready", None)
-    if callable(blocker):
-        blocker()
-
-
-def _broadcast_batch(backend: TreeBackend, batch_points: Any) -> Any:
-    return backend.asarray(batch_points, dtype=backend.default_float)
-
-
-def _collect_distances(tree: PCCTree, batch: Any, backend: TreeBackend) -> Any:
-    metric = get_metric()
-    return metric.pairwise(backend, batch, tree.points)
-
-
-class TraversalStrategy(Protocol):
-    def collect(
-        self,
-        tree: PCCTree,
-        batch: Any,
-        *,
-        backend: TreeBackend,
-        runtime: Any,
-    ) -> TraversalResult:
-        ...
 
 
 class _EuclideanDenseTraversal(TraversalStrategy):
@@ -164,8 +89,8 @@ def _collect_euclidean_dense(
     batch_size = int(batch.shape[0]) if batch.size else 0
 
     start = time.perf_counter()
-    distances = _collect_distances(tree, batch, backend)
-    _block_until_ready(distances)
+    distances = collect_distances(tree, batch, backend)
+    block_until_ready(distances)
     pairwise_seconds = time.perf_counter() - start
 
     start = time.perf_counter()
@@ -179,7 +104,7 @@ def _collect_euclidean_dense(
     parent_mask = node_indices[None, :] == parents[:, None]
     within_radius = distances <= radius[:, None]
     mask = xp.logical_or(within_radius, parent_mask)
-    _block_until_ready(mask)
+    block_until_ready(mask)
     mask_seconds = time.perf_counter() - start
 
     parents_np = np.asarray(parents, dtype=np.int64)
@@ -273,35 +198,6 @@ def _collect_euclidean_dense(
             nonzero_seconds=nonzero_seconds,
             sort_seconds=sort_seconds,
             assemble_seconds=assemble_seconds,
-        ),
-    )
-
-
-def _empty_result(backend: TreeBackend, batch_size: int) -> TraversalResult:
-    xp = backend.xp
-    parents = backend.asarray(
-        xp.full((batch_size,), -1), dtype=backend.default_int
-    )
-    levels = backend.asarray(
-        xp.full((batch_size,), -1), dtype=backend.default_int
-    )
-    conflict_scopes: Tuple[Tuple[int, ...], ...] = tuple(() for _ in range(batch_size))
-    scope_indptr = backend.asarray([0] * (batch_size + 1), dtype=backend.default_int)
-    scope_indices = backend.asarray([], dtype=backend.default_int)
-    return TraversalResult(
-        parents=parents,
-        levels=levels,
-        conflict_scopes=conflict_scopes,
-        scope_indptr=scope_indptr,
-        scope_indices=scope_indices,
-        timings=TraversalTimings(
-            pairwise_seconds=0.0,
-            mask_seconds=0.0,
-            semisort_seconds=0.0,
-            chain_seconds=0.0,
-            nonzero_seconds=0.0,
-            sort_seconds=0.0,
-            assemble_seconds=0.0,
         ),
     )
 
@@ -642,7 +538,7 @@ def _collect_euclidean_sparse(
 
     batch_size = int(queries_np.shape[0])
     if batch_size == 0:
-        return _empty_result(backend, 0)
+        return empty_result(backend, 0)
 
     view = materialise_tree_view_cached(tree)
 
@@ -765,7 +661,7 @@ def _collect_residual(
 
     batch_size = int(queries_np.shape[0])
     if batch_size == 0:
-        return _empty_result(backend, 0)
+        return empty_result(backend, 0)
 
     host_backend = get_residual_backend()
     query_indices = decode_indices(host_backend, queries_np)
@@ -786,7 +682,7 @@ def _collect_residual(
     )
     pairwise_seconds = time.perf_counter() - pairwise_start
 
-    residual_pairwise_np = compute_residual_pairwise_matrix(
+    residual_pairwise_np = residual_metrics.compute_residual_pairwise_matrix(
         host_backend=host_backend,
         batch_indices=batch_indices_np,
     )
@@ -926,9 +822,7 @@ def _collect_residual(
         ),
     )
 
-
-
-def _select_traversal_strategy(runtime: Any, backend: TreeBackend) -> TraversalStrategy:
+def select_traversal_strategy(runtime: Any, backend: TreeBackend) -> TraversalStrategy:
     if (
         runtime.metric == "residual_correlation"
         and runtime.enable_sparse_traversal
@@ -945,26 +839,3 @@ def _select_traversal_strategy(runtime: Any, backend: TreeBackend) -> TraversalS
     ):
         return _EuclideanSparseTraversal()
     return _EuclideanDenseTraversal()
-
-
-def traverse_collect_scopes(
-    tree: PCCTree,
-    batch_points: Any,
-    *,
-    backend: TreeBackend | None = None,
-) -> TraversalResult:
-    """Compute parent assignments and conflict scopes for a batch of points."""
-
-    backend = backend or tree.backend
-    batch = _broadcast_batch(backend, batch_points)
-    batch_size = int(batch.shape[0]) if batch.size else 0
-
-    if batch_size == 0:
-        return _empty_result(backend, 0)
-
-    if tree.is_empty():
-        return _empty_result(backend, batch_size)
-
-    runtime = cx_config.runtime_config()
-    strategy = _select_traversal_strategy(runtime, backend)
-    return strategy.collect(tree, batch, backend=backend, runtime=runtime)

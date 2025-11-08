@@ -2,6 +2,7 @@ import json
 import numpy as np
 import sys
 import pytest
+from types import SimpleNamespace
 
 jax = pytest.importorskip("jax")
 
@@ -12,6 +13,7 @@ from benchmarks.queries import (
     benchmark_knn_latency,
     run_baseline_comparisons,
 )
+from benchmarks.runtime_cli import runtime_from_args as _runtime_from_args
 from benchmarks import runtime_breakdown
 from covertreex import config as cx_config
 from covertreex.baseline import has_gpboost_cover_tree
@@ -87,9 +89,6 @@ def test_run_baseline_comparisons_gpboost():
 def test_runtime_breakdown_csv_output(tmp_path, monkeypatch):
     csv_path = tmp_path / "metrics.csv"
     png_path = tmp_path / "plot.png"
-    monkeypatch.setenv("COVERTREEX_BACKEND", "numpy")
-    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
-    cx_config.reset_runtime_config_cache()
     monkeypatch.setenv("PYTHONHASHSEED", "0")
     argv = [
         "runtime_breakdown",
@@ -112,10 +111,14 @@ def test_runtime_breakdown_csv_output(tmp_path, monkeypatch):
         "--skip-external",
         "--skip-gpboost",
         "--skip-jax",
+        "--backend",
+        "numpy",
+        "--precision",
+        "float64",
     ]
     monkeypatch.setattr(sys, "argv", argv)
     runtime_breakdown.main()
-    cx_config.reset_runtime_config_cache()
+    cx_config.reset_runtime_context()
     assert csv_path.exists()
     contents = csv_path.read_text().strip().splitlines()
     chunk_tail = ",".join(
@@ -170,3 +173,57 @@ def test_benchmark_log_writer_emits_json(tmp_path):
     assert first_entry["batch_index"] == 0
     assert "traversal_ms" in first_entry
     assert "rss_bytes" in first_entry or "rss_delta_bytes" in first_entry
+
+
+def _cli_args(**overrides):
+    defaults = dict(
+        metric="euclidean",
+        residual_gate=None,
+        residual_gate_lookup_path="lookup.json",
+        residual_gate_margin=0.02,
+        residual_gate_cap=0.0,
+        residual_scope_caps=None,
+        residual_scope_cap_default=None,
+        batch_order=None,
+        batch_order_seed=None,
+        prefix_schedule=None,
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def test_runtime_from_args_residual_lookup():
+    args = _cli_args(
+        metric="residual",
+        residual_gate="lookup",
+        residual_gate_lookup_path="caps.json",
+        residual_gate_margin=0.1,
+        residual_gate_cap=3.5,
+        residual_scope_caps="caps.json",
+        residual_scope_cap_default=0.75,
+        batch_order="hilbert",
+        batch_order_seed=42,
+        prefix_schedule="doubling",
+    )
+    runtime = _runtime_from_args(args)
+    assert runtime.metric == "residual_correlation"
+    assert runtime.backend == "numpy"
+    assert runtime.batch_order == "hilbert"
+    assert runtime.batch_order_seed == 42
+    assert runtime.prefix_schedule == "doubling"
+    assert runtime.enable_sparse_traversal is True
+    assert runtime.residual is not None
+    residual = runtime.residual
+    assert residual.gate1_enabled is True
+    assert residual.lookup_path == "caps.json"
+    assert residual.lookup_margin == 0.1
+    assert residual.gate1_radius_cap == 3.5
+    assert residual.scope_cap_path == "caps.json"
+    assert residual.scope_cap_default == 0.75
+
+
+def test_runtime_from_args_euclidean_defaults():
+    runtime = _runtime_from_args(_cli_args())
+    assert runtime.metric == "euclidean"
+    assert runtime.backend is None
+    assert runtime.residual is None

@@ -1,18 +1,23 @@
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Callable, Optional, Protocol, Sequence, Tuple
 
 import numpy as np
 
-from covertreex import config as cx_config
-from ._residual_numba import compute_distance_chunk, gate1_whitened_mask
+from .._residual_numba import compute_distance_chunk, gate1_whitened_mask
+from .policy import (
+    RESIDUAL_EPS,
+    ResidualGateLookup,
+    ResidualGateProfile,
+    ResidualGateTelemetry,
+    ResidualPolicy,
+    get_residual_policy,
+)
 
 ArrayLike = np.ndarray | Sequence[float] | Sequence[int]
-_EPS = 1e-9
+_EPS = RESIDUAL_EPS
 
 
 class KernelProvider(Protocol):
@@ -38,170 +43,6 @@ def _default_point_decoder(values: ArrayLike) -> np.ndarray:
         "Provide a custom point_decoder that can extract dataset indices "
         "from the supplied point representation."
     )
-
-
-@dataclass
-class ResidualGateTelemetry:
-    candidates: int = 0
-    kept: int = 0
-    pruned: int = 0
-    seconds: float = 0.0
-
-    def snapshot(self) -> Tuple[int, int, int, float]:
-        return (self.candidates, self.kept, self.pruned, self.seconds)
-
-    def delta(self, snapshot: Tuple[int, int, int, float]) -> "ResidualGateTelemetry":
-        cand0, kept0, pruned0, seconds0 = snapshot
-        return ResidualGateTelemetry(
-            candidates=self.candidates - cand0,
-            kept=self.kept - kept0,
-            pruned=self.pruned - pruned0,
-            seconds=self.seconds - seconds0,
-        )
-
-
-@dataclass
-class ResidualGateProfile:
-    bin_edges: np.ndarray
-    max_whitened: np.ndarray
-    max_ratio: np.ndarray
-    counts: np.ndarray
-    samples_total: int = 0
-    false_negative_samples: int = 0
-    radius_eps: float = _EPS
-    path: Path | None = None
-    dirty: bool = False
-
-    @classmethod
-    def create(
-        cls,
-        *,
-        bins: int,
-        radius_max: float,
-        path: str | Path | None,
-        radius_eps: float = _EPS,
-    ) -> "ResidualGateProfile":
-        edges = np.linspace(0.0, radius_max, bins + 1, dtype=np.float64)
-        size = max(edges.size - 1, 1)
-        target = Path(path).expanduser() if path else None
-        return cls(
-            bin_edges=edges,
-            max_whitened=np.zeros(size, dtype=np.float64),
-            max_ratio=np.zeros(size, dtype=np.float64),
-            counts=np.zeros(size, dtype=np.int64),
-            radius_eps=radius_eps,
-            path=target,
-        )
-
-    def _bin_indices(self, values: np.ndarray) -> np.ndarray:
-        indices = np.searchsorted(self.bin_edges, values, side="right") - 1
-        return np.clip(indices, 0, self.max_whitened.size - 1)
-
-    def record_chunk(
-        self,
-        *,
-        residual_distances: np.ndarray,
-        whitened_distances: np.ndarray,
-        inclusion_mask: np.ndarray,
-    ) -> None:
-        if whitened_distances is None or residual_distances.size == 0:
-            return
-        mask = inclusion_mask.astype(bool, copy=False)
-        if not np.any(mask):
-            return
-        residual = np.asarray(residual_distances[mask], dtype=np.float64, copy=False)
-        whitened = np.asarray(whitened_distances[mask], dtype=np.float64, copy=False)
-        residual = np.clip(residual, self.radius_eps, None)
-        idx = self._bin_indices(residual)
-        np.maximum.at(self.max_whitened, idx, whitened)
-        np.maximum.at(self.max_ratio, idx, np.divide(whitened, residual))
-        np.add.at(self.counts, idx, 1)
-        self.samples_total += whitened.size
-        self.dirty = True
-
-    def record_false_negatives(
-        self,
-        *,
-        residual_distances: np.ndarray,
-        whitened_distances: np.ndarray,
-        inclusion_mask: np.ndarray,
-    ) -> None:
-        self.record_chunk(
-            residual_distances=residual_distances,
-            whitened_distances=whitened_distances,
-            inclusion_mask=inclusion_mask,
-        )
-        self.false_negative_samples += int(np.count_nonzero(inclusion_mask))
-
-    def _cumulative_whitened(self) -> np.ndarray:
-        return np.maximum.accumulate(self.max_whitened)
-
-    def _cumulative_ratio(self) -> np.ndarray:
-        return np.maximum.accumulate(self.max_ratio)
-
-    def to_dict(self) -> dict:
-        payload = {
-            "schema": 1,
-            "radius_bin_edges": self.bin_edges.tolist(),
-            "max_whitened": self._cumulative_whitened().tolist(),
-            "max_ratio": self._cumulative_ratio().tolist(),
-            "counts": self.counts.tolist(),
-            "samples_total": int(self.samples_total),
-            "false_negative_samples": int(self.false_negative_samples),
-            "radius_eps": float(self.radius_eps),
-        }
-        return payload
-
-    def dump(self, path: str | Path | None = None, *, force: bool = False) -> None:
-        target = Path(path).expanduser() if path else self.path
-        if target is None or (not self.dirty and not force):
-            return
-        target.parent.mkdir(parents=True, exist_ok=True)
-        payload = self.to_dict()
-        payload["generated_at"] = float(time.time())
-        payload["bins"] = int(self.max_whitened.size)
-        target.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        self.path = target
-        self.dirty = False
-
-
-@dataclass
-class ResidualGateLookup:
-    radius_bins: np.ndarray
-    thresholds: np.ndarray
-    margin: float
-
-    @classmethod
-    def from_payload(
-        cls,
-        payload: dict,
-        *,
-        margin: float,
-    ) -> "ResidualGateLookup":
-        edges = np.asarray(payload.get("radius_bin_edges", []), dtype=np.float64)
-        maxima = np.asarray(payload.get("max_whitened", []), dtype=np.float64)
-        if edges.ndim != 1 or edges.size < 2:
-            raise ValueError("Residual gate lookup file is missing 'radius_bin_edges'.")
-        bins = edges[1:]
-        if maxima.size != bins.size:
-            raise ValueError("Residual gate lookup file has mismatched 'max_whitened' length.")
-        thresholds = np.maximum.accumulate(maxima.astype(np.float64, copy=False))
-        return cls(radius_bins=bins, thresholds=thresholds, margin=float(margin))
-
-    @classmethod
-    def load(cls, path: str | Path, *, margin: float) -> "ResidualGateLookup":
-        target = Path(path).expanduser()
-        payload = json.loads(target.read_text(encoding="utf-8"))
-        return cls.from_payload(payload, margin=margin)
-
-    def threshold(self, radius: float) -> float:
-        if self.radius_bins.size == 0:
-            return float(self.margin)
-        clipped = np.clip(radius, 0.0, float(self.radius_bins[-1]))
-        idx = int(np.searchsorted(self.radius_bins, clipped, side="left"))
-        if idx >= self.radius_bins.size:
-            idx = self.radius_bins.size - 1
-        return float(self.thresholds[idx] + self.margin)
 
 
 @dataclass(frozen=True)
@@ -396,17 +237,17 @@ def _compute_gate1_distances(
 
 def _resolve_gate1_config(
     backend: ResidualCorrHostData,
+    *,
+    policy: ResidualPolicy | None = None,
 ) -> tuple[bool, float, float, float, bool, float]:
-    runtime = cx_config.runtime_config()
+    runtime_policy = policy or get_residual_policy()
 
-    enabled = backend.gate1_enabled
-    if enabled is None:
-        enabled = runtime.residual_gate1_enabled
-    alpha = backend.gate1_alpha if backend.gate1_alpha is not None else runtime.residual_gate1_alpha
-    margin = backend.gate1_margin if backend.gate1_margin is not None else runtime.residual_gate1_margin
-    eps = backend.gate1_eps if backend.gate1_eps is not None else runtime.residual_gate1_eps
-    audit = backend.gate1_audit if backend.gate1_audit is not None else runtime.residual_gate1_audit
-    cap = backend.gate1_radius_cap if backend.gate1_radius_cap is not None else runtime.residual_gate1_radius_cap
+    enabled = runtime_policy.gate1_enabled if backend.gate1_enabled is None else backend.gate1_enabled
+    alpha = backend.gate1_alpha if backend.gate1_alpha is not None else runtime_policy.gate1_alpha
+    margin = backend.gate1_margin if backend.gate1_margin is not None else runtime_policy.gate1_margin
+    eps = backend.gate1_eps if backend.gate1_eps is not None else runtime_policy.gate1_eps
+    audit = backend.gate1_audit if backend.gate1_audit is not None else runtime_policy.gate1_audit
+    cap = backend.gate1_radius_cap if backend.gate1_radius_cap is not None else runtime_policy.gate1_radius_cap
 
     return bool(enabled), float(alpha), float(margin), float(eps), bool(audit), float(cap)
 
@@ -747,13 +588,13 @@ def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
         v_matrix = np.asarray(backend.v_matrix, dtype=np.float64)
         object.__setattr__(backend, "v_norm_sq", np.sum(v_matrix * v_matrix, axis=1))
 
-    runtime = cx_config.runtime_config()
-    enabled, alpha, margin, eps, audit, radius_cap = _resolve_gate1_config(backend)
-    profile_path = backend.gate_profile_path or runtime.residual_gate1_profile_path
-    profile_bins = backend.gate_profile_bins or runtime.residual_gate1_profile_bins
-    lookup_path = backend.gate_lookup_path or runtime.residual_gate1_lookup_path
+    policy = get_residual_policy()
+    enabled, alpha, margin, eps, audit, radius_cap = _resolve_gate1_config(backend, policy=policy)
+    profile_path = backend.gate_profile_path or policy.gate1_profile_path
+    profile_bins = backend.gate_profile_bins or policy.gate1_profile_bins
+    lookup_path = backend.gate_lookup_path or policy.gate1_lookup_path
     lookup_margin = (
-        backend.gate_lookup_margin if backend.gate_lookup_margin is not None else runtime.residual_gate1_lookup_margin
+        backend.gate_lookup_margin if backend.gate_lookup_margin is not None else policy.gate1_lookup_margin
     )
 
     radius_max_for_profile = max(1.0, radius_cap if radius_cap > 0.0 else 1.0)
@@ -763,7 +604,7 @@ def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
             bins=int(profile_bins),
             radius_max=float(radius_max_for_profile),
             path=profile_path,
-            radius_eps=runtime.residual_radius_floor,
+            radius_eps=policy.radius_floor,
         )
 
     lookup_obj = None

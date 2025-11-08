@@ -1,10 +1,10 @@
 """Algorithmic kernels for traversal, conflict graph construction, and MIS routines."""
 
-from .conflict_graph import ConflictGraph, ConflictGraphTimings, build_conflict_graph
+from .conflict import ConflictGraph, ConflictGraphTimings, build_conflict_graph
 from .mis import MISResult, batch_mis_seeds, run_mis
 from .traverse import TraversalResult, TraversalTimings, traverse_collect_scopes
 from .batch_delete import BatchDeletePlan, batch_delete, plan_batch_delete
-from .batch_insert import (
+from .batch import (
     BatchInsertPlan,
     BatchInsertTimings,
     PrefixBatchGroup,

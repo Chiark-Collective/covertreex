@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pytest
 
-from covertreex.metrics.residual_scope_caps import (
+from covertreex.metrics.residual.scope_caps import (
     ResidualScopeCapTable,
     get_scope_cap_table,
     reset_scope_cap_cache,

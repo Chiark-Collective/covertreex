@@ -5,7 +5,7 @@ jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
 from covertreex import config as cx_config
-from covertreex.algo.conflict_graph import build_conflict_graph
+from covertreex.algo.conflict import build_conflict_graph
 from covertreex.algo.mis import MISResult, batch_mis_seeds, run_mis
 from covertreex.algo.traverse import traverse_collect_scopes
 from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend

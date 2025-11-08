@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from covertreex import config as cx_config
-from covertreex.algo.batch_insert import plan_batch_insert
+from covertreex.algo.batch import plan_batch_insert
 from covertreex.algo.mis import batch_mis_seeds
 from covertreex.core.tree import (
     PCCTree,

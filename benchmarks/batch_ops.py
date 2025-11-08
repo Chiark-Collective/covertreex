@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Literal, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+from benchmarks.runtime_cli import runtime_from_args
 from covertreex.algo import batch_delete, batch_insert
 from covertreex.core.tree import PCCTree, get_runtime_backend
 
@@ -130,6 +132,13 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    runtime_from_args(
+        SimpleNamespace(
+            metric="euclidean",
+            backend="jax",
+            precision="float64",
+        )
+    ).activate()
     mode: Literal["insert", "delete"] = args.mode  # type: ignore[assignment]
 
     if mode == "insert":

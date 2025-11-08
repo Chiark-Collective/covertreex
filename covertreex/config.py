@@ -521,6 +521,28 @@ def runtime_config() -> RuntimeConfig:
     return runtime_context().config
 
 
+def configure_runtime(config: RuntimeConfig) -> RuntimeContext:
+    """Force the active runtime context to use ``config`` instead of env defaults."""
+
+    context = RuntimeContext(config=config)
+    context.activate()
+    _set_runtime_context(context)
+    return context
+
+
+def set_runtime_context(context: RuntimeContext) -> RuntimeContext:
+    """Install ``context`` as the active runtime context after activating it."""
+
+    context.activate()
+    _set_runtime_context(context)
+    return context
+
+
+def _set_runtime_context(context: RuntimeContext) -> None:
+    global _CONTEXT_CACHE
+    _CONTEXT_CACHE = context
+
+
 def reset_runtime_config_cache() -> None:
     reset_runtime_context()
 

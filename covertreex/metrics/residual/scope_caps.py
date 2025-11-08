@@ -91,3 +91,10 @@ def get_scope_cap_table(path: str | None) -> ResidualScopeCapTable | None:
 def reset_scope_cap_cache() -> None:
     with _CACHE_LOCK:
         _SCOPE_CAP_CACHE.clear()
+
+
+__all__ = [
+    "ResidualScopeCapTable",
+    "get_scope_cap_table",
+    "reset_scope_cap_cache",
+]

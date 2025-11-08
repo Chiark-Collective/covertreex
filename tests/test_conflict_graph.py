@@ -6,7 +6,7 @@ from covertreex.metrics import residual as residual_mod
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
-from covertreex.algo.conflict_graph import ConflictGraph, build_conflict_graph
+from covertreex.algo.conflict import ConflictGraph, build_conflict_graph
 from covertreex.algo.traverse import traverse_collect_scopes
 from covertreex.core.metrics import reset_residual_metric
 from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
@@ -331,7 +331,7 @@ def test_residual_conflict_graph_reuses_pairwise_cache(monkeypatch: pytest.Monke
         _wrapped,
     )
     monkeypatch.setattr(
-        "covertreex.algo.conflict_graph.compute_residual_pairwise_matrix",
+        "covertreex.algo.conflict.runner.compute_residual_pairwise_matrix",
         _wrapped,
     )
 

@@ -6,13 +6,14 @@ import csv
 import os
 import resource
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from statistics import mean, median
 from typing import Dict, List, Optional
 
 import numpy as np
 from numpy.random import default_rng
 
+from benchmarks.runtime_cli import runtime_from_args
 from covertreex import config as cx_config
 from covertreex.algo import batch_insert
 from covertreex.algo.mis import NUMBA_AVAILABLE
@@ -198,23 +199,14 @@ def _print_multi_run_summary(all_results: List[List[ImplementationResult]]) -> N
 
 
 @contextlib.contextmanager
-def _temporary_env(**updates: str) -> None:
-    previous = {key: os.environ.get(key) for key in updates}
+def _temporary_runtime_override(**overrides: object) -> None:
+    base_context = cx_config.runtime_context()
+    updated_config = replace(base_context.config, **overrides)
+    cx_config.configure_runtime(updated_config)
     try:
-        for key, value in updates.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        cx_config.reset_runtime_config_cache()
         yield
     finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        cx_config.reset_runtime_config_cache()
+        cx_config.set_runtime_context(base_context)
 
 
 def _chunk_points(points: np.ndarray, batch_size: int) -> List[np.ndarray]:
@@ -304,12 +296,11 @@ def _run_pcct_variant(
     seed: int,
     enable_numba: bool,
 ) -> ImplementationResult:
-    env_value = "1" if enable_numba else "0"
     notes: Optional[str] = None
     if enable_numba and not NUMBA_AVAILABLE:
         notes = "Numba backend unavailable; falling back to JAX MIS."
 
-    with _temporary_env(COVERTREEX_ENABLE_NUMBA=env_value):
+    with _temporary_runtime_override(enable_numba=enable_numba):
         backend = get_runtime_backend()
         tree = PCCTree.empty(dimension=int(points.shape[1]), backend=backend)
         batch_metrics: List[Dict[str, float]] = []
@@ -631,11 +622,32 @@ def _parse_args() -> argparse.Namespace:
         default=1,
         help="Number of repeated benchmark runs (default: 1).",
     )
+    parser.add_argument(
+        "--backend",
+        choices=("jax", "numpy"),
+        default="jax",
+        help="Runtime backend to activate before benchmarking.",
+    )
+    parser.add_argument(
+        "--precision",
+        choices=("float32", "float64"),
+        default="float64",
+        help="Floating-point precision for runtime computations.",
+    )
+    parser.add_argument(
+        "--metric",
+        choices=("euclidean", "residual"),
+        default="euclidean",
+        help="Metric to benchmark (residual currently unsupported).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    if args.metric == "residual":
+        raise ValueError("runtime_breakdown currently supports only the euclidean metric.")
+    runtime_from_args(args).activate()
 
     points_np, queries_np = _generate_dataset(
         dimension=args.dimension,
