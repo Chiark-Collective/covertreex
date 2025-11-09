@@ -53,7 +53,7 @@ The 32 768-point run currently logs PCCT and the GPBoost baseline; sequential/
 
 ### Gold-standard residual benchmark (default path)
 
-Fresh artefacts: `benchmark_grid_32768_baseline_20251108.jsonl` + `_run2.jsonl` (paired with `bench_euclidean_grid_32768_20251108*.log`) and `benchmark_residual_32768_default.jsonl` (with `run_residual_32768_default.txt`) capture the PCCT rows above using the new defaults (`COVERTREEX_BATCH_ORDER=hilbert`, `COVERTREEX_PREFIX_SCHEDULE=adaptive`, `COVERTREEX_ENABLE_NUMBA=1`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`, `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256`, `COVERTREEX_CONFLICT_GRAPH_IMPL=grid`).
+Fresh artefacts: `benchmark_grid_32768_baseline_20251108.jsonl` + `_run2.jsonl` (paired with `bench_euclidean_grid_32768_20251108*.log`) and `benchmark_residual_32768_default.jsonl` (with `run_residual_32768_default.txt`) capture the PCCT rows above using the Euclidean defaults (`COVERTREEX_BATCH_ORDER=hilbert`, `COVERTREEX_PREFIX_SCHEDULE=adaptive`, `COVERTREEX_ENABLE_NUMBA=1`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`, `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256`, `COVERTREEX_CONFLICT_GRAPH_IMPL=grid`). Residual runs automatically flip to `COVERTREEX_PREFIX_SCHEDULE=doubling` and enable Gate‑1 lookup (`docs/data/residual_gate_profile_diag0.json`) while keeping chunking disabled.
 
 The historical **56.09 s / 0.229 s (4 469 q/s)** residual run (captured 2025‑11‑06) predates the grid/batch-order refresh but remains our “gold standard” regression target. The maintained harness now pins the closest available configuration—Numba enabled, natural batch order, doubling prefix schedule, diagnostics off, and no scope chunking—and currently measures **≈71.8 s build / 0.272 s query (3 762 q/s)**. To regenerate the artefact (and keep the environment consistent) run:
 
@@ -112,12 +112,15 @@ python -m cli.queries \
 # 32k residual vs GPBoost (baseline remains Euclidean-only)
 COVERTREEX_BACKEND=numpy \
 COVERTREEX_ENABLE_NUMBA=1 \
+COVERTREEX_CONFLICT_GRAPH_IMPL=grid \
+COVERTREEX_BATCH_ORDER=hilbert \
 python -m cli.queries \
   --dimension 8 --tree-points 32768 \
   --batch-size 512 --queries 1024 --k 8 \
   --seed 42 --baseline gpboost \
   --metric residual
 ```
+Residual commands automatically run with `COVERTREEX_PREFIX_SCHEDULE=doubling`, Gate‑1 lookup enabled, and chunking disabled unless you override those env vars.
 
 To capture warm-up versus steady-state timings for plotting, append `--csv-output runtime_breakdown_metrics.csv` when running `cli.runtime_breakdown`.
 
@@ -399,6 +402,8 @@ Environment knobs
   - Example CLI: `uv run python -m cli.queries … --batch-order hilbert --prefix-schedule adaptive` (Hilbert run above yielded the same 5.20 s build with steadier per-batch scatter and domination ratios logged inline).
 - **Hilbert becomes the default batch order (2025‑11‑07).** Fresh 32 768-point logs (`benchmark_grid_32768_natural.jsonl`, `benchmark_grid_32768_default_run2.jsonl`) show the first dominated batch’s scatter dropping from **3 951 ms → 6.6 ms**, average scatter falling **62 ms → 0.55 ms**, and `conflict_graph_ms` shrinking **83.7 ms → 22.4 ms** when Hilbert ordering is enabled alongside the grid builder. Because the domination ratio and leader counts stay unchanged (≈0.984 and ≈202 leaders/batch), we now default `COVERTREEX_BATCH_ORDER=hilbert` and updated the scaling table above (Euclidean build **37.7 s**, query **0.262 s**, `~3.9 k q/s`).
 - **Adaptive prefix growth defaults tuned + exposed via `--build-mode prefix`.** Use `python -m cli.queries … --build-mode prefix` to route construction through `batch_insert_prefix_doubling` and emit per-prefix telemetry (`prefix_factor`, `prefix_domination_ratio`, `prefix_schedule`) into the JSONL log. The 32 k Hilbert+grid run in this mode (`benchmark_grid_32768_prefix.jsonl`) produced **16 385 adaptive groups** with scatter averaging **0.047 ms** (median 0.043 ms, max 12.2 ms) and domination ratio ≈1.0 while keeping the prefix-factor blend at 1.25/2.25. These numbers justify the new `_DEFAULT_PREFIX_*` constants and give auditors a structured artefact when analysing prefix shaping; the residual variant still needs follow-up because the clamped run exceeds 20 minutes under this schedule (see plan §2).
+- **Residual batches now use the grid builder whenever `COVERTREEX_CONFLICT_GRAPH_IMPL=grid`.** The forced-leader path consumes the Gate‑1 whitened vectors (`gate_v32`) so `conflict_grid_*` counters finally light up in residual JSONL logs; MIS sees an empty graph and per-batch adjacency collapses accordingly.
+- **Scope chunking uses an adaptive target in highly dominated residual runs.** When <1 % of scopes contain survivors the runtime picks a chunk target inside `[8 192, 262 144]` so per-batch pair volume stays ≈128 k directed edges; the new target is surfaced via `conflict_graph.timings.scope_chunk_pair_cap`.
 
 ## PCCT Source & Execution Flow (2025-11-09)
 
@@ -555,12 +560,12 @@ class PCCT:
 | Term / Feature | Source entry points | Why it exists | How to enable / tune |
 | --- | --- | --- | --- |
 | Batches & batch ordering | `covertreex/algo/order/helpers.py::prepare_batch_points`, `covertreex/algo/batch/insert.py::plan_batch_insert` | Permutes each ingestion batch (Hilbert, random, natural) to minimise scope scatter before traversal/conflict building; records permutation + Hilbert metrics in `BatchInsertPlan`. | `COVERTREEX_BATCH_ORDER`, `COVERTREEX_BATCH_ORDER_SEED`, CLI `--batch-order/--batch-order-seed` (default `hilbert`). |
-| Prefix schedules & groups | `covertreex/algo/batch/insert.py::batch_insert_prefix_doubling`, `covertreex/algo/order/helpers.py::choose_prefix_factor` | Splits a large ingestion into prefixes (doubling or adaptive) so domination ratios stay ≈1.0 and MIS never sees pathological superscopes; logs `prefix_factor` + `prefix_domination_ratio` per group. | `COVERTREEX_PREFIX_SCHEDULE`, `COVERTREEX_PREFIX_DENSITY_*`, `COVERTREEX_PREFIX_GROWTH_*`, CLI `--build-mode prefix`. |
+| Prefix schedules & groups | `covertreex/algo/batch/insert.py::batch_insert_prefix_doubling`, `covertreex/algo/order/helpers.py::choose_prefix_factor` | Splits a large ingestion into prefixes (doubling or adaptive) so domination ratios stay ≈1.0 and MIS never sees pathological superscopes; residual runs now default to `doubling` while Euclidean stays on `adaptive`. | `COVERTREEX_PREFIX_SCHEDULE`, `COVERTREEX_PREFIX_DENSITY_*`, `COVERTREEX_PREFIX_GROWTH_*`, CLI `--build-mode prefix`. |
 | Conflict graph (dense / segmented / residual) | `covertreex/algo/conflict/strategies.py`, `covertreex/algo/conflict/builders.py` | Switches between CSR-from-mask (`dense`), point-ID segmented builders (`segmented`), and residual-aware pruning (`residual`) so MIS operates on the smallest safe adjacency. | `COVERTREEX_CONFLICT_GRAPH_IMPL={auto,dense,segmented,grid}`, `COVERTREEX_ENABLE_NUMBA`, `COVERTREEX_SCOPE_SEGMENT_DEDUP`. |
-| Grid leader selection | `covertreex/algo/conflict/builders.py::build_grid_adjacency`, `covertreex/algo/_grid_numba.py::grid_select_leaders_numba` | Hash-grid allocator that forces leaders/dominated nodes per cell, eliminating MIS edges for highly dominated batches while publishing `grid_*` telemetry. | `COVERTREEX_CONFLICT_GRAPH_IMPL=grid`, `COVERTREEX_ENABLE_NUMBA=1`, Hilbert ordering recommended. |
-| Scope chunks | `covertreex/algo/_scope_numba.py::_chunk_ranges_from_indptr`, `ScopeAdjacencyResult` | Splits oversubscribed scopes into bounded "chunks" so conflict-pair generation stays linear and exposes counters (`scope_chunk_*`) for auditors. | `COVERTREEX_SCOPE_CHUNK_TARGET`, `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS`. |
+| Grid leader selection | `covertreex/algo/conflict/builders.py::build_grid_adjacency`, `covertreex/algo/_grid_numba.py::grid_select_leaders_numba` | Hash-grid allocator that forces leaders/dominated nodes per cell, eliminating MIS edges for highly dominated batches while publishing `grid_*` telemetry; residual runs now always feed the Gate‑1 whitened vectors (scaled via `COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE`) into the same grid so they stay in lock-step with Euclidean runs. | `COVERTREEX_CONFLICT_GRAPH_IMPL=grid`, `COVERTREEX_ENABLE_NUMBA=1`, tweak `COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE` (default `1.0`) to widen/narrow residual cells, Hilbert ordering recommended. |
+| Scope chunks | `covertreex/algo/_scope_numba.py::_chunk_ranges_from_indptr`, `ScopeAdjacencyResult` | Splits oversubscribed scopes into bounded "chunks" so conflict-pair generation stays linear and exposes counters (`scope_chunk_*`) for auditors; residual runs auto-raise the target when domination falls below 1 %. | `COVERTREEX_SCOPE_CHUNK_TARGET`, `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS`. |
 | MIS seeding & solver | `covertreex/algo/mis.py::batch_mis_seeds`, `::run_mis`, `covertreex/algo/_mis_numba.py::run_mis_numba` | Deterministic seed fan-out plus Numba-accelerated MIS keep batch-to-batch behaviour reproducible and fast; falls back to pure JAX when Numba is unavailable. | `COVERTREEX_MIS_SEED`, CLI `--mis-seed`, `COVERTREEX_ENABLE_NUMBA`. |
-| Residual gating & prefilter | `covertreex/metrics/residual.py` (gate1, scope radii, telemetry), `covertreex/metrics/residual/scope_caps.py` | Whitened float32 gates and lookup tables drop expensive residual chunk evaluations early, enforce radius floors, and populate `gate_stats`. | `COVERTREEX_METRIC=residual_correlation`, plus `COVERTREEX_RESIDUAL_*` knobs (gate1, lookup, prefilter, scope caps). |
+| Residual gating & prefilter | `covertreex/metrics/residual.py` (gate1, scope radii, telemetry), `covertreex/metrics/residual/scope_caps.py` | Whitened float32 gates and lookup tables drop expensive residual chunk evaluations early, enforce radius floors, and populate `gate_stats`; lookup mode now activates automatically whenever `--metric residual`. | `COVERTREEX_METRIC=residual_correlation`, plus `COVERTREEX_RESIDUAL_*` knobs (gate1, lookup, prefilter, scope caps). |
 | Sparse traversal | `covertreex/algo/_traverse_sparse_numba.py::collect_sparse_scopes`, `covertreex/algo/traverse/strategies.py` | Builds CSR scopes directly for large trees (instead of dense masks) to reduce memory pressure before conflict assembly. | `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1`, CLI `--sparse-traversal`. |
 | Diagnostics & telemetry | `covertreex/diagnostics.py::log_operation`, `covertreex/telemetry/*`, CLI writers under `cli/` | Emits per-stage timings (`conflict_graph_ms`, `scope_chunk_*`, `grid_*`) and writes JSONL/CSV artefacts for the benchmarking harness. | `COVERTREEX_ENABLE_DIAGNOSTICS`, CLI `--log-file/--no-log-file`, `cli.runtime_breakdown --no-csv-output`. |
 
@@ -583,6 +588,13 @@ class PCCT:
 ### Additional optional controls
 
 Other runtime-only features live alongside the terms above: enable JIT kernels with `COVERTREEX_ENABLE_NUMBA=1` (covering traversal, scope chunking, grid selection, and MIS), opt into residual scope caps via `COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH`, or mirror the benchmarking defaults by setting `COVERTREEX_ENABLE_SPARSE_TRAVERSAL`/`COVERTREEX_ENABLE_DIAGNOSTICS`. All knobs resolve through `covertreex/runtime/config.py::RuntimeConfig.from_env()`, so CLI wrappers and tests inherit the same behaviour without duplicating flag parsing.
+
+### Next steps
+
+- Capture before/after artefacts for the residual grid leader width using the new `COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE` knob so `grid_*` telemetry can prove parity with Euclidean runs.
+- Promote the adaptive chunk-target heuristic into telemetry (`scope_chunk_pair_cap`) and write a short how-to on interpreting it so audits can link pair budgets to traversal drops.
+- Sparse traversal now uses a bucketed level-ordering pass (implemented inside `covertreex/algo/_traverse_sparse_numba.py::_collect_scope_single_into`), so `traversal_semisort_ms` no longer scales quadratically with scope size; residual runs can build on this once the chunked streamer lands.
+- Add regression tests that assert Gate‑1 lookup activation (and pruning) when `COVERTREEX_METRIC=residual_correlation`, ensuring the CLI knobs and docs stay in sync.
 
 ## Parallel Compressed Cover Tree — Conflict Graph Builder (dense + segmented)
 

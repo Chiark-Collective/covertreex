@@ -40,9 +40,10 @@ _DEFAULT_RESIDUAL_SCOPE_CAP_DEFAULT = 0.0
 _DEFAULT_RESIDUAL_PREFILTER_MARGIN = 0.02
 _DEFAULT_RESIDUAL_PREFILTER_RADIUS_CAP = 10.0
 _DEFAULT_RESIDUAL_PREFILTER_LOOKUP = str(
-    (Path(__file__).resolve().parents[2] / "docs" / "data" / "residual_gate_profile_diag0.json")
+    (Path(__file__).resolve().parents[2] / "docs" / "data" / "residual_gate_profile_32768_caps.json")
 )
 _DEFAULT_RESIDUAL_PREFILTER_AUDIT = False
+_DEFAULT_RESIDUAL_GRID_WHITEN_SCALE = 1.0
 
 
 def _bool_from_env(value: str | None, *, default: bool) -> bool:
@@ -107,9 +108,13 @@ def _parse_batch_order_strategy(value: str | None) -> str:
     return strategy
 
 
-def _parse_prefix_schedule(value: str | None) -> str:
+def _parse_prefix_schedule(
+    value: str | None,
+    *,
+    default: str = _DEFAULT_PREFIX_SCHEDULE,
+) -> str:
     if value is None:
-        return _DEFAULT_PREFIX_SCHEDULE
+        return default
     schedule = value.strip().lower()
     if schedule not in _PREFIX_SCHEDULES:
         raise ValueError(
@@ -216,6 +221,7 @@ class RuntimeConfig:
     residual_prefilter_margin: float
     residual_prefilter_radius_cap: float
     residual_prefilter_audit: bool
+    residual_grid_whiten_scale: float
 
     @property
     def jax_enable_x64(self) -> bool:
@@ -267,6 +273,7 @@ class RuntimeConfig:
         else:
             scope_chunk_max_segments = raw_chunk_segments
         metric = os.getenv("COVERTREEX_METRIC", "euclidean").strip().lower() or "euclidean"
+        residual_metric = metric == "residual_correlation"
         batch_order_strategy = _parse_batch_order_strategy(
             os.getenv("COVERTREEX_BATCH_ORDER")
         )
@@ -274,7 +281,8 @@ class RuntimeConfig:
             os.getenv("COVERTREEX_BATCH_ORDER_SEED")
         )
         prefix_schedule = _parse_prefix_schedule(
-            os.getenv("COVERTREEX_PREFIX_SCHEDULE")
+            os.getenv("COVERTREEX_PREFIX_SCHEDULE"),
+            default="doubling" if residual_metric else _DEFAULT_PREFIX_SCHEDULE,
         )
         prefix_density_low = _parse_optional_float(
             os.getenv("COVERTREEX_PREFIX_DENSITY_LOW"),
@@ -298,7 +306,7 @@ class RuntimeConfig:
         )
         residual_gate1_enabled = _bool_from_env(
             os.getenv("COVERTREEX_RESIDUAL_GATE1"),
-            default=False,
+            default=residual_metric,
         )
         residual_gate1_alpha = _parse_optional_float(
             os.getenv("COVERTREEX_RESIDUAL_GATE1_ALPHA"),
@@ -359,6 +367,12 @@ class RuntimeConfig:
             os.getenv("COVERTREEX_RESIDUAL_PREFILTER_AUDIT"),
             default=_DEFAULT_RESIDUAL_PREFILTER_AUDIT,
         )
+        residual_grid_whiten_scale = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE"),
+            default=_DEFAULT_RESIDUAL_GRID_WHITEN_SCALE,
+        )
+        if residual_grid_whiten_scale <= 0.0:
+            residual_grid_whiten_scale = _DEFAULT_RESIDUAL_GRID_WHITEN_SCALE
         if residual_prefilter_enabled:
             residual_gate1_enabled = True
             if residual_gate1_lookup_path is None:
@@ -371,6 +385,8 @@ class RuntimeConfig:
                 residual_gate1_radius_cap = residual_prefilter_radius_cap
             if os.getenv("COVERTREEX_RESIDUAL_GATE1_AUDIT") is None:
                 residual_gate1_audit = residual_prefilter_audit
+        if residual_gate1_lookup_path is None and residual_metric:
+            residual_gate1_lookup_path = _DEFAULT_RESIDUAL_PREFILTER_LOOKUP
         return cls(
             backend=backend,
             precision=precision,
@@ -411,6 +427,7 @@ class RuntimeConfig:
             residual_prefilter_margin=residual_prefilter_margin,
             residual_prefilter_radius_cap=residual_prefilter_radius_cap,
             residual_prefilter_audit=residual_prefilter_audit,
+            residual_grid_whiten_scale=residual_grid_whiten_scale,
         )
 
 
@@ -575,6 +592,7 @@ def describe_runtime() -> Dict[str, Any]:
         "residual_gate1_lookup_margin": config.residual_gate1_lookup_margin,
         "residual_scope_cap_path": config.residual_scope_cap_path,
         "residual_scope_cap_default": config.residual_scope_cap_default,
+        "residual_grid_whiten_scale": config.residual_grid_whiten_scale,
     }
 
 

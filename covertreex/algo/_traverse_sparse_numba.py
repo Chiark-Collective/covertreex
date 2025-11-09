@@ -110,19 +110,42 @@ if NUMBA_SPARSE_TRAVERSAL_AVAILABLE:
             steps += 1
 
         if count > 1:
+            min_level = top_levels[out_buf[0]]
+            max_level = min_level
             for i in range(1, count):
-                idx = out_buf[i]
-                level = top_levels[idx]
-                j = i - 1
-                while j >= 0:
-                    prev = out_buf[j]
-                    prev_level = top_levels[prev]
-                    if prev_level < level or (prev_level == level and prev > idx):
-                        out_buf[j + 1] = prev
-                        j -= 1
-                    else:
-                        break
-                out_buf[j + 1] = idx
+                lvl = top_levels[out_buf[i]]
+                if lvl < min_level:
+                    min_level = lvl
+                if lvl > max_level:
+                    max_level = lvl
+            span = int(max_level - min_level + 1)
+            if span <= 0:
+                span = 1
+            levels_buf = np.empty(count, dtype=np.int64)
+            counts = np.zeros(span, dtype=np.int64)
+            max_lvl_int = int(max_level)
+            for i in range(count):
+                lvl = int(top_levels[out_buf[i]])
+                levels_buf[i] = lvl
+                counts[max_lvl_int - lvl] += 1
+            offsets = np.empty(span + 1, dtype=np.int64)
+            offsets[0] = 0
+            for b in range(span):
+                offsets[b + 1] = offsets[b] + counts[b]
+            cursors = offsets[:-1].copy()
+            ordered = np.empty(count, dtype=np.int64)
+            for i in range(count):
+                bucket = max_lvl_int - levels_buf[i]
+                pos = cursors[bucket]
+                ordered[pos] = out_buf[i]
+                cursors[bucket] = pos + 1
+            for b in range(span):
+                start = offsets[b]
+                end = offsets[b + 1]
+                if end - start > 1:
+                    segment = np.sort(ordered[start:end])
+                    ordered[start:end] = segment
+            out_buf[:count] = ordered
 
         return count
 

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 
@@ -33,6 +34,7 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN",
         "COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH",
         "COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT",
+        "COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE",
         "JAX_ENABLE_X64",
         "JAX_PLATFORM_NAME",
     ]:
@@ -72,6 +74,7 @@ def test_runtime_config_defaults(monkeypatch: pytest.MonkeyPatch):
     assert runtime.residual_gate1_profile_bins == 256
     assert runtime.residual_gate1_lookup_path is None
     assert runtime.residual_gate1_lookup_margin == pytest.approx(0.02)
+    assert runtime.residual_grid_whiten_scale == pytest.approx(1.0)
 
 
 def test_runtime_context_uses_numpy_backend_by_default(monkeypatch: pytest.MonkeyPatch):
@@ -174,6 +177,7 @@ def test_describe_runtime_reports_expected_fields(monkeypatch: pytest.MonkeyPatc
     assert summary["residual_gate1_profile_bins"] == 256
     assert summary["residual_gate1_lookup_path"] is None
     assert summary["residual_gate1_lookup_margin"] == pytest.approx(0.02)
+    assert summary["residual_grid_whiten_scale"] == pytest.approx(1.0)
 
 
 def test_conflict_graph_impl_override(monkeypatch: pytest.MonkeyPatch):
@@ -205,6 +209,15 @@ def test_residual_scope_cap_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
     runtime = cx_config.runtime_config()
     assert runtime.residual_scope_cap_path == str(cap_path)
     assert runtime.residual_scope_cap_default == pytest.approx(3.25)
+
+
+def test_residual_grid_whiten_scale_env(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE", "2.75")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.residual_grid_whiten_scale == pytest.approx(2.75)
 
 
 def test_batch_order_override(monkeypatch: pytest.MonkeyPatch):
@@ -289,6 +302,24 @@ def test_metric_override(monkeypatch: pytest.MonkeyPatch):
 
     runtime = cx_config.runtime_config()
     assert runtime.metric == "residual_correlation"
+
+
+def test_residual_defaults_enable_gate_and_doubling(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("COVERTREEX_METRIC", "residual_correlation")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    expected_lookup = str(
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "data"
+        / "residual_gate_profile_32768_caps.json"
+    )
+
+    assert runtime.prefix_schedule == "doubling"
+    assert runtime.residual_gate1_enabled is True
+    assert runtime.residual_gate1_lookup_path == expected_lookup
 
 
 def test_sparse_traversal_toggle(monkeypatch: pytest.MonkeyPatch):

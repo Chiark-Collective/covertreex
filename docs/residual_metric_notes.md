@@ -73,7 +73,7 @@ It emits both distances and a mask indicating which entries fall below a caller-
 ### Calibration & Lookup Table
 
 - `tools/build_residual_gate_profile.py` builds an empirical profile from a synthetic residual workload. It reproduces the diag0 harness (2048 points, dimension 8, seed 42) and samples every pair, recording (residual distance, whitened distance) into evenly spaced radius bins.
-- The default artefact, `docs/data/residual_gate_profile_diag0.json`, contains 2,096,128 samples across 512 bins with zero audit escapes. Check it into source control so CI and local runs share the same lookup without recomputing the NxN matrix.
+- The 32 768-point capture (`docs/data/residual_gate_profile_32768_caps.json`) is now the default lookup used by `COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH` and the CLI presets. Use the original diag0 artefact (`docs/data/residual_gate_profile_diag0.json`) only for quick smoke tests—the larger profile better matches the production radius ladder.
 - To regenerate or explore alternative datasets, run for example:
 
   ```bash
@@ -86,14 +86,14 @@ It emits both distances and a mask indicating which entries fall below a caller-
   ```bash
   export COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1
   export COVERTREEX_RESIDUAL_GATE1=1
-  export COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH=docs/data/residual_gate_profile_diag0.json
+  export COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH=docs/data/residual_gate_profile_32768_caps.json
   export COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN=0.02   # optional safety buffer
   export COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP=10.0      # optional cap for huge radii
   ```
 
   (You can omit the cap to let the lookup see larger radii; we cap it when we want deterministic thresholds even if the residual ladder spikes.) The lookup supplies per-radius thresholds directly, so `residual_gate1_alpha` becomes a fallback rather than the primary tuning knob.
 
-- The CLI now takes care of those flags for you: `python -m cli.queries --metric residual --residual-gate lookup ...` wires sparse traversal, enables the gate, and points at `docs/data/residual_gate_profile_diag0.json`. Override the path (`--residual-gate-lookup-path`), margin (`--residual-gate-margin`), or radius cap (`--residual-gate-cap`) as needed. Use `--residual-gate off` to explicitly keep the gate disabled during experiments.
+- The CLI now takes care of those flags for you: `python -m cli.queries --metric residual --residual-gate lookup ...` wires sparse traversal, enables the gate, and points at `docs/data/residual_gate_profile_32768_caps.json`. Override the path (`--residual-gate-lookup-path`), margin (`--residual-gate-margin`), or radius cap (`--residual-gate-cap`) as needed. Use `--residual-gate off` to explicitly keep the gate disabled during experiments.
 
 - Gate‑1 still defaults to off globally—we only flip it on in telemetry or experimental runs until we finish the sparse traversal rollout and confirm the lookup holds for larger corpora. When you opt in, make sure `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1` is set; otherwise the dense traversal path bypasses the streaming helper and the gate never engages.
 - Regardless of whether Gate‑1 is enabled, residual batches now materialise the whitened cache so the grid builder can operate in the same space as the Euclidean runs. If the default cell width feels too loose/tight, set `COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE` (>1 tightens the cells, <1 loosens them; default `1.0`) to dial in `grid_*` telemetry before capturing regression artefacts.
@@ -135,6 +135,7 @@ Artifacts live under `artifacts/benchmarks/artifacts/benchmarks/` and share the 
 - The grid stays fully saturated (domination ratio ≈0.984) regardless of scale: every batch emits ~1.5 k cells, ~510 leaders, and zero conflict edges, so MIS time remains negligible.
 - Tightening the scale increases local grid edges by <0.5 % and shaves ~25 ms off the traversal median, but the overall build time is bounded by traversal (0.7–1.4 s per dominated batch) rather than grid work.
 - RSS peaks around 1.53–1.60 GB in both runs; memory pressure doesn’t change with the scale adjustments.
+- The reference dense run on the new default lookup (`residual_grid_default_20251109200738.jsonl`) still reports **63.39 s build / 0.035 s query (29.5 k q/s)** with `traversal_gate1_* = 0`, so switching the default from `diag0` to `residual_gate_profile_32768_caps.json` leaves the grid telemetry unchanged while keeping the harness aligned with the production corpus.
 
 **Traversal-focused follow-ups.** Grid tuning alone cannot deliver material build wins while traversal dominates:
 
