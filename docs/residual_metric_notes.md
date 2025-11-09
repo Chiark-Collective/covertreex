@@ -144,6 +144,25 @@ Artifacts live under `artifacts/benchmarks/artifacts/benchmarks/` and share the 
 
 Until those traversal improvements ship, keep the residual grid in place for determinism (leader telemetry + MIS seeds) but don’t expect the whiten scale alone to replicate the Euclidean build-time gains.
 
+### Gate‑1 Experiments (2025‑11‑09 evening)
+
+**Goal.** Re-enable the float32 Gate‑1 (lookup-backed) and confirm whether it can prune enough dominated candidates to lower traversal time without violating correctness. Runs used the same 32 768‑point benchmark as above.
+
+| Config | Key env knobs | Outcome |
+| --- | --- | --- |
+| `residual_gate_lookup_sparse_scale1p00_20251109191729.jsonl` | `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1`, `COVERTREEX_RESIDUAL_GATE1=1`, lookup margin 0.02, audit on | Gate tripped audit in the second batch (`RuntimeError: Residual gate pruned a candidate that lies within the requested radius`). Only the first batch logged, `traversal_gate1_*` counters stayed at 0 because the failure happened during the audit replay. |
+| `..._margin0p5_20251109191744.jsonl` | Same but lookup margin 0.5 | Audit still failed immediately. Loosening the margin alone does not prevent false negatives with the current lookup profile. |
+| `residual_gate_lookup_sparse_noaudit_scale1p00_20251109191757.jsonl` | Same as the first run, but `COVERTREEX_RESIDUAL_GATE1_AUDIT=0` (unsafe) | Run completed but took **>34 minutes** (our harness killed the CLI after ~2 050 s). Telemetry: `traversal_semisort_ms` averaged **31.2 s** per batch (sparse traversal is still sorting scope members), Gate‑1 processed ~5.5×10^8 candidates but only pruned ~7.6×10^6 (~1.4 %), and the gate itself cost ~2.85 s per batch. Whatever pruning we gained was dwarfed by the sparse semisort overhead. |
+| `residual_gate_dense_scale1p00_20251109195236.jsonl` | Gate enabled, sparse traversal **disabled** | Gate counters remained zero for all 64 batches; as expected, the dense traversal path never calls the gate and behavior matches the baseline dense run. |
+
+**Lessons.**
+
+1. **Audit fails immediately.** Even the “loose” lookup margin (0.5) still prunes legitimate neighbors on the first dominated batch. We need either a safer lookup profile (probably drawn from the 32 k corpus) or an adaptive bound that accounts for the per-batch radius ladder before we can ship Gate‑1.
+2. **Sparse traversal must be fixed first.** With audit off, Gate‑1 prunes millions of candidates, but the sparse traversal’s semisort dominates runtime (dozens of seconds per batch). The bucketed CSR builder from AUDIT.B is a prerequisite; otherwise enabling sparse traversal regresses build time by 40–60×.
+3. **Gate on dense traversal is a no-op.** Without the streaming helper the gate never runs, so toggling `COVERTREEX_RESIDUAL_GATE1` alone does nothing in production today.
+
+**Traversal notes.** To make Gate‑1 viable we need the bucketed CSR path (so sparse scopes don’t explode), a lookup derived from the latest 32 k telemetry (to keep audit happy), and probably a cheaper gate kernel (current gate spent ~2.85 s/batch processing 5.5×10^8 candidates). Only after those land will Gate‑1 have a chance of chipping away at the 0.7–1.4 s dominated batches we see in the dense runs.
+
 ## Operational Notes
 
 - Residual mode requires `backend.name == "numpy"` (NumPy backend) until the GPU/JAX kernels are ported.
