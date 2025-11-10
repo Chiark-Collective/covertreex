@@ -73,7 +73,7 @@ It emits both distances and a mask indicating which entries fall below a caller-
 ### Calibration & Lookup Table
 
 - `tools/build_residual_gate_profile.py` builds an empirical profile from a synthetic residual workload. It reproduces the diag0 harness (2048 points, dimension 8, seed 42) and samples every pair, recording (residual distance, whitened distance) into evenly spaced radius bins.
-- The 32 768-point capture (`docs/data/residual_gate_profile_32768_caps.json`) is now the default lookup used by `COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH` and the CLI presets. Use the original diag0 artefact (`docs/data/residual_gate_profile_diag0.json`) only for quick smoke tests—the larger profile better matches the production radius ladder.
+- The 32 768-point capture (`docs/data/residual_gate_profile_32768_caps.json`) is now the default lookup used by `COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH` and the CLI presets. The file was refreshed on **2025‑11‑10** via a full sparse run with `COVERTREEX_RESIDUAL_GATE1_PROFILE_PATH=$PWD/docs/data/residual_gate_profile_32768_caps.json` (log `artifacts/benchmarks/residual_sparse_streamer_profile_20251110122936.jsonl`, run id `pcct-20251110-112936-0d2a25`), so it reflects the radius ladder and telemetry we see with the Numba streamer + 8 192 scan cap. Use the original diag0 artefact (`docs/data/residual_gate_profile_diag0.json`) only for quick smoke tests.
 - To regenerate or explore alternative datasets, run for example:
 
   ```bash
@@ -100,10 +100,7 @@ It emits both distances and a mask indicating which entries fall below a caller-
 
 - `docs/data/residual_gate_profile_scope8192.json` captures a larger synthetic workload (8 192 points, 33 550 336 samples, same 512 bins) for comparison. Relative to the diag0 artefact the median threshold is +9.66, the 90th percentile delta is +19.93, the maximum absolute delta is ≈61.9, and 387/512 bins have higher maxima. `docs/data/residual_gate_profile_32768_caps.json` replaces those synthetic probes with the full 32 768-point capture (caps enabled, audit on) from 2025‑11‑08 so gate experiments can finally reference a workload that matches the production corpus.
 
-- Fresh 32 k runs with the lookup-enabled gate:
-  - `benchmark_residual_gate_lookup_32768_default_cap10.jsonl` (clamped/default build) reports build ≈269.8 s. `traversal_gate1_*` counters stay at zero because the per-level radii continue to exceed the lookup cap.
-  - `benchmark_residual_gate_lookup_32768_chunked_cap10.jsonl` (chunk target 16 384) lands at ≈270.8 s with the same gate stats (0 candidates/kept/pruned).
-  - `benchmark_residual_lookup_32768_final_run2.jsonl` (Hilbert batches + new per-level caps + chunked traversal) builds in 900.2 s and sustains 37.7 k q/s (1 024 queries, k=8) with audit enabled. Gate‑1 still rejects nothing (`traversal_gate1_pruned=0`) because the medians now sit near 1.05; the lookup remains a no-op until we either raise the caps again or derive a tighter radius floor.
+- Latest 32 k gate replay (pcct-20251110-112456-69dfdd, log `artifacts/benchmarks/artifacts/benchmarks/residual_sparse_gate_20251110124256.jsonl`): chunk target 8 192, lookup path pointing at the refreshed profile, audit on. Build cost is unchanged (≈1.3 k–3.0 k ms dominated batches) and `traversal_gate1_pruned` remains zero, so the lookup is now safe but still conservative. Once the new per-level cache heuristics land we can rerun this experiment to confirm pruning >0 without tripping the audit.
 - Setting `COVERTREEX_RESIDUAL_PREFILTER=1` enables the lookup-driven gate as a chunk-level SIMD prefilter (defaults: diag0 lookup, margin 0.02, radius cap 10). Override the lookup via `COVERTREEX_RESIDUAL_PREFILTER_LOOKUP_PATH`—for example, point it at `docs/data/residual_gate_profile_32768_caps.json` to reuse the November 8 corpus. Combining the prefilter with the scan cap and per-level cache (`benchmark_residual_cache_prefilter_20251108.jsonl`) yields **700.71 s build / 0.027 s query (37.6 k q/s)** while keeping `traversal_scope_chunk_points≈4.19 M` and logging `traversal_scope_cache_prefetch≈2.1 M` on saturated batches.
 
 ## Tests

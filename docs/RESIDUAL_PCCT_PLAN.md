@@ -88,7 +88,9 @@ All logs mentioned above live under `artifacts/benchmarks/…` for future compar
 
 - **Dense control (pcct-20251110-105043-101bb9, `artifacts/benchmarks/artifacts/benchmarks/residual_dense_20251110115043.jsonl`).** No material change: build ≈257 s, `median(traversal_ms)=1.23 s`, `median(conflict_graph_ms)=2.51 s`, scope chunk telemetry remains zero.
 
-- **Sparse streamer (pcct-20251110-105526-68dddf, `artifacts/benchmarks/artifacts/benchmarks/residual_sparse_streamer_20251110115526.jsonl`).** Build sum dropped to ≈493 s (previously ≈581 s). Median per-batch timings improved to `traversal_ms≈8.65 s` (−15 %), `traversal_semisort_ms≈8.11 s` (reflecting the multi-core chunk streamer), while `conflict_graph_ms≈0.038 s` stayed tiny. Every query still hits the 8 192-point scan cap (`scope_chunk_scans=8192`, `scope_chunk_points=4 194 304`, `scope_chunk_saturated=512`), so the next wins have to come from actually pruning those scans (Gate‑1 + better cache reuse) rather than host overhead.
+- **Sparse streamer (pcct-20251110-105526-68dddf, `artifacts/benchmarks/artifacts/benchmarks/residual_sparse_streamer_20251110115526.jsonl`).** Build sum dropped to ≈493 s (previously ≈581 s). Median per-batch timings improved to `traversal_ms≈8.65 s` (−15 %), `traversal_semisort_ms≈8.11 s` (reflecting the multi-core chunk streamer), while `conflict_graph_ms≈0.038 s` stayed tiny. Every query still hits the 8 192-point scan cap (`scope_chunk_scans=8 192`, `scope_chunk_points=4.19 M`, `scope_chunk_saturated=512`), so the next wins have to come from actually pruning those scans (Gate‑1 + better cache reuse) rather than host overhead.
+- **Profile capture (pcct-20251110-112936-0d2a25, `artifacts/benchmarks/residual_sparse_streamer_profile_20251110122936.jsonl`).** Same sparse harness but with `COVERTREEX_RESIDUAL_GATE1_PROFILE_PATH=$PWD/docs/data/residual_gate_profile_32768_caps.json`, which refreshed the lookup with real traversal telemetry (≈2.10 M samples recorded). The file at `docs/data/residual_gate_profile_32768_caps.json` now carries a 2025‑11‑10 metadata block, so downstream runs automatically pick up the refreshed thresholds.
+- **Gate‑1 validation (pcct-20251110-112456-69dfdd, `artifacts/benchmarks/artifacts/benchmarks/residual_sparse_gate_20251110124256.jsonl`).** With the new lookup, audit stayed green across all 64 batches (`traversal_gate1_pruned=0`, `traversal_gate1_candidates≈2.33×10^8`), confirming the profile is safe but still too conservative to prune anything yet. Traversal timings matched the profile run because every dominated batch still saturated the scan cap.
 
 - **Observations.**
   1. Cache prefetch/hit telemetry is still zero across dominated batches, so the per-level cache needs smarter heuristics (or to be disabled) when every query saturates the cap.
@@ -99,6 +101,6 @@ All logs mentioned above live under `artifacts/benchmarks/…` for future compar
 
 1. Rebuild the 32 k Gate‑1 lookup from the new telemetry and re-enable the gate (with audit) so the scan cap isn’t hit on every query.
 2. Teach the per-level cache to emit block-prefetch hints so cache hits show up in telemetry again.
-3. Re-run the full suite (dense, sparse, sparse+gate) after (1)-(2) to quantify the drop in dominated batches.
+3. Re-run the full suite (dense, sparse, sparse+gate) after (1)-(2) to quantify the drop in dominated batches (we have the verification run logged above; next we need pruning >0 before we can call it done).
 
 Append new findings or TODOs as the work progresses.
