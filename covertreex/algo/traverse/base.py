@@ -59,6 +59,10 @@ class TraversalTimings:
     scope_chunk_saturated: int = 0
     scope_cache_hits: int = 0
     scope_cache_prefetch: int = 0
+    scope_budget_start: int = 0
+    scope_budget_final: int = 0
+    scope_budget_escalations: int = 0
+    scope_budget_early_terminate: int = 0
 
 
 class TraversalStrategy(Protocol):

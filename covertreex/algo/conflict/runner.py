@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+import math
 import time
 import numpy as np
 
@@ -17,13 +18,38 @@ from covertreex.core.metrics import get_metric
 from covertreex.core.tree import PCCTree, TreeBackend
 from covertreex.metrics.residual import (
     compute_residual_distances_from_kernel,
-    compute_residual_pairwise_matrix,
+    compute_residual_pairwise_matrix,  # imported for backwards-compatibility in tests
     decode_indices,
     get_residual_backend,
 )
+from covertreex.exceptions import ResidualPairwiseCacheError
 from .base import ConflictGraph, ConflictGraphContext, ConflictGraphTimings
 from .builders import block_until_ready
 from .strategies import select_conflict_strategy
+
+
+_ADAPTIVE_SCOPE_PAIR_BUDGET = 128_000
+_ADAPTIVE_SCOPE_MIN = 8_192
+_ADAPTIVE_SCOPE_MAX = 262_144
+
+
+def _adaptive_scope_chunk_target(counts: np.ndarray) -> int | None:
+    if counts.size == 0:
+        return None
+    total_groups = counts.shape[0]
+    if total_groups == 0:
+        return None
+    active_groups = int(np.count_nonzero(counts))
+    domination_ratio = active_groups / float(total_groups)
+    if domination_ratio >= 0.01:
+        return None
+    mean_scope = float(np.mean(counts)) if counts.size else 0.0
+    approx = math.sqrt(
+        max(_ADAPTIVE_SCOPE_PAIR_BUDGET / max(total_groups, 1), 1.0)
+    )
+    approx = max(int(round(approx)), int(mean_scope))
+    approx = max(_ADAPTIVE_SCOPE_MIN, min(_ADAPTIVE_SCOPE_MAX, approx))
+    return approx if approx > 0 else None
 
 
 def build_conflict_graph(
@@ -45,30 +71,57 @@ def build_conflict_graph(
         runtime.metric == "residual_correlation" and backend.name == "numpy"
     )
 
+    parents_host = np.asarray(backend.to_numpy(traversal.parents), dtype=np.int64)
+    batch_size = int(parents_host.shape[0])
+    valid_parent_count = int(np.count_nonzero(parents_host >= 0))
+
     residual_pairwise_np: np.ndarray | None = None
     batch_indices_np: np.ndarray | None = None
     residual_cache = traversal.residual_cache if residual_mode else None
+    grid_points_override: np.ndarray | None = None
 
+    pairwise: Any | None = None
+    pairwise_reused_flag = 0
     pairwise_start = time.perf_counter()
     if residual_mode:
         host_backend = get_residual_backend()
-        if residual_cache is not None:
-            batch_indices_np = np.asarray(residual_cache.batch_indices, dtype=np.int64)
-            residual_pairwise_np = np.asarray(residual_cache.pairwise, dtype=np.float64)
-        else:
-            batch_np = np.asarray(backend.to_numpy(batch))
+        if residual_cache is None or getattr(residual_cache, "pairwise", None) is None:
+            if valid_parent_count > 0:
+                raise ResidualPairwiseCacheError(
+                    "Residual traversal cache is missing pairwise distances; enable residual caching before building the conflict graph."
+                )
+            batch_np = np.asarray(backend.to_numpy(batch), dtype=np.float64)
             batch_indices_np = decode_indices(host_backend, batch_np)
             residual_pairwise_np = compute_residual_pairwise_matrix(
-                host_backend,
-                batch_indices_np,
+                host_backend=host_backend,
+                batch_indices=batch_indices_np,
             )
-        pairwise = backend.asarray(residual_pairwise_np, dtype=backend.default_float)
+            residual_pairwise_np = np.asarray(residual_pairwise_np, dtype=np.float64)
+        else:
+            batch_indices_np = np.asarray(residual_cache.batch_indices, dtype=np.int64)
+            residual_pairwise_np = np.asarray(residual_cache.pairwise, dtype=np.float64)
+            pairwise_reused_flag = 1
+        gate_vectors = getattr(host_backend, "gate_v32", None)
+        grid_scale = float(getattr(host_backend, "grid_whiten_scale", runtime.residual_grid_whiten_scale))
+        if grid_scale <= 0.0:
+            grid_scale = 1.0
+        if gate_vectors is not None and batch_indices_np is not None:
+            try:
+                grid_points_override = np.asarray(
+                    gate_vectors[batch_indices_np],
+                    dtype=np.float64,
+                )
+                if grid_scale != 1.0:
+                    grid_points_override = grid_points_override * grid_scale
+            except Exception:
+                grid_points_override = None
+        pairwise = residual_pairwise_np
+        pairwise_seconds = time.perf_counter() - pairwise_start
     else:
         pairwise = metric.pairwise(backend, batch, batch)
         block_until_ready(pairwise)
-    pairwise_seconds = time.perf_counter() - pairwise_start
+        pairwise_seconds = time.perf_counter() - pairwise_start
 
-    batch_size = int(traversal.parents.shape[0])
     residual_scope_radii_np: np.ndarray | None = None
     if (
         residual_mode
@@ -95,7 +148,13 @@ def build_conflict_graph(
         point_ids = xp.zeros((0,), dtype=backend.default_int)
     scope_group_seconds = time.perf_counter() - scope_group_start
 
-    parents = backend.asarray(traversal.parents, dtype=backend.default_int)
+    adaptive_chunk_target: int | None = None
+    if residual_mode and runtime.scope_chunk_target == 0:
+        scope_indptr_np = np.asarray(backend.to_numpy(scope_indptr), dtype=np.int64)
+        counts_np = np.diff(scope_indptr_np)
+        adaptive_chunk_target = _adaptive_scope_chunk_target(counts_np)
+
+    parents = backend.asarray(parents_host, dtype=backend.default_int)
     levels = backend.asarray(traversal.levels, dtype=backend.default_int)
     level_float = levels.astype(backend.default_float)
     base = xp.power(
@@ -159,6 +218,9 @@ def build_conflict_graph(
         residual_pairwise_np=residual_pairwise_np,
         point_ids=point_ids,
         levels=levels,
+        grid_points=grid_points_override,
+        chunk_target_override=adaptive_chunk_target,
+        batch_dataset_indices=batch_indices_np,
     )
     strategy = select_conflict_strategy(
         runtime,
@@ -400,6 +462,7 @@ def build_conflict_graph(
             scope_chunk_pair_cap=scope_chunk_pair_cap,
             scope_chunk_pairs_before=scope_chunk_pairs_before,
             scope_chunk_pairs_after=scope_chunk_pairs_after,
+            pairwise_reused=int(pairwise_reused_flag),
             grid_cells=grid_cells,
             grid_leaders_raw=grid_leaders_raw,
             grid_leaders_after=grid_leaders_after,

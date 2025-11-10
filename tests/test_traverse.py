@@ -359,6 +359,59 @@ def test_residual_scope_chunk_target_caps_scan_points(monkeypatch: pytest.Monkey
     set_residual_backend(None)
 
 
+def test_residual_scope_budget_scheduler(monkeypatch: pytest.MonkeyPatch):
+    backend = get_runtime_backend()
+    points = backend.asarray([[float(i)] for i in range(3)], dtype=backend.default_float)
+    top_levels = backend.asarray([1] + [0] * 2, dtype=backend.default_int)
+    parents = backend.asarray([-1] + [0] * 2, dtype=backend.default_int)
+    children = backend.asarray([1, 2, -1], dtype=backend.default_int)
+    level_offsets = backend.asarray([0, 1, 3, 3], dtype=backend.default_int)
+    si_cache = backend.asarray([0.0] * 3, dtype=backend.default_float)
+    next_cache = backend.asarray([1, 2, -1], dtype=backend.default_int)
+    tree = PCCTree(
+        points=points,
+        top_levels=top_levels,
+        parents=parents,
+        children=children,
+        level_offsets=level_offsets,
+        si_cache=si_cache,
+        next_cache=next_cache,
+        stats=TreeLogStats(num_batches=1),
+        backend=backend,
+    )
+
+    _install_stub_residual_backend(chunk_size=1)
+
+    batch_points = [[0.0], [0.5], [1.0]]
+
+    monkeypatch.setenv("COVERTREEX_METRIC", "residual_correlation")
+    monkeypatch.setenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", "1")
+    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
+    monkeypatch.setenv("COVERTREEX_SCOPE_CHUNK_TARGET", "4")
+    monkeypatch.setenv("COVERTREEX_SCOPE_BUDGET_SCHEDULE", "2,4")
+    monkeypatch.setenv("COVERTREEX_SCOPE_BUDGET_UP_THRESH", "2.0")
+    monkeypatch.setenv("COVERTREEX_SCOPE_BUDGET_DOWN_THRESH", "1.1")
+    cx_config.reset_runtime_config_cache()
+
+    result = traverse_collect_scopes(tree, batch_points)
+    timings = result.timings
+    assert timings.scope_budget_start == len(batch_points) * 2
+    assert timings.scope_budget_final >= timings.scope_budget_start
+    assert timings.scope_budget_final <= len(batch_points) * 4
+    assert timings.scope_budget_early_terminate > 0
+
+    monkeypatch.delenv("COVERTREEX_METRIC", raising=False)
+    monkeypatch.delenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", raising=False)
+    monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
+    monkeypatch.delenv("COVERTREEX_SCOPE_CHUNK_TARGET", raising=False)
+    monkeypatch.delenv("COVERTREEX_SCOPE_BUDGET_SCHEDULE", raising=False)
+    monkeypatch.delenv("COVERTREEX_SCOPE_BUDGET_UP_THRESH", raising=False)
+    monkeypatch.delenv("COVERTREEX_SCOPE_BUDGET_DOWN_THRESH", raising=False)
+    cx_config.reset_runtime_config_cache()
+    reset_residual_metric()
+    set_residual_backend(None)
+
+
 def test_residual_sparse_traversal_matches_dense(monkeypatch: pytest.MonkeyPatch):
     backend = get_runtime_backend()
     points = backend.asarray([[0.0], [1.0], [2.0]], dtype=backend.default_float)

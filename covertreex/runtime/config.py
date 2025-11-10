@@ -22,6 +22,9 @@ _BATCH_ORDER_STRATEGIES = {"natural", "random", "hilbert"}
 _PREFIX_SCHEDULES = {"doubling", "adaptive"}
 _DEFAULT_SCOPE_CHUNK_TARGET = 0
 _DEFAULT_SCOPE_CHUNK_MAX_SEGMENTS = 512
+_DEFAULT_SCOPE_BUDGET_SCHEDULE: Tuple[int, ...] = ()
+_DEFAULT_SCOPE_BUDGET_UP_THRESH = 0.015
+_DEFAULT_SCOPE_BUDGET_DOWN_THRESH = 0.002
 _DEFAULT_BATCH_ORDER_STRATEGY = "hilbert"
 _DEFAULT_PREFIX_SCHEDULE = "adaptive"
 _DEFAULT_PREFIX_DENSITY_LOW = 0.15
@@ -36,6 +39,9 @@ _DEFAULT_RESIDUAL_GATE1_RADIUS_CAP = 1.0
 _DEFAULT_RESIDUAL_RADIUS_FLOOR = 1e-3
 _DEFAULT_RESIDUAL_GATE1_PROFILE_BINS = 256
 _DEFAULT_RESIDUAL_GATE1_LOOKUP_MARGIN = 0.02
+_DEFAULT_RESIDUAL_GATE1_BAND_EPS = 0.02
+_DEFAULT_RESIDUAL_GATE1_KEEP_PCT = 95.0
+_DEFAULT_RESIDUAL_GATE1_PRUNE_PCT = 99.9
 _DEFAULT_RESIDUAL_SCOPE_CAP_DEFAULT = 0.0
 _DEFAULT_RESIDUAL_PREFILTER_MARGIN = 0.02
 _DEFAULT_RESIDUAL_PREFILTER_RADIUS_CAP = 10.0
@@ -180,6 +186,32 @@ def _resolve_jax_devices(requested: Tuple[str, ...]) -> Tuple[str, ...]:
     return _FALLBACK_CPU_DEVICE
 
 
+def _parse_scope_budget_schedule(raw: str | None) -> Tuple[int, ...]:
+    if raw is None:
+        return _DEFAULT_SCOPE_BUDGET_SCHEDULE
+    tokens = [segment.strip() for segment in raw.split(",")]
+    values: list[int] = []
+    for token in tokens:
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid integer value '{token}' in COVERTREEX_SCOPE_BUDGET_SCHEDULE"
+            ) from exc
+        if value <= 0:
+            raise ValueError(
+                "COVERTREEX_SCOPE_BUDGET_SCHEDULE entries must be positive integers"
+            )
+        if values and value <= values[-1]:
+            raise ValueError(
+                "COVERTREEX_SCOPE_BUDGET_SCHEDULE entries must be strictly increasing"
+            )
+        values.append(value)
+    return tuple(values)
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     backend: str
@@ -194,6 +226,9 @@ class RuntimeConfig:
     scope_segment_dedupe: bool
     scope_chunk_target: int
     scope_chunk_max_segments: int
+    scope_budget_schedule: Tuple[int, ...]
+    scope_budget_up_thresh: float
+    scope_budget_down_thresh: float
     metric: str
     batch_order_strategy: str
     batch_order_seed: int | None
@@ -209,6 +244,9 @@ class RuntimeConfig:
     residual_gate1_eps: float
     residual_gate1_audit: bool
     residual_gate1_radius_cap: float
+    residual_gate1_band_eps: float
+    residual_gate1_keep_pct: float
+    residual_gate1_prune_pct: float
     residual_radius_floor: float
     residual_gate1_profile_path: str | None
     residual_gate1_profile_bins: int
@@ -272,6 +310,22 @@ class RuntimeConfig:
             scope_chunk_max_segments = 0
         else:
             scope_chunk_max_segments = raw_chunk_segments
+        scope_budget_schedule = _parse_scope_budget_schedule(
+            os.getenv("COVERTREEX_SCOPE_BUDGET_SCHEDULE")
+        )
+        scope_budget_up_thresh = _parse_optional_float(
+            os.getenv("COVERTREEX_SCOPE_BUDGET_UP_THRESH"),
+            default=_DEFAULT_SCOPE_BUDGET_UP_THRESH,
+        )
+        scope_budget_down_thresh = _parse_optional_float(
+            os.getenv("COVERTREEX_SCOPE_BUDGET_DOWN_THRESH"),
+            default=_DEFAULT_SCOPE_BUDGET_DOWN_THRESH,
+        )
+        if scope_budget_schedule and scope_budget_down_thresh >= scope_budget_up_thresh:
+            raise ValueError(
+                "COVERTREEX_SCOPE_BUDGET_DOWN_THRESH must be smaller than "
+                "COVERTREEX_SCOPE_BUDGET_UP_THRESH"
+            )
         metric = os.getenv("COVERTREEX_METRIC", "euclidean").strip().lower() or "euclidean"
         residual_metric = metric == "residual_correlation"
         batch_order_strategy = _parse_batch_order_strategy(
@@ -306,7 +360,7 @@ class RuntimeConfig:
         )
         residual_gate1_enabled = _bool_from_env(
             os.getenv("COVERTREEX_RESIDUAL_GATE1"),
-            default=residual_metric,
+            default=False,
         )
         residual_gate1_alpha = _parse_optional_float(
             os.getenv("COVERTREEX_RESIDUAL_GATE1_ALPHA"),
@@ -328,6 +382,24 @@ class RuntimeConfig:
             os.getenv("COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP"),
             default=_DEFAULT_RESIDUAL_GATE1_RADIUS_CAP,
         )
+        residual_gate1_band_eps = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_GATE1_BAND_EPS"),
+            default=_DEFAULT_RESIDUAL_GATE1_BAND_EPS,
+        )
+        if residual_gate1_band_eps < 0.0:
+            residual_gate1_band_eps = _DEFAULT_RESIDUAL_GATE1_BAND_EPS
+        residual_gate1_keep_pct = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_GATE1_KEEP_PCT"),
+            default=_DEFAULT_RESIDUAL_GATE1_KEEP_PCT,
+        )
+        residual_gate1_prune_pct = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_GATE1_PRUNE_PCT"),
+            default=_DEFAULT_RESIDUAL_GATE1_PRUNE_PCT,
+        )
+        residual_gate1_keep_pct = float(min(max(residual_gate1_keep_pct, 0.0), 100.0))
+        residual_gate1_prune_pct = float(min(max(residual_gate1_prune_pct, 0.0), 100.0))
+        if residual_gate1_prune_pct < residual_gate1_keep_pct:
+            residual_gate1_prune_pct = residual_gate1_keep_pct
         residual_radius_floor = _parse_optional_float(
             os.getenv("COVERTREEX_RESIDUAL_RADIUS_FLOOR"),
             default=_DEFAULT_RESIDUAL_RADIUS_FLOOR,
@@ -400,6 +472,9 @@ class RuntimeConfig:
             scope_segment_dedupe=scope_segment_dedupe,
             scope_chunk_target=scope_chunk_target,
             scope_chunk_max_segments=scope_chunk_max_segments,
+            scope_budget_schedule=scope_budget_schedule,
+            scope_budget_up_thresh=scope_budget_up_thresh,
+            scope_budget_down_thresh=scope_budget_down_thresh,
             metric=metric,
             batch_order_strategy=batch_order_strategy,
             batch_order_seed=batch_order_seed,
@@ -415,6 +490,9 @@ class RuntimeConfig:
             residual_gate1_eps=residual_gate1_eps,
             residual_gate1_audit=residual_gate1_audit,
             residual_gate1_radius_cap=residual_gate1_radius_cap,
+            residual_gate1_band_eps=residual_gate1_band_eps,
+            residual_gate1_keep_pct=residual_gate1_keep_pct,
+            residual_gate1_prune_pct=residual_gate1_prune_pct,
             residual_radius_floor=residual_radius_floor,
             residual_gate1_profile_path=residual_gate1_profile_path,
             residual_gate1_profile_bins=residual_gate1_profile_bins,
@@ -570,6 +648,9 @@ def describe_runtime() -> Dict[str, Any]:
         "scope_segment_dedupe": config.scope_segment_dedupe,
         "scope_chunk_target": config.scope_chunk_target,
         "scope_chunk_max_segments": config.scope_chunk_max_segments,
+        "scope_budget_schedule": config.scope_budget_schedule,
+        "scope_budget_up_thresh": config.scope_budget_up_thresh,
+        "scope_budget_down_thresh": config.scope_budget_down_thresh,
         "metric": config.metric,
         "batch_order_strategy": config.batch_order_strategy,
         "batch_order_seed": config.batch_order_seed,
@@ -585,6 +666,9 @@ def describe_runtime() -> Dict[str, Any]:
         "residual_gate1_eps": config.residual_gate1_eps,
         "residual_gate1_audit": config.residual_gate1_audit,
         "residual_gate1_radius_cap": config.residual_gate1_radius_cap,
+        "residual_gate1_band_eps": config.residual_gate1_band_eps,
+        "residual_gate1_keep_pct": config.residual_gate1_keep_pct,
+        "residual_gate1_prune_pct": config.residual_gate1_prune_pct,
         "residual_radius_floor": config.residual_radius_floor,
         "residual_gate1_profile_path": config.residual_gate1_profile_path,
         "residual_gate1_profile_bins": config.residual_gate1_profile_bins,

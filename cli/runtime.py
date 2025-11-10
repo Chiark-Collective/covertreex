@@ -33,6 +33,12 @@ def _residual_policy_from_args(args: Any) -> ApiResidual | None:
         cap_value = _get_arg(args, "residual_gate_cap")
         if cap_value and cap_value > 0:
             overrides["gate1_radius_cap"] = cap_value
+    profile_path = _get_arg(args, "residual_gate_profile_path")
+    if profile_path:
+        overrides["profile_path"] = profile_path
+    profile_bins = _get_arg(args, "residual_gate_profile_bins")
+    if profile_bins:
+        overrides["profile_bins"] = profile_bins
     if not overrides:
         return None
     return ApiResidual(**overrides)
@@ -59,12 +65,16 @@ def runtime_from_args(
     enable_numba = _get_arg(args, "enable_numba")
     if enable_numba is not None:
         runtime_kwargs["enable_numba"] = bool(enable_numba)
+    elif metric == "residual":
+        runtime_kwargs["enable_numba"] = True
     diagnostics = _get_arg(args, "diagnostics")
     if diagnostics is not None:
         runtime_kwargs["diagnostics"] = bool(diagnostics)
     enable_sparse = _get_arg(args, "enable_sparse_traversal")
     if enable_sparse is not None:
         runtime_kwargs["enable_sparse_traversal"] = bool(enable_sparse)
+    elif metric == "residual":
+        runtime_kwargs["enable_sparse_traversal"] = True
     batch_order = _get_arg(args, "batch_order")
     if batch_order:
         runtime_kwargs["batch_order"] = batch_order
@@ -80,8 +90,6 @@ def runtime_from_args(
     residual_policy = _residual_policy_from_args(args)
     if residual_policy is not None:
         runtime_kwargs["residual"] = residual_policy
-        if _get_arg(args, "residual_gate") == "lookup" and "enable_sparse_traversal" not in runtime_kwargs:
-            runtime_kwargs["enable_sparse_traversal"] = True
     if extra_overrides:
         runtime_kwargs.update(extra_overrides)
     return ApiRuntime(**runtime_kwargs)

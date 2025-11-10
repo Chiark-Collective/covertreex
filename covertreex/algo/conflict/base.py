@@ -76,6 +76,7 @@ class ConflictGraphTimings:
     scope_chunk_pairs_before: int = 0
     scope_chunk_pairs_after: int = 0
     mis_seconds: float = 0.0
+    pairwise_reused: int = 0
     grid_cells: int = 0
     grid_leaders_raw: int = 0
     grid_leaders_after: int = 0
@@ -96,6 +97,9 @@ class ConflictGraphContext:
     residual_pairwise_np: np.ndarray | None
     point_ids: Any
     levels: Any
+    grid_points: Any | None = None
+    chunk_target_override: int | None = None
+    batch_dataset_indices: np.ndarray | None = None
 
 
 class ConflictGraphStrategy(Protocol):
