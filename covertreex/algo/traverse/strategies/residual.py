@@ -1017,7 +1017,7 @@ def _collect_residual(
         dtype=np.int64,
     )
 
-    if np.any(parents_np < 0):
+    if np.any(parents_np < 0) and tree_indices_np.size > 0:
         raise ValueError(
             "Residual traversal produced parent identifiers not present in the tree."
         )

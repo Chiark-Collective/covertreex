@@ -37,9 +37,9 @@ def traverse_collect_scopes(
     if batch_size == 0:
         return empty_result(backend, 0)
 
-    if tree.is_empty():
+    runtime = cx_config.runtime_config()
+    if tree.is_empty() and runtime.metric != "residual_correlation":
         return empty_result(backend, batch_size)
 
-    runtime = cx_config.runtime_config()
     strategy = select_traversal_strategy(runtime, backend)
     return strategy.collect(tree, batch, backend=backend, runtime=runtime)

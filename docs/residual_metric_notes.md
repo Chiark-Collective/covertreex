@@ -1,6 +1,18 @@
 # Residual-Correlation Metric Integration (2025-11)
 
-_Status snapshot (2025-11-10)._ The Numba scope streamer is merged, sparse traversal now feeds the bucketed CSR builder directly, and the refreshed Gate‑1 lookup (`docs/data/residual_gate_profile_32768_caps.json`) passes audits on the Hilbert 32 k harness. Gate-on reruns are still in-progress: `traversal_gate1_candidates≈2.33×10^8` yet `traversal_gate1_pruned=0`, so cache/prefilter work remains before we can claim build-time wins.
+_Status snapshot (2025-11-12)._ The scope streamer + CSR builder are live, float32 staging landed end-to-end, and deterministic selection keeps sparsified scopes capped via argpartition. The November 12 Hilbert 32 k residual sweep (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert.jsonl`) still spent >1 h wall-clock with `traversal_semisort_ms` stuck in the tens-of-seconds regime, so we now treat that dataset strictly as a before/after validation pass—smaller shakedowns must pass before we touch 32 k again.
+
+**Telemetry playbook (Phase 5).**
+- Always start with a 4 096-point Hilbert preset (`--tree-points 4096`, otherwise matching the 32 k CLI flags) and capture both the JSONL log and CSV summary under `artifacts/benchmarks/`. Verify `whitened_block_pairs_sum / kernel_provider_pairs_sum ≥ 0.95`, `traversal_semisort_ms` < 1 s median, and `conflict_pairwise_reused=1` for every batch before escalating.
+- Only after the 4 k run looks healthy should we launch the 32 k replay. Use the same environment (thread caps, gating knobs, chunk target 8 192) so we can diff telemetry directly. If the 32 k run still exceeds 1 h wall-clock or `traversal_semisort_ms` fails to collapse, halt and investigate before attempting further gate experiments.
+- Dump rich telemetry every time: CLI already streams per-plan stats, but we additionally persist JSONL + CSV via `--log-file` / `tools/export_benchmark_diagnostics.py` so auditors can diff runs without rerunning the workload.
+
+Gate-on reruns are still in-progress: `traversal_gate1_candidates≈2.33×10^8` yet `traversal_gate1_pruned=0`, so cache/prefilter work remains before we can claim build-time wins.
+
+**Regression snapshot (2025-11-12).**
+- `artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k.jsonl` — eight dominated batches, **114 s** build, **median traversal_ms=13.3 s**, **median semisort_ms=7.53 s**, whitened/kernels = **0.875×**, gate candidates **7.34 M**, gate pruned **0**. Scope telemetry shows 3 584 saturated queries despite the dataset being half the cap, proving that we are still scanning virtually every tree point per batch.
+- `artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert.jsonl` — 123 dominated batches, **median traversal_ms=59.4 s**, **median semisort_ms=28.0 s**, **total traversal 7 277 s (~2 h)**. Coverage (0.979×) only looks healthy because the streaming path dwarfs the per-batch 512×512 pairwise matrix; the gate again prunes nothing. This is strictly worse than the November 10 dense run and should be treated as a failure case, not a baseline.
+- Action item: do not run 32 k again until the 4 k shakedown hits ≥0.95 coverage, `<1 s` semisort, and a non-zero gate prune count. Archive every JSONL/CSV pair alongside a short note explaining whether the run passed the shakedown; delete or quarantine anything that looks like the runs above.
 
 This note summarizes the current host-side implementation for the Vecchia residual-correlation metric inside `covertreex`.
 

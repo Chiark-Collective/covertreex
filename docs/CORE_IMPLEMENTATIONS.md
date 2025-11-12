@@ -58,7 +58,28 @@ _**Hilbert batches, diagnostics on, `COVERTREEX_SCOPE_CHUNK_TARGET=0` (dense) or
 - Sparse residual + profile capture `pcct-20251110-112936-0d2a25` mirrors the streamer run and feeds the refreshed lookup at `docs/data/residual_gate_profile_32768_caps.json`.
 - Sparse residual + gate audit `pcct-20251110-112456-69dfdd` stays clean but `traversal_gate1_pruned=0`, so further cache/prefilter work is needed before we can claim gate-on speedups.
 - Every residual run can now emit a reusable Gate‑1 profile without reruns: `--residual-gate-profile-log profiles/residual_gate_runs.jsonl` appends a JSONL line per run (auto-generating the underlying profile JSON if needed), and `tools/ingest_residual_gate_profile.py` merges those lines into lookup files under `docs/data/`.
+- Residual traversal caches, conflict inputs, and telemetry now default to float32 staging (with opt-in float64 views for audits), cutting traversal/cache residency roughly in half. `ResidualTraversalCache.pairwise.dtype == np.float32` is enforced in tests, so any drift back to float64 will fail CI.
+- Phase 5 deterministic selection (2025‑11‑12) swapped all residual/Euclidean scope builders to `select_topk_by_level` (argpartition + stable ties) and moved the limit logic into the Numba CSR path, so `traversal_semisort_ms` is expected to approach zero once the telemetry sweep is re-run. Because the latest Hilbert 32 k replay still exceeded an hour wall-clock, every residual audit now starts with a 4 k-point dry run (same flags, smaller `--tree-points`) and only scales to 32 k after the small run reports ≥95 % whitened coverage, `<1 s` median semisort, and `conflict_pairwise_reused=1` across batches.
 - Per-run telemetry is summarised with `python tools/export_benchmark_diagnostics.py --output artifacts/benchmarks/residual_budget_diagnostics.csv artifacts/benchmarks/artifacts/benchmarks/residual_{dense,sparse}_budget_4096.jsonl`: the dense control (no chunk target) records a **76.49 s** build while the budgeted sparse streamer (chunk target 4 096, schedule `1 024/2 048/4 096`) lands at **103.37 s** with budget amplification `3.73×` and ≥93.7 % pairwise reuse after the warm-up batch. Point perf reviews at that CSV instead of console output.
+
+**Recommended CLI defaults for “historical best” residual timings.** Use the dense traversal recipe from `pcct-20251110-105043-101bb9` whenever you need the fastest audited numbers or a known-good baseline. The command below leaves the gate off, keeps scopes unclamped, and mirrors every setting from the 257 s / 0.027 s build:
+
+```
+COVERTREEX_BACKEND=numpy \
+COVERTREEX_ENABLE_NUMBA=1 \
+COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0 \
+COVERTREEX_BATCH_ORDER=hilbert \
+COVERTREEX_PREFIX_SCHEDULE=doubling \
+python -m cli.queries \
+  --metric residual \
+  --dimension 8 --tree-points 32768 \
+  --batch-size 512 --queries 1024 --k 8 \
+  --seed 42 --baseline gpboost \
+  --log-file artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_best.jsonl
+```
+
+Treat this command as the default when publishing numbers or triaging regressions; any change that enables the sparse streamer, gate, or scope caps should be considered experimental. The CLI still defaults to Euclidean + Hilbert when no flags are provided, so pass the exact arguments above whenever you need the historically best residual timings.
 
 The 32 768-point run currently logs PCCT and the GPBoost baseline; sequential/external baselines are still pending optimisations to keep runtime manageable at that scale.
 
@@ -90,6 +111,12 @@ uv run python -m cli.queries \
 The JSONL log now lands in `artifacts/benchmarks/queries_<run_id>.jsonl` automatically; pass `--log-file benchmark_residual_clamped_20251107_fix_run2.jsonl` if you need to mirror the historical file layout.
 
 > **Baseline note:** The `_diag0` artefacts from 2025‑11‑07 (`benchmark_residual_clamped_20251107_diag0.jsonl`, `benchmark_residual_chunked_20251107_diag0.jsonl`) are the preferred reference logs whenever you need to compare against GPBoost or older “*_fix_run2” runs. They disable diagnostics to match the baseline settings but still include the new `gate1_*` and `traversal_scope_chunk_{scans,points,dedupe,saturated}` counters, so keep using them for apples-to-apples regressions going forward.
+
+### Phase 5 Regression Warning (2025-11-12)
+
+- The 4 k-point Hilbert shakedown (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k.jsonl`) now takes **114 s wall-clock** across eight dominated batches. Median `traversal_ms` sits at **13.3 s**, `traversal_semisort_ms` hits **7.53 s (p50)** / **11.0 s (p90)** / **17.5 s (max)**, and whitened coverage collapses to **0.875×** because `compute_residual_pairwise_matrix` still streams the dense 512×512 kernel for every batch. Gate telemetry recorded **7.34 M candidates / 0 pruned**, so enabling the lookup with the current cap/margin buys us nothing other than extra bookkeeping.
+- The so-called “Phase 5 validation” on the full Hilbert 32 k preset (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert.jsonl`) is even worse: **123 batches**, **median traversal_ms≈59.4 s**, **median semisort_ms≈28.0 s**, and **total traversal time 7 277 s (~2.0 h)**. Coverage looks fine on paper (0.979×) purely because the streamer dwarfs the per-batch pairwise cache, not because the gate/selection changes helped.
+- Conclusion: the current deterministic-selection release is a regression factory. Until the gate actually prunes and semisort collapses to the promised “near-zero”, stick to the dense defaults above. Any sparse/gate experiment must include a 4 k-point dry run (same CLI flags, smaller `--tree-points`) and a CSV dump via `tools/export_benchmark_diagnostics.py` so we can reject regressions before burning another hour on the 32 k suite.
 
 _Command (8 192 row):_
 ```

@@ -12,7 +12,7 @@ This document tracks the concrete engineering work required to execute the Novem
 - Diagnostics guardrails are in place: `tools/export_benchmark_diagnostics.py` now surfaces the metric column and raises if any residual batch reports `conflict_pairwise_reused=0`; regression tests cover both the aggregator and the reuse behaviour across dense/sparse chunk targets.
 
 **What’s next.**
-- Phase 5 deterministic selection: collapse semisort costs by switching CSR assembly and the sparse mask helpers to `argpartition` + stable tie-breaks so MIS never sorts more than `scope_limit` entries.
+- Phase 5 validation: rerun the residual Hilbert presets starting from a 4 k-point shakeout (to catch regressions quickly) before replaying the 32 k workload with the builder-only path so `traversal_semisort_ms` collapses; dump JSONL/CSV telemetry for every run under `artifacts/benchmarks/` and compare against the November 11 baselines.
 - Track the `/dev/shm` semaphore warning (Numba parallel init) noted in the Phase 0 validation snapshot and decide whether to fix it in the runtime guardrails (Phase 7) or via environment setup.
 
 ## Phase 0 — Hotspot Telemetry Injection
@@ -116,7 +116,10 @@ This document tracks the concrete engineering work required to execute the Novem
 
 **Key files:** [covertreex/metrics/residual/core.py](../covertreex/metrics/residual/core.py), [covertreex/metrics/residual/host_backend.py](../covertreex/metrics/residual/host_backend.py), [covertreex/metrics/_residual_numba.py](../covertreex/metrics/_residual_numba.py), [covertreex/algo/conflict/runner.py](../covertreex/algo/conflict/runner.py), [docs/residual_metric_notes.md](residual_metric_notes.md), [tests/test_metrics.py](../tests/test_metrics.py), [tests/test_conflict_graph.py](../tests/test_conflict_graph.py).
 
-**Progress:** Not started.
+**Progress:**
+- 2025‑11‑12 — `ResidualCorrHostData` now stages every traversal buffer in float32, exposes `.v_matrix_view(dtype)` / `.p_diag_view(dtype)` helpers for audits, and caches float64 views on demand. Cached pairwise tiles and `ResidualTraversalCache` entries stay in float32, slashing cache size ~2× without tripping audit tolerances.
+- 2025‑11‑12 — The SGEMM kernel provider in `build_residual_backend` returns float32 tiles backed by a reusable workset (`kernel_points_f32`, `kernel_row_norms_f32`), and the conflict-graph fallbacks route through the same whitened workspace so diagnostics see consistent telemetry regardless of cache reuse.
+- Follow-up: document the accuracy policy (float64 factorisation + audit, float32 traversal) inside `docs/residual_metric_notes.md` / `docs/CORE_IMPLEMENTATIONS.md` and add an audit-mode regression that exercises the mixed-precision path.
 
 ## Phase 5 — Selection with Deterministic Tie-Breaks
 
@@ -137,6 +140,8 @@ This document tracks the concrete engineering work required to execute the Novem
 - 2025‑11‑12 — Residual traversal (serial + parallel streamers) now orders/limits scope vectors through the new helper, re-inserts the parent when necessary, and reports capped scopes in the CSR builder + cache telemetry. Euclidean dense traversal gained the same limiting behavior, and the sparse traversal path now trims CSR rows after the Numba builder when `scope_chunk_target>0`.
 - 2025‑11‑12 — `build_scope_csr_from_pairs` (Numba CSR builder) now supports deterministic level-aware ordering and enforces `scope_limit` directly (including the parent re-insertion pass). New regression tests (`tests/test_scope_numba.py`) cover the limit/ordering semantics so future sparse-traversal changes can lean on the Numba path without Python-side trimming.
 - 2025‑11‑12 — Completed the Phase 5 cleanup: both residual streamers now let `build_scope_csr_from_pairs` handle ordering/limits (conflict scopes are rebuilt from the CSR results and `scope_chunk_emitted` still tracks caps), and Euclidean sparse traversal funnels every scope through the same builder instead of the removed `_limit_scope_csr` helper. Signal fidelity is verified by rerunning `python -m pytest tests/test_traverse.py tests/test_scope_numba.py`.
+- 2025‑11‑12 — Replayed the Hilbert 32 k residual telemetry sweep with `COVERTREEX_SCOPE_CHUNK_TARGET=8192` (outputs under `artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert.jsonl`). Aggregate coverage stayed at `whitened_block_pairs_sum=1.475e9`, `kernel_provider_pairs_sum=1.507e9` → **0.979×** coverage, with whitened work accounting for **92.7 %** of traversal wall time even though pairs are split ≈50/50 across the cold-start batch. Every later batch reported `conflict_pairwise_reused=1` (123 batches total; the first conflict graph is empty so there’s no cache to reuse). Semisort timing is now the remaining lever: median `traversal_semisort_ms≈28.1 s`, p90 ≈63 s, max ≈74.7 s, providing the “before” numbers for the builder-only follow-up.
+- 2025‑11‑12 — That same 32 k replay (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert.jsonl`) stretched past an hour end-to-end, so Phase 5 validation now mandates a short 4 k-point shakedown (identical flags, smaller `--tree-points`) before each 32 k rerun. Capture both telemetry files to compare against the November 11 “before” run and fail fast if `traversal_semisort_ms` or coverage regresses.
 - Next up: rerun the phase‑5 telemetry sweep (Hilbert/coverage) so `traversal_semisort_ms` can be reported as near-zero and the before/after scope/semisort dashboards capture the impact of the builder-only path; stash the CSV/json artifacts for the later Phase 6 write-ups.
 
 ## Phase 6 — Remove Python Callouts from Hot Numba Loops
