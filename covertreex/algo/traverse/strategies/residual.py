@@ -63,94 +63,9 @@ def _residual_find_parents(
     total = int(tree_indices.shape[0])
     query_arr = np.asarray(query_indices, dtype=np.int64)
     tree_arr = np.asarray(tree_indices, dtype=np.int64)
-    telemetry_obj = telemetry or ResidualDistanceTelemetry()
-    workspace = ResidualWorkspace(max_queries=1, max_chunk=max(1, chunk))
 
     best_dist = np.full(batch_size, np.inf, dtype=np.float64)
     best_idx = np.full(batch_size, -1, dtype=np.int64)
-
-    for start in range(0, total, chunk):
-        stop = min(start + chunk, total)
-        chunk_ids = tree_arr[start:stop]
-        if chunk_ids.size == 0:
-            continue
-        for qi in range(batch_size):
-            # Once a perfect parent is found we can skip further scans.
-            if best_dist[qi] <= 0.0:
-                continue
-            query_id = int(query_arr[qi])
-            radius = float(best_dist[qi]) if np.isfinite(best_dist[qi]) else 1.0
-            try:
-                distances, mask = compute_residual_distances_with_radius(
-                    host_backend,
-                    query_id,
-                    chunk_ids,
-                    kernel_row=None,
-                    radius=radius,
-                    workspace=workspace,
-                    telemetry=telemetry_obj,
-                    force_whitened=True,
-                )
-            except RuntimeError as exc:
-                message = str(exc)
-                if "Residual gate pruned" not in message:
-                    raise
-                distances, mask = _residual_parent_kernel_block(
-                    host_backend=host_backend,
-                    query_id=query_id,
-                    chunk_ids=chunk_ids,
-                    telemetry=telemetry_obj,
-                )
-            if mask.size == 0:
-                continue
-            survivors = np.nonzero(mask)[0]
-            if survivors.size == 0:
-                continue
-            local_best = survivors[np.argmin(distances[survivors])]
-            local_dist = float(distances[local_best])
-            if local_dist < best_dist[qi]:
-                best_dist[qi] = local_dist
-                best_idx[qi] = int(chunk_ids[local_best])
-
-    missing = np.where(best_idx < 0)[0]
-    if missing.size:
-        fallback_idx, fallback_dist = _residual_find_parents_kernel_scan(
-            host_backend=host_backend,
-            query_indices=query_arr[missing],
-            tree_indices=tree_arr,
-            telemetry=telemetry_obj,
-        )
-        best_idx[missing] = fallback_idx
-        best_dist[missing] = fallback_dist
-
-    return best_idx, best_dist
-
-
-def _residual_find_parents_kernel_scan(
-    *,
-    host_backend: ResidualCorrHostData,
-    query_indices: np.ndarray,
-    tree_indices: np.ndarray,
-    telemetry: ResidualDistanceTelemetry,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Fallback parent search using the raw kernel provider (no gating).
-
-    Used when the whitened workspace fails to discover a valid parent (e.g.,
-    overly aggressive gating settings). This preserves the previous behaviour
-    and guarantees we always return a parent for each query.
-    """
-
-    batch_size = int(query_indices.shape[0])
-    if batch_size == 0:
-        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
-
-    best_dist = np.full(batch_size, np.inf, dtype=np.float64)
-    best_idx = np.full(batch_size, -1, dtype=np.int64)
-
-    chunk = int(host_backend.chunk_size or 512)
-    total = int(tree_indices.shape[0])
-    query_arr = np.asarray(query_indices, dtype=np.int64)
-    tree_arr = np.asarray(tree_indices, dtype=np.int64)
 
     for start in range(0, total, chunk):
         stop = min(start + chunk, total)
@@ -160,7 +75,8 @@ def _residual_find_parents_kernel_scan(
         kernel_start = time.perf_counter()
         kernel_block = host_backend.kernel_provider(query_arr, chunk_ids)
         kernel_elapsed = time.perf_counter() - kernel_start
-        telemetry.record_kernel(batch_size, int(chunk_ids.size), kernel_elapsed)
+        if telemetry is not None:
+            telemetry.record_kernel(batch_size, int(chunk_ids.size), kernel_elapsed)
         distances_block = compute_residual_distances_from_kernel(
             host_backend,
             query_arr,
@@ -175,29 +91,6 @@ def _residual_find_parents_kernel_scan(
             best_idx[improved] = chunk_ids[row_min_idx[improved]]
 
     return best_idx, best_dist
-
-
-def _residual_parent_kernel_block(
-    *,
-    host_backend: ResidualCorrHostData,
-    query_id: int,
-    chunk_ids: np.ndarray,
-    telemetry: ResidualDistanceTelemetry,
-) -> Tuple[np.ndarray, np.ndarray]:
-    row_indices = np.asarray([int(query_id)], dtype=np.int64)
-    col_indices = np.asarray(chunk_ids, dtype=np.int64)
-    kernel_start = time.perf_counter()
-    kernel_block = host_backend.kernel_provider(row_indices, col_indices)
-    kernel_elapsed = time.perf_counter() - kernel_start
-    telemetry.record_kernel(int(row_indices.size), int(col_indices.size), kernel_elapsed)
-    distances_block = compute_residual_distances_from_kernel(
-        host_backend,
-        row_indices,
-        col_indices,
-        kernel_block,
-    )[0]
-    mask = np.ones_like(distances_block, dtype=np.uint8)
-    return distances_block, mask
 
 def _collect_residual_scopes_streaming_serial(
     *,

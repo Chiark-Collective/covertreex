@@ -54,3 +54,37 @@ Telemetry highlights (`residual_dense_48334de_rerun.jsonl`):
 4. **Re-tag the baseline.** Once fixed, update docs with the SHA + logs and delete the Phase 5 regression warning.
 
 Until then, all regressions must be triaged on the historical-good commit.
+
+## 2025-11-12 Investigation Update
+
+### Reproduction
+
+- Replayed a minimal dense run to keep iteration time manageable:
+
+  ```bash
+  COVERTREEX_BACKEND=numpy \
+  COVERTREEX_ENABLE_NUMBA=1 \
+  COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+  COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0 \
+  COVERTREEX_RESIDUAL_GATE1=0 \
+  python -m cli.queries \
+    --metric residual \
+    --dimension 4 --tree-points 512 \
+    --batch-size 64 --queries 64 --k 8 \
+    --seed 0 --baseline gpboost \
+    --log-file artifacts/benchmarks/artifacts/benchmarks/residual_regression_smoketest.jsonl
+  ```
+
+- Result: batch 1 (the first dominated Hilbert chunk) reports `traversal_pairwise_ms≈998 ms`, `traversal_whitened_block_calls=128`, and `traversal_kernel_provider_calls=66` even though `traversal_gate_active=0`. In the historical JSONL all three stats stayed near zero whenever Gate‑1 was off, so this confirms the dense preset is now doing as much work as a fully gated traversal.
+
+### Root Cause
+
+- `_residual_find_parents` was rewritten between `48334de` and `5030894`. The historical version streamed each tree chunk once per batch (`host_backend.kernel_provider(query_arr, chunk_ids)`), letting NumPy amortise the kernel block over all 512 queries. The new version (covertreex/algo/traverse/strategies/residual.py) nests the chunk loop inside a per-query loop, instantiates a `ResidualWorkspace` every time, and calls `compute_residual_distances_with_radius(..., force_whitened=True)` for each query/chunk pair.
+- Because `force_whitened=True`, the whitening path now runs on every parent-search chunk regardless of whether Gate‑1 is enabled. Even though the runtime disables the gate (`COVERTREEX_RESIDUAL_GATE1=0`), we still materialise the whitened vectors, update gate telemetry, and only fall back to the cheaper kernel scan after expending ~64× more work than before. That explains the 60–160 s dominated batch timings observed in phase 5.
+
+### Recommendation
+
+- Short term (to unblock the audit): **revert `_residual_find_parents` to the batch/block formulation**. It is the minimal surgical change, proven to hit the 83 s baseline, and it immediately stops the unnecessary whitening when the gate is off.
+- Longer term (once the baseline numbers are re-established): explore extending `compute_residual_distances_with_radius` to accept query arrays so the whitened fast-path can stay vectorised even when Gate‑1 is on. That would let us regain the new telemetry hooks without re-introducing the per-query inner loop.
+
+Either way, the fix must re-add a regression test that asserts gate-off runs keep `traversal_whitened_block_calls=0` (or ≪ batch size) so future refactors cannot silently reintroduce this pattern.
