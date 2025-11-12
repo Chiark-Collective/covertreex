@@ -28,6 +28,9 @@ def _policy_to_overrides(policy: ResidualPolicy) -> Dict[str, Any]:
         "residual_gate1_eps": policy.gate1_eps,
         "residual_gate1_audit": policy.gate1_audit,
         "residual_gate1_radius_cap": policy.gate1_radius_cap,
+        "residual_gate1_band_eps": policy.gate1_band_eps,
+        "residual_gate1_keep_pct": policy.gate1_keep_pct,
+        "residual_gate1_prune_pct": policy.gate1_prune_pct,
         "residual_radius_floor": policy.radius_floor,
         "residual_scope_cap_path": policy.scope_cap_path,
         "residual_scope_cap_default": policy.scope_cap_default,
@@ -54,6 +57,9 @@ class Residual:
     gate1_eps: float | None = None
     gate1_audit: bool | None = None
     gate1_radius_cap: float | None = None
+    gate1_band_eps: float | None = None
+    gate1_keep_pct: float | None = None
+    gate1_prune_pct: float | None = None
     radius_floor: float | None = None
     scope_cap_path: str | None = None
     scope_cap_default: float | None = None
@@ -82,6 +88,9 @@ class Residual:
             gate1_eps=config.residual_gate1_eps,
             gate1_audit=config.residual_gate1_audit,
             gate1_radius_cap=config.residual_gate1_radius_cap,
+            gate1_band_eps=config.residual_gate1_band_eps,
+            gate1_keep_pct=config.residual_gate1_keep_pct,
+            gate1_prune_pct=config.residual_gate1_prune_pct,
             radius_floor=config.residual_radius_floor,
             scope_cap_path=config.residual_scope_cap_path,
             scope_cap_default=config.residual_scope_cap_default,
@@ -106,6 +115,9 @@ class Residual:
             gate1_eps=policy.gate1_eps,
             gate1_audit=policy.gate1_audit,
             gate1_radius_cap=policy.gate1_radius_cap,
+            gate1_band_eps=policy.gate1_band_eps,
+            gate1_keep_pct=policy.gate1_keep_pct,
+            gate1_prune_pct=policy.gate1_prune_pct,
             radius_floor=policy.radius_floor,
             scope_cap_path=policy.scope_cap_path,
             scope_cap_default=policy.scope_cap_default,
@@ -131,6 +143,9 @@ class Residual:
         _apply_if_present(updates, "gate1_eps", self.gate1_eps)
         _apply_if_present(updates, "gate1_audit", self.gate1_audit)
         _apply_if_present(updates, "gate1_radius_cap", self.gate1_radius_cap)
+        _apply_if_present(updates, "gate1_band_eps", self.gate1_band_eps)
+        _apply_if_present(updates, "gate1_keep_pct", self.gate1_keep_pct)
+        _apply_if_present(updates, "gate1_prune_pct", self.gate1_prune_pct)
         _apply_if_present(updates, "radius_floor", self.radius_floor)
         _apply_if_present(updates, "scope_cap_path", self.scope_cap_path)
         _apply_if_present(updates, "scope_cap_default", self.scope_cap_default)

@@ -68,6 +68,7 @@ def build_dense_adjacency(
     pairwise: Any | None = None,
     radii: np.ndarray | None = None,
     residual_pairwise: np.ndarray | None = None,
+    chunk_target_override: int | None = None,
 ) -> AdjacencyBuild:
     xp = backend.xp
     membership_seconds = 0.0
@@ -98,6 +99,9 @@ def build_dense_adjacency(
 
     if batch_size and scope_indices.size:
         runtime = cx_config.runtime_config()
+        chunk_target = runtime.scope_chunk_target
+        if chunk_target_override is not None and chunk_target_override > 0:
+            chunk_target = int(chunk_target_override)
         membership_start = time.perf_counter()
         scope_indptr_np = np.asarray(backend.to_numpy(scope_indptr), dtype=np.int64)
         scope_indices_np = np.asarray(backend.to_numpy(scope_indices), dtype=np.int64)
@@ -132,7 +136,7 @@ def build_dense_adjacency(
                 scope_indices_np,
                 batch_size,
                 segment_dedupe=runtime.scope_segment_dedupe,
-                chunk_target=runtime.scope_chunk_target,
+                chunk_target=chunk_target,
                 chunk_max_segments=runtime.scope_chunk_max_segments,
                 pairwise=pairwise_np,
                 radii=radii_np,
@@ -500,6 +504,7 @@ def build_residual_adjacency(
     pairwise: Any | None,
     radii: np.ndarray | None,
     residual_pairwise: np.ndarray,
+    chunk_target_override: int | None = None,
 ) -> AdjacencyBuild:
     return build_dense_adjacency(
         backend=backend,
@@ -509,6 +514,7 @@ def build_residual_adjacency(
         pairwise=pairwise,
         radii=radii,
         residual_pairwise=residual_pairwise,
+        chunk_target_override=chunk_target_override,
     )
 
 

@@ -253,15 +253,77 @@ def warmup_scope_builder() -> None:
         pairwise=pairwise,
         radii=radii,
     )
+    build_scope_csr_from_pairs(
+        np.asarray([0, 0, 1], dtype=np.int64),
+        np.asarray([3, 2, 1], dtype=np.int64),
+        2,
+        limit=1,
+        top_levels=np.asarray([2, 5, 4, 3], dtype=np.int64),
+        parents=np.asarray([3, 1], dtype=np.int64),
+    )
     _SCOPE_WARMED = True
 
 
 if NUMBA_SCOPE_AVAILABLE:
-    @nb.njit(cache=True, parallel=True)
-    def build_scope_csr_from_pairs(
+    @nb.njit(cache=True)
+    def _select_topk_by_index(indices: np.ndarray, limit: int) -> np.ndarray:
+        count = indices.size
+        if count == 0:
+            return np.empty(0, dtype=I64)
+        order = np.argsort(indices)
+        keep = count if limit <= 0 or limit >= count else limit
+        out = np.empty(keep, dtype=I64)
+        for i in range(keep):
+            out[i] = np.int64(indices[order[i]])
+        return out
+
+    @nb.njit(cache=True)
+    def _select_topk_by_level(indices: np.ndarray, top_levels: np.ndarray, limit: int) -> np.ndarray:
+        count = indices.size
+        if count == 0:
+            return np.empty(0, dtype=I64)
+        levels = np.empty(count, dtype=I64)
+        max_level = np.int64(-9_223_372_036_854_775_808)
+        size_levels = top_levels.size
+        for i in range(count):
+            idx_val = int(indices[i])
+            level = np.int64(-1)
+            if 0 <= idx_val < size_levels:
+                level = np.int64(top_levels[idx_val])
+            levels[i] = level
+            if level > max_level:
+                max_level = level
+        shift = np.int64(1) << np.int64(32)
+        keys = np.empty(count, dtype=np.int64)
+        for i in range(count):
+            key_level = max_level - levels[i]
+            if key_level < 0:
+                key_level = 0
+            keys[i] = key_level * shift + np.int64(indices[i])
+        order = np.argsort(keys)
+        keep = count if limit <= 0 or limit >= count else limit
+        out = np.empty(keep, dtype=I64)
+        for i in range(keep):
+            out[i] = np.int64(indices[order[i]])
+        return out
+
+    @nb.njit(cache=True)
+    def _contains_value(values: np.ndarray, needle: int) -> bool:
+        if needle < 0:
+            return False
+        for i in range(values.size):
+            if int(values[i]) == needle:
+                return True
+        return False
+
+    @nb.njit(cache=True)
+    def _build_scope_csr_from_pairs_impl(
         owners: np.ndarray,
         members: np.ndarray,
         num_nodes: int,
+        limit: int,
+        top_levels: np.ndarray,
+        parents: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
         indptr = np.zeros(num_nodes + 1, dtype=I64)
         if owners.size == 0 or num_nodes <= 0:
@@ -289,7 +351,68 @@ if NUMBA_SCOPE_AVAILABLE:
             indices[pos] = members[i]
             cursors[node] = pos + 1
 
-        return indptr, indices
+        limit_value = int(limit) if limit > 0 else 0
+        have_levels = top_levels.size > 0
+        have_parents = parents.size == num_nodes
+
+        if limit_value <= 0 and not have_levels:
+            return indptr, indices
+
+        trimmed_counts = np.zeros(num_nodes, dtype=I64)
+        for node in range(num_nodes):
+            start = indptr[node]
+            end = indptr[node + 1]
+            count = end - start
+            if count == 0:
+                continue
+            window = np.empty(count, dtype=I64)
+            for j in range(count):
+                window[j] = np.int64(indices[start + j])
+            selected: np.ndarray
+            if have_levels:
+                selected = _select_topk_by_level(window, top_levels, limit_value)
+            else:
+                selected = _select_topk_by_index(window, limit_value)
+
+            if (
+                limit_value > 0
+                and have_levels
+                and have_parents
+                and node < parents.size
+            ):
+                parent_idx = int(parents[node])
+                if parent_idx >= 0 and not _contains_value(selected, parent_idx):
+                    augmented = np.empty(selected.size + 1, dtype=I64)
+                    for j in range(selected.size):
+                        augmented[j] = selected[j]
+                    augmented[selected.size] = np.int64(parent_idx)
+                    selected = _select_topk_by_level(augmented, top_levels, limit_value)
+
+            keep = selected.size
+            trimmed_counts[node] = keep
+            for j in range(keep):
+                indices[start + j] = np.int32(selected[j])
+
+        total_trimmed = int(np.sum(trimmed_counts))
+        if total_trimmed == 0:
+            return np.zeros(num_nodes + 1, dtype=I64), np.empty(0, dtype=I32)
+
+        new_indptr = np.empty(num_nodes + 1, dtype=I64)
+        new_indptr[0] = 0
+        for node in range(num_nodes):
+            new_indptr[node + 1] = new_indptr[node] + trimmed_counts[node]
+
+        new_indices = np.empty(total_trimmed, dtype=I32)
+        for node in range(num_nodes):
+            keep = int(trimmed_counts[node])
+            if keep == 0:
+                continue
+            src = indptr[node]
+            dst = new_indptr[node]
+            for j in range(keep):
+                new_indices[dst + j] = indices[src + j]
+
+        return new_indptr, new_indices
 
     @nb.njit(cache=True)
     def _membership_point_ids_from_indptr(indptr: np.ndarray, total: int) -> np.ndarray:
@@ -973,12 +1096,48 @@ if NUMBA_SCOPE_AVAILABLE:
 
 else:  # pragma: no cover - executed when numba missing
 
-    def build_scope_csr_from_pairs(
+    def _build_scope_csr_from_pairs_impl(
         owners: np.ndarray,
         members: np.ndarray,
         num_nodes: int,
+        limit: int,
+        top_levels: np.ndarray,
+        parents: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
-        raise RuntimeError("build_scope_csr_from_pairs requires numba to be installed.")
+        _require_numba()
+        raise AssertionError("unreachable")
+
+
+def build_scope_csr_from_pairs(
+    owners: np.ndarray,
+    members: np.ndarray,
+    num_nodes: int,
+    *,
+    limit: int = 0,
+    top_levels: np.ndarray | None = None,
+    parents: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    owners_arr = np.ascontiguousarray(owners, dtype=np.int64)
+    members_arr = np.ascontiguousarray(members, dtype=np.int32)
+    levels_arr = (
+        np.ascontiguousarray(top_levels, dtype=np.int64)
+        if top_levels is not None
+        else np.empty(0, dtype=np.int64)
+    )
+    parents_arr = (
+        np.ascontiguousarray(parents, dtype=np.int64)
+        if parents is not None
+        else np.empty(0, dtype=np.int64)
+    )
+    limit_value = int(limit) if int(limit) > 0 else 0
+    return _build_scope_csr_from_pairs_impl(
+        owners_arr,
+        members_arr,
+        int(num_nodes),
+        limit_value,
+        levels_arr,
+        parents_arr,
+    )
 
     def build_conflict_graph_numba_dense(
         scope_indptr: np.ndarray,

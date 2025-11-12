@@ -13,7 +13,7 @@ from .batch import (
     batch_insert_prefix_doubling,
     plan_batch_insert,
 )
-from .semisort import GroupByResult, group_by_int
+from .semisort import GroupByResult, group_by_int, select_topk_by_level
 
 __all__ = [
     "TraversalResult",
@@ -37,4 +37,5 @@ __all__ = [
     "batch_insert_prefix_doubling",
     "GroupByResult",
     "group_by_int",
+    "select_topk_by_level",
 ]

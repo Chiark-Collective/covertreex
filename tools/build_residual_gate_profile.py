@@ -13,6 +13,7 @@ from covertreex.metrics import build_residual_backend
 from covertreex.metrics.residual import (
     ResidualGateProfile,
     compute_residual_distances_from_kernel,
+    configure_residual_correlation,
 )
 from covertreex.telemetry import generate_run_id, resolve_artifact_path
 from tests.utils.datasets import gaussian_points
@@ -32,6 +33,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--residual-variance", type=float, default=1.0, help="RBF kernel variance (matches benchmarks).")
     parser.add_argument("--inducing", type=int, default=512, help="Number of inducing points for the residual backend.")
     parser.add_argument("--run-id", type=str, default=None, help="Optional run identifier to embed in the profile metadata.")
+    parser.add_argument(
+        "--quantiles",
+        type=str,
+        default="95,99,99.9",
+        help="Comma-separated percentile targets (in %%).",
+    )
+    parser.add_argument(
+        "--quantile-sample-cap",
+        type=int,
+        default=2048,
+        help="Reservoir size per radius bin for quantile estimation.",
+    )
     return parser.parse_args()
 
 
@@ -95,11 +108,14 @@ def main() -> None:
         residual=ApiResidual(gate1_enabled=True),
     ).activate()
     backend = _build_backend(args)
+    configure_residual_correlation(backend)
     profile = ResidualGateProfile.create(
         bins=int(args.bins),
         radius_max=1.0,
         path=str(output),
         radius_eps=cx_config.runtime_config().residual_radius_floor,
+        quantile_percentiles=[float(x.strip()) for x in args.quantiles.split(",") if x.strip()],
+        quantile_sample_cap=int(args.quantile_sample_cap),
     )
     profile.annotate_metadata(
         run_id=run_id,

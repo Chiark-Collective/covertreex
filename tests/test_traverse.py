@@ -170,6 +170,26 @@ def test_traversal_semisorts_scopes_by_level():
     assert result.timings.pairwise_seconds >= 0.0
 
 
+def test_euclidean_scope_chunk_target_limits_scopes(monkeypatch: pytest.MonkeyPatch):
+    tree = _sample_tree()
+    batch_points = [[2.0, 2.0]]
+
+    monkeypatch.setenv("COVERTREEX_SCOPE_CHUNK_TARGET", "1")
+    cx_config.reset_runtime_config_cache()
+
+    result = traverse_collect_scopes(tree, batch_points)
+
+    scopes = result.conflict_scopes
+    assert all(len(scope) <= 1 for scope in scopes)
+    parents = result.parents.tolist()
+    for scope, parent in zip(scopes, parents):
+        if parent >= 0:
+            assert parent in scope
+
+    monkeypatch.delenv("COVERTREEX_SCOPE_CHUNK_TARGET", raising=False)
+    cx_config.reset_runtime_config_cache()
+
+
 def test_sparse_traversal_matches_dense(monkeypatch: pytest.MonkeyPatch):
     tree = _sample_tree()
     batch_points = [[2.0, 2.0], [3.0, 3.0]]
@@ -235,6 +255,10 @@ def test_residual_scope_limit_applies_scope_chunk_target(monkeypatch: pytest.Mon
     indices = result.scope_indices.tolist()
     scopes = [indices[indptr[i] : indptr[i + 1]] for i in range(len(batch_points))]
     assert all(len(scope) <= 2 for scope in scopes)
+    parents = result.parents.tolist()
+    for scope, parent in zip(scopes, parents):
+        if parent >= 0:
+            assert parent in scope
     assert result.timings.scope_chunk_emitted == len(batch_points)
     assert result.timings.scope_chunk_max_members <= 2
 
@@ -346,6 +370,8 @@ def test_residual_scope_chunk_target_caps_scan_points(monkeypatch: pytest.Monkey
     result = traverse_collect_scopes(tree, batch_points)
     cache = result.residual_cache
     assert cache is not None
+    assert isinstance(cache.pairwise, np.ndarray)
+    assert cache.pairwise.dtype == np.float32
     points_scanned = np.asarray(cache.scope_chunk_points, dtype=np.int64)
     assert np.all(points_scanned <= 2)
     assert result.timings.scope_chunk_saturated == len(batch_points)
@@ -474,6 +500,9 @@ def test_residual_sparse_traversal_matches_dense(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", "1")
     cx_config.reset_runtime_config_cache()
     sparse_result = traverse_collect_scopes(tree, batch_points)
+
+    assert dense_result.engine.startswith("residual")
+    assert sparse_result.engine.startswith("residual")
 
     assert sparse_result.parents.tolist() == dense_result.parents.tolist()
     assert sparse_result.levels.tolist() == dense_result.levels.tolist()

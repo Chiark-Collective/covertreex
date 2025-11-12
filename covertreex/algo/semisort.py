@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
+
 from covertreex.core.tree import TreeBackend
 
 
@@ -72,3 +74,38 @@ def group_by_int(
         indptr=backend.device_put(indptr),
         values=backend.device_put(sorted_values),
     )
+
+
+def select_topk_by_level(
+    indices: np.ndarray,
+    levels: np.ndarray,
+    limit: int,
+) -> np.ndarray:
+    """Return indices ordered by (level desc, index asc), truncated to ``limit``.
+
+    When ``limit`` <= 0 the full ordered list is returned. The helper uses
+    ``np.argpartition`` to avoid sorting more than ``limit`` entries.
+    """
+
+    idx = np.asarray(indices, dtype=np.int64)
+    if idx.size <= 1:
+        return idx.copy()
+    lvl = np.asarray(levels, dtype=np.int64)
+    if idx.shape != lvl.shape:
+        raise ValueError("indices and levels must share the same shape")
+
+    max_keep = int(limit) if int(limit) > 0 else 0
+    if max_keep <= 0 or max_keep >= idx.size:
+        order = np.lexsort((idx, -lvl))
+        return idx[order]
+
+    kth = max_keep - 1
+    if kth < 0:
+        kth = 0
+    if kth >= idx.size:
+        kth = idx.size - 1
+    partition_idx = np.argpartition(-lvl, kth)[:max_keep]
+    subset_idx = idx[partition_idx]
+    subset_lvl = lvl[partition_idx]
+    order = np.lexsort((subset_idx, -subset_lvl))
+    return subset_idx[order]

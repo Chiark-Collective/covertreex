@@ -8,12 +8,14 @@ This note summarizes the current host-side implementation for the Vecchia residu
 
 We introduced `ResidualCorrHostData` in `covertreex/metrics/residual.py`. It packages the host-resident artefacts supplied by the VIF pipeline:
 
-- `v_matrix` — the low-rank factors \( V = L_{mm}^{-1} K(X, U) \) for all training points.
-- `p_diag` — per-point residual diagonals \( p_i = \max(K_{x_ix_i} - \|V_i\|^2, 10^{-9}) \).
+- `v_matrix` — the low-rank factors \( V = L_{mm}^{-1} K(X, U) \) for all training points. As of 2025‑11‑12 the host cache stores this (and every downstream traversal buffer) in float32; audits and Gate‑1 can request a float64 view via `backend.v_matrix_view(np.float64)` which lazily materialises / memoises the wider copy when the policy demands it.
+- `p_diag` — per-point residual diagonals \( p_i = \max(K_{x_ix_i} - \|V_i\|^2, 10^{-9}) \). `p_diag`, `kernel_diag`, and `v_norm_sq` now follow the same float32 staging.
 - `kernel_diag` — raw kernel diagonals \( K_{x_ix_i} \) (provides a fallback for bound computations).
-- `kernel_provider(rows, cols)` — a callable that returns the raw kernel slice \( K(X_{rows}, X_{cols}) \) over integer dataset indices.
+- `kernel_provider(rows, cols)` — a callable that returns the raw kernel slice \( K(X_{rows}, X_{cols}) \) over integer dataset indices. The host backend now stages a float32, C-contiguous copy of the dataset plus squared norms and evaluates these tiles via SGEMM + the \( \|x\|^2 + \|y\|^2 - 2 x y^\top \) identity, so residual traversal no longer allocates the (rows × cols × dim) broadcast tensor per chunk.
 - `point_decoder` — optional decoder that maps tree payloads to dataset indices (defaults to treating them as integer ids).
 - `chunk_size` — preferred batch size for host streaming (defaults to 512).
+
+**Precision policy.** Traversal caches, the per-batch pairwise matrix, and the conflict-graph inputs are all float32 by default, which cuts memory residency roughly in half for the ≥32 k Hilbert suites. The only float64 materialisations that remain are (a) the factorisation/eigen problems inside the backend builder and (b) the explicit `*_view(np.float64)` calls made by Gate‑1 audits or by researchers that need double precision diagnostics. Conflict-graph reuse, CLI telemetry, and the new regression tests assert that `ResidualTraversalCache.pairwise.dtype == np.float32` so we cannot silently drift back to float64. Gate audits stay strict: when `gate1_audit` is enabled the runtime replays pruned chunks through `_audit_gate1_pruned`, records any false negatives in `ResidualGateProfile.false_negative_samples`, and raises immediately if a survivor was pruned, so the float32 staging cannot hide precision regressions.
 
 `configure_residual_correlation(...)` installs the residual metric hooks. We intentionally keep Euclidean metrics untouched: the residual path is only active when `COVERTREEX_METRIC=residual_correlation` and custom caches are registered.
 
@@ -25,6 +27,9 @@ We introduced `ResidualCorrHostData` in `covertreex/metrics/residual.py`. It pac
 - For each chunk, we request the raw kernel block and feed it to the chunk kernel (`compute_distance_chunk` from `metrics/_residual_numba.py`).
 - The kernel accumulates `V_i · V_j` incrementally, uses cached \( \|V_i\|^2 \) and \( p_i \) to bound the residual correlation, and aborts if the best possible distance still exceeds the caller’s current best. This replicates the residual bound from `_ResidualCorrBackend.lower_bound_train`.
 - We track the minimum distance per query, yielding the same parent as the dense path.
+- **2025‑11‑11 update.** Parent search now routes every chunk through `compute_residual_distances_with_radius(..., force_whitened=True)` using a shared `ResidualWorkspace`. When Gate‑1 is enabled (`COVERTREEX_RESIDUAL_GATE1=1`) the whitened SGEMM covers nearly all candidate pairs before any kernel tiles are requested. On a 4 096×8 synthetic backend (512 queries, chunk size 256) we measured 1 124 864 whitened pairs vs **528** kernel pairs (99.95 % coverage), whereas the pre-change Hilbert 32 k sweep plateaued at 0.43× coverage because every parent chunk streamed the raw kernel block.
+- Gate audits stay strict: if `_audit_gate1_pruned` detects a false negative we immediately rescan that chunk via the float32 kernel provider (`_residual_parent_kernel_block`), so the overall traversal keeps SGEMM coverage without ever returning an incorrect parent.
+- If Gate‑1 stays disabled, the code still emits the whitened counters (providing 50/50 coverage so dashboards stay sensible), but enabling the gate is now the recommended way to keep kernel calls proportional to true survivors.
 
 ### Streaming Scope Assembly
 
@@ -37,10 +42,32 @@ We introduced `ResidualCorrHostData` in `covertreex/metrics/residual.py`. It pac
 - When `COVERTREEX_SCOPE_CHUNK_TARGET>0`, the same value now caps **both** the scope size and the number of tree points we are willing to scan per query. Once the scan budget is exhausted we mark the scope as saturated, stop requesting new kernel tiles, and rely on the telemetry above to highlight the truncation.
 - Practical impact: the 32 768-point Hilbert run with `COVERTREEX_SCOPE_CHUNK_TARGET=8192` (`pcct-20251110-105526-68dddf`, log `artifacts/benchmarks/artifacts/benchmarks/residual_sparse_streamer_20251110115526.jsonl`) now finishes in **≈493 s build / 0.027 s query (37.6 k q/s)** with the scan budget tripping on 48 of 64 dominated batches (`traversal_scope_chunk_points` per batch ≈4.19 M = 512 queries × 8 192 cap, `traversal_scope_chunk_saturated=48`). The earlier cap-only replay (no scan guard) took 900.2 s, so reuse plus the Numba streamer cuts ~45 % off the sparse path without touching the conflict graph.
 - For smaller Hilbert sweeps we now collapse the JSONL telemetry with `tools/export_benchmark_diagnostics.py`. Example: `python tools/export_benchmark_diagnostics.py --output artifacts/benchmarks/residual_budget_diagnostics.csv artifacts/benchmarks/artifacts/benchmarks/residual_{dense,sparse}_budget_4096.jsonl` yields a two-row CSV showing (a) dense residual, budgets disabled → **76.49 s** build with zero budget counters, (b) sparse streamer with `scope_chunk_target=4096` & schedule `1 024,2 048,4 096` → **103.37 s** build, total budget amplification `3.73×`, zero early-terminates, and ≥93.7 % of batches reusing cached pairwise blocks. Hand this CSV (plus the log paths) to anyone auditing adaptive-scan progress.
+
+### Telemetry: “pairs” vs. “milliseconds”
+
+- `traversal_whitened_block_pairs` counts how many whitened SGEMM entries we evaluated (rows × columns per tile). The companion `traversal_whitened_block_ms` gives the wall-clock we spent inside the SGEMM helper.
+- Even when `COVERTREEX_RESIDUAL_GATE1=0`, the dense/parallel traversal path now calls `compute_residual_distances_with_radius(..., force_whitened=True)` with the shared `ResidualWorkspace`, so every chunk registers SGEMM work before the kernel fallback. This keeps the `whitened_block_*` counters meaningful for both serial (gate-on) and dense (gate-off) sweeps.
+- `traversal_kernel_provider_pairs` / `_ms` track the exact kernel tiles the traversal requested from the host backend. Because the same `ResidualDistanceTelemetry` instance now wraps the dense parent finder, the streaming helpers, and the pairwise cache builder, every residual batch reports comparable totals even when the gate is disabled.
+- `tools/export_benchmark_diagnostics.py` exposes the fields in notebook-friendly form: new columns such as `whitened_block_pairs_per_batch`, `whitened_block_ms_per_call`, `kernel_provider_ms_per_pair`, and `whitened_to_kernel_pair_ratio` make it trivial to histogram coverage or prove that SGEMM dominates the traversal budget. Use these summaries when you need to justify ≥80 % “whitened pairs” coverage or to spot batches that still lean on the slow kernel fallback.
+- `python -m cli.queries --metric residual ...` now prints the same counters once the run completes, so we can sanity-check coverage without parsing the JSONL. The block lists per-batch medians/p90s for `whitened_block_pairs` vs. `kernel_provider_pairs`, total milliseconds for each path, the aggregate + per-batch coverage ratios, and a final “pair/time mix” sentence. Read that last line as: how much of the traversal operated on whitened SGEMM entries (“pairs”) versus raw kernel tiles, and how the corresponding wall-clock budget split (“milliseconds”). When auditors ask for the ≥80 % coverage proof, quote the CLI summary directly.
 - Residual batches emit `traversal_scope_radius_{obs,initial,limit,cap_values}_*` summaries plus `traversal_scope_radius_cap_hits` and `*_delta_{mean,max}` in every JSONL record. Those stats let you inspect how aggressive the ladder currently is (observed maxima) versus the limits you feed into traversal.
 - Optional per-scope caps can rein in traversal radii before the gate runs. Provide a JSON table via `COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH=/path/to/caps.json` (schema `{"schema": 1, "default": <optional>, "levels": {"0": 0.5, "1": 0.75}}`) and/or a global fallback with `COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT`. The caps clamp the runtime radius but still honour `COVERTREEX_RESIDUAL_RADIUS_FLOOR`; cap hits show up in the JSON logs so you can confirm how often each level is being throttled.
 - `docs/data/residual_scope_caps_scope8192.json` captured the legacy flat 1.25 cap, while `docs/data/residual_scope_caps_32768.json` now records the per-level medians (+0.05 margin) from the November 8 32 768-point replay. Derive fresh tables without hand-editing JSON by adding `--residual-scope-cap-output /path/to/out.json` (plus optional `--residual-scope-cap-percentile` / `--residual-scope-cap-margin`) to `cli.queries`; the new `ResidualScopeCapRecorder` streams per-level ladder samples directly from each batch insert, annotates the active `run_id`, and emits summaries at shutdown.
 - Residual gate profiles recorded via `tools/build_residual_gate_profile.py` now ship with embedded metadata (`run_id`, seeds, dataset size, kernel hyperparameters, etc.). The builder writes to `artifacts/profiles/residual_profile_<run_id>.json` by default; override with an explicit `output` path or pass `--run-id` to control the identifier if you need deterministic filenames.
+
+**Coverage snapshot recipe.** To capture the ≥80 % whitened-pair coverage target for the Hilbert 32 k suite, run the telemetry-enabled CLI and then summarise the JSONL:
+
+```bash
+python -m cli.queries --metric residual --dimension 8 --tree-points 32768 --batch-size 512 --queries 256 --k 8 --seed 0 \
+  --log-file artifacts/residual_phase01_hilbert.jsonl
+python tools/export_benchmark_diagnostics.py --coverage-threshold 0.8 \
+  --output artifacts/benchmarks/residual_phase01_hilbert.csv \
+  artifacts/residual_phase01_hilbert.jsonl
+```
+
+The CSV now includes `whitened_to_kernel_pair_ratio` plus per-batch `whitened_block_pairs` counts so reviewers can confirm the SGEMM path dominates the traversal budget.
+
+- 2025‑11‑11 — Gate preset replay (`pcct-20251111-211123-2f711f`, `artifacts/benchmarks/residual_phase01_hilbert_gate.jsonl`) produced `whitened_to_kernel_pair_ratio=0.9785` (`tools/export_benchmark_diagnostics.py` wrote the summary to `artifacts/benchmarks/residual_phase01_hilbert_gate.csv`). Scope-cap derivation lives at `artifacts/benchmarks/residual_scope_caps_gate.json`.
 
 ## Conflict Graph Pipeline
 
@@ -205,3 +232,4 @@ Until those traversal improvements ship, keep the residual grid in place for det
 - The decoder must map tree payloads to dataset indices; if trees store transformed buffers, supply a custom `point_decoder` when creating `ResidualCorrHostData`.
 - The chunk kernel honours `chunk_size`; tune it to balance host-side streaming vs. cache reuse.
 - Setting `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1` now engages residual streaming automatically when the metric is residual-correlation; otherwise, traversal falls back to the dense mask path.
+- **Conflict fallback (2025‑11‑11).** When the traversal cache is missing we now stream adjacency rows through the same whitened helper rather than calling `_rbf_kernel` directly. Each `(source, target)` chunk inherits the staged float32 workspace, Gate‑1 prunes obviously distant edges, and only the surviving edges trigger SGEMM kernel tiles before we compare against `min(radii_source, radii_target)`.

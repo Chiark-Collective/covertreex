@@ -17,7 +17,10 @@ from covertreex.algo.traverse import TraversalResult
 from covertreex.core.metrics import get_metric
 from covertreex.core.tree import PCCTree, TreeBackend
 from covertreex.metrics.residual import (
+    ResidualDistanceTelemetry,
+    ResidualWorkspace,
     compute_residual_distances_from_kernel,
+    compute_residual_distances_with_radius,
     compute_residual_pairwise_matrix,  # imported for backwards-compatibility in tests
     decode_indices,
     get_residual_backend,
@@ -83,10 +86,13 @@ def build_conflict_graph(
     pairwise: Any | None = None
     pairwise_reused_flag = 0
     pairwise_start = time.perf_counter()
+    traversal_engine = getattr(traversal, "engine", "") or ""
     if residual_mode:
         host_backend = get_residual_backend()
-        if residual_cache is None or getattr(residual_cache, "pairwise", None) is None:
-            if valid_parent_count > 0:
+        need_pairwise_cache = residual_cache is None or getattr(residual_cache, "pairwise", None) is None
+        is_residual_engine = str(traversal_engine).startswith("residual")
+        if need_pairwise_cache:
+            if is_residual_engine and valid_parent_count > 0:
                 raise ResidualPairwiseCacheError(
                     "Residual traversal cache is missing pairwise distances; enable residual caching before building the conflict graph."
                 )
@@ -96,10 +102,10 @@ def build_conflict_graph(
                 host_backend=host_backend,
                 batch_indices=batch_indices_np,
             )
-            residual_pairwise_np = np.asarray(residual_pairwise_np, dtype=np.float64)
+            residual_pairwise_np = np.asarray(residual_pairwise_np, dtype=np.float32)
         else:
             batch_indices_np = np.asarray(residual_cache.batch_indices, dtype=np.int64)
-            residual_pairwise_np = np.asarray(residual_cache.pairwise, dtype=np.float64)
+            residual_pairwise_np = np.asarray(residual_cache.pairwise, dtype=np.float32)
             pairwise_reused_flag = 1
         gate_vectors = getattr(host_backend, "gate_v32", None)
         grid_scale = float(getattr(host_backend, "grid_whiten_scale", runtime.residual_grid_whiten_scale))
@@ -291,6 +297,8 @@ def build_conflict_graph(
                 tgt_batch_ids = targets_np[mask_indices]
                 distances = residual_pairwise_np[src, tgt_batch_ids]
                 min_radii = np.minimum(radii_np[src], radii_np[tgt_batch_ids])
+                if not np.all(np.isfinite(min_radii)):
+                    min_radii = np.where(np.isfinite(min_radii), min_radii, radius_floor)
                 keep = distances <= (min_radii + RESIDUAL_FILTER_EPS)
                 keep_mask_np[mask_indices] = keep
             keep_mask = backend.asarray(keep_mask_np, dtype=backend.xp.bool_)
@@ -304,24 +312,45 @@ def build_conflict_graph(
             targets_np = np.asarray(backend.to_numpy(targets), dtype=np.int64)
             keep_mask_np = np.zeros(sources_np.shape[0], dtype=np.bool_)
             unique_sources = np.unique(sources_np)
+            chunk = int(host_backend.chunk_size or 512)
+            conflict_workspace = ResidualWorkspace(max_queries=1, max_chunk=max(1, chunk))
+            conflict_telemetry = ResidualDistanceTelemetry()
+            radius_floor = max(float(runtime.residual_radius_floor), 0.0)
             for src in unique_sources:
                 mask_indices = np.where(sources_np == src)[0]
                 if mask_indices.size == 0:
                     continue
                 src_dataset = int(batch_indices_np[src])
                 tgt_batch_ids = targets_np[mask_indices]
+                if tgt_batch_ids.size == 0:
+                    continue
                 tgt_dataset = batch_indices_np[tgt_batch_ids]
-                kernel_block = host_backend.kernel_provider(
-                    np.asarray([src_dataset], dtype=np.int64),
-                    tgt_dataset,
-                )
-                distances = compute_residual_distances_from_kernel(
-                    host_backend,
-                    np.asarray([src_dataset], dtype=np.int64),
-                    tgt_dataset,
-                    kernel_block,
-                )[0]
                 min_radii = np.minimum(radii_np[src], radii_np[tgt_batch_ids])
+                distances = np.empty(tgt_dataset.shape[0], dtype=np.float64)
+                for start in range(0, tgt_dataset.shape[0], chunk):
+                    stop = min(start + chunk, tgt_dataset.shape[0])
+                    cols = tgt_dataset[start:stop]
+                    if cols.size == 0:
+                        continue
+                    chunk_radii = min_radii[start:stop]
+                    finite_mask = np.isfinite(chunk_radii)
+                    if np.any(finite_mask):
+                        radius_cap = float(np.max(chunk_radii[finite_mask]))
+                    else:
+                        radius_cap = radius_floor if radius_floor > 0.0 else 1.0
+                    if not np.isfinite(radius_cap) or radius_cap <= 0.0:
+                        radius_cap = radius_floor if radius_floor > 0.0 else 1.0
+                    distances_chunk, _ = compute_residual_distances_with_radius(
+                        host_backend,
+                        src_dataset,
+                        cols,
+                        kernel_row=None,
+                        radius=radius_cap,
+                        workspace=conflict_workspace,
+                        telemetry=conflict_telemetry,
+                        force_whitened=True,
+                    )
+                    distances[start:stop] = distances_chunk
                 keep = distances <= (min_radii + RESIDUAL_FILTER_EPS)
                 keep_mask_np[mask_indices] = keep
             keep_mask = backend.asarray(keep_mask_np, dtype=backend.xp.bool_)

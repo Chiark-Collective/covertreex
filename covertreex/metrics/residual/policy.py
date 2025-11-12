@@ -4,13 +4,38 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Sequence, Tuple
 
 import numpy as np
 
 from covertreex import config as cx_config
+from ._gate_profile_numba import update_quantile_reservoir
 
 RESIDUAL_EPS = 1e-9
+_DEFAULT_PROFILE_SAMPLE_CAP = 2048
+_DEFAULT_PROFILE_QUANTILES = (95.0, 99.0, 99.9)
+
+
+def _normalise_percentiles(values: Sequence[float] | None) -> np.ndarray:
+    if not values:
+        return np.zeros(0, dtype=np.float64)
+    arr = np.asarray(list(values), dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return np.zeros(0, dtype=np.float64)
+    # Accept either fractions (0..1) or percentages (0..100).
+    if np.any(arr > 1.0):
+        arr = arr / 100.0
+    arr = np.clip(arr, 0.0, 1.0)
+    arr = np.unique(arr)
+    return arr
+
+
+def _format_percentile(value: float) -> str:
+    percent = value * 100.0
+    if percent.is_integer():
+        return f"{int(percent)}"
+    return f"{percent:.3f}".rstrip("0").rstrip(".")
 
 
 @dataclass
@@ -45,6 +70,12 @@ class ResidualGateProfile:
     path: Path | None = None
     dirty: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+    quantile_percentiles: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))
+    quantile_labels: Tuple[str, ...] = ()
+    quantile_capacity: int = 0
+    quantile_samples: np.ndarray | None = None
+    quantile_sample_counts: np.ndarray | None = None
+    quantile_total_counts: np.ndarray | None = None
 
     @classmethod
     def create(
@@ -54,10 +85,24 @@ class ResidualGateProfile:
         radius_max: float,
         path: str | Path | None,
         radius_eps: float = RESIDUAL_EPS,
+        quantile_percentiles: Sequence[float] | None = None,
+        quantile_sample_cap: int = _DEFAULT_PROFILE_SAMPLE_CAP,
     ) -> "ResidualGateProfile":
         edges = np.linspace(0.0, radius_max, bins + 1, dtype=np.float64)
         size = max(edges.size - 1, 1)
         target = Path(path).expanduser() if path else None
+        targets = quantile_percentiles if quantile_percentiles is not None else _DEFAULT_PROFILE_QUANTILES
+        percentiles = _normalise_percentiles(targets)
+        capacity = max(int(quantile_sample_cap), 0)
+        labels = tuple(_format_percentile(p) for p in percentiles)
+        if percentiles.size == 0 or capacity == 0:
+            samples = None
+            sample_counts = None
+            total_counts = None
+        else:
+            samples = np.full((size, capacity), np.nan, dtype=np.float32)
+            sample_counts = np.zeros(size, dtype=np.int64)
+            total_counts = np.zeros(size, dtype=np.int64)
         return cls(
             bin_edges=edges,
             max_whitened=np.zeros(size, dtype=np.float64),
@@ -65,11 +110,37 @@ class ResidualGateProfile:
             counts=np.zeros(size, dtype=np.int64),
             radius_eps=radius_eps,
             path=target,
+            quantile_percentiles=percentiles,
+            quantile_labels=labels,
+            quantile_capacity=capacity,
+            quantile_samples=samples,
+            quantile_sample_counts=sample_counts,
+            quantile_total_counts=total_counts,
         )
 
     def _bin_indices(self, values: np.ndarray) -> np.ndarray:
         indices = np.searchsorted(self.bin_edges, values, side="right") - 1
         return np.clip(indices, 0, self.max_whitened.size - 1)
+
+    def _record_quantiles(self, idx: np.ndarray, whitened: np.ndarray) -> None:
+        if (
+            self.quantile_samples is None
+            or self.quantile_sample_counts is None
+            or self.quantile_total_counts is None
+        ):
+            return
+        if idx.size == 0 or whitened.size == 0:
+            return
+        bin_idx = np.asarray(idx, dtype=np.int64)
+        values = np.asarray(whitened, dtype=np.float32)
+        update_quantile_reservoir(
+            bin_idx,
+            values,
+            self.quantile_samples,
+            self.quantile_sample_counts,
+            self.quantile_total_counts,
+        )
+        self.dirty = True
 
     def record_chunk(
         self,
@@ -83,13 +154,14 @@ class ResidualGateProfile:
         mask = inclusion_mask.astype(bool, copy=False)
         if not np.any(mask):
             return
-        residual = np.asarray(residual_distances[mask], dtype=np.float64, copy=False)
-        whitened = np.asarray(whitened_distances[mask], dtype=np.float64, copy=False)
+        residual = np.asarray(residual_distances[mask], dtype=np.float64)
+        whitened = np.asarray(whitened_distances[mask], dtype=np.float64)
         residual = np.clip(residual, self.radius_eps, None)
         idx = self._bin_indices(residual)
         np.maximum.at(self.max_whitened, idx, whitened)
         np.maximum.at(self.max_ratio, idx, np.divide(whitened, residual))
         np.add.at(self.counts, idx, 1)
+        self._record_quantiles(idx, whitened)
         self.samples_total += whitened.size
         self.dirty = True
 
@@ -120,9 +192,30 @@ class ResidualGateProfile:
     def _cumulative_ratio(self) -> np.ndarray:
         return np.maximum.accumulate(self.max_ratio)
 
+    def _quantile_payload(self) -> Dict[str, Any] | None:
+        if (
+            self.quantile_samples is None
+            or self.quantile_sample_counts is None
+            or self.quantile_total_counts is None
+            or self.quantile_percentiles.size == 0
+        ):
+            return None
+        payload: Dict[str, Any] = {}
+        for pct, label in zip(self.quantile_percentiles, self.quantile_labels):
+            values = np.zeros_like(self.max_whitened, dtype=np.float64)
+            for idx in range(values.size):
+                count = int(self.quantile_sample_counts[idx])
+                if count <= 0:
+                    values[idx] = 0.0
+                    continue
+                samples = self.quantile_samples[idx, :count].astype(np.float64, copy=False)
+                values[idx] = float(np.quantile(samples, pct))
+            payload[label] = np.maximum.accumulate(values).tolist()
+        return payload
+
     def to_dict(self) -> dict:
         payload = {
-            "schema": 1,
+            "schema": 2,
             "radius_bin_edges": self.bin_edges.tolist(),
             "max_whitened": self._cumulative_whitened().tolist(),
             "max_ratio": self._cumulative_ratio().tolist(),
@@ -132,6 +225,21 @@ class ResidualGateProfile:
             "radius_eps": float(self.radius_eps),
             "metadata": dict(self.metadata),
         }
+        quantiles = self._quantile_payload()
+        if quantiles is not None:
+            payload["quantiles"] = quantiles
+            payload["quantile_percentiles"] = (self.quantile_percentiles * 100.0).tolist()
+            payload["quantile_capacity"] = int(self.quantile_capacity)
+            payload["quantile_counts"] = (
+                self.quantile_sample_counts.astype(np.int64).tolist()
+                if self.quantile_sample_counts is not None
+                else []
+            )
+            payload["quantile_totals"] = (
+                self.quantile_total_counts.astype(np.int64).tolist()
+                if self.quantile_total_counts is not None
+                else []
+            )
         return payload
 
     def dump(self, path: str | Path | None = None, *, force: bool = False) -> None:
@@ -150,7 +258,8 @@ class ResidualGateProfile:
 @dataclass
 class ResidualGateLookup:
     radius_bins: np.ndarray
-    thresholds: np.ndarray
+    keep_thresholds: np.ndarray
+    prune_thresholds: np.ndarray
     margin: float
 
     @classmethod
@@ -159,6 +268,8 @@ class ResidualGateLookup:
         payload: dict,
         *,
         margin: float,
+        keep_pct: float,
+        prune_pct: float,
     ) -> "ResidualGateLookup":
         edges = np.asarray(payload.get("radius_bin_edges", []), dtype=np.float64)
         maxima = np.asarray(payload.get("max_whitened", []), dtype=np.float64)
@@ -167,24 +278,60 @@ class ResidualGateLookup:
         bins = edges[1:]
         if maxima.size != bins.size:
             raise ValueError("Residual gate lookup file has mismatched 'max_whitened' length.")
-        thresholds = np.maximum.accumulate(maxima.astype(np.float64, copy=False))
-        return cls(radius_bins=bins, thresholds=thresholds, margin=float(margin))
+        quantiles = payload.get("quantiles", {}) or {}
+        quantile_map: Dict[float, np.ndarray] = {}
+        for label, values in quantiles.items():
+            arr = np.asarray(values, dtype=np.float64)
+            if arr.size != bins.size:
+                continue
+            try:
+                percent = float(label)
+            except (TypeError, ValueError):
+                continue
+            quantile_map[percent] = arr
+
+        def _resolve(percent: float, default: np.ndarray) -> np.ndarray:
+            key = round(percent, 6)
+            if key in quantile_map:
+                return np.maximum.accumulate(quantile_map[key].astype(np.float64, copy=False))
+            return default
+
+        base_keep = np.zeros_like(maxima, dtype=np.float64)
+        base_prune = np.maximum.accumulate(maxima.astype(np.float64, copy=False))
+        keep_values = _resolve(keep_pct, base_keep)
+        prune_values = _resolve(prune_pct, base_prune)
+        return cls(
+            radius_bins=bins,
+            keep_thresholds=keep_values,
+            prune_thresholds=np.maximum(prune_values, keep_values),
+            margin=float(margin),
+        )
 
     @classmethod
-    def load(cls, path: str | Path, *, margin: float) -> "ResidualGateLookup":
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        margin: float,
+        keep_pct: float,
+        prune_pct: float,
+    ) -> "ResidualGateLookup":
         target = Path(path).expanduser()
         payload = json.loads(target.read_text(encoding="utf-8"))
-        return cls.from_payload(payload, margin=margin)
+        return cls.from_payload(payload, margin=margin, keep_pct=keep_pct, prune_pct=prune_pct)
 
-    def threshold(self, radius: float) -> float:
+    def thresholds(self, radius: float) -> tuple[float, float]:
         if self.radius_bins.size == 0:
-            return float(self.margin)
+            return 0.0, 0.0
         clipped = np.clip(radius, 0.0, float(self.radius_bins[-1]))
         idx = np.searchsorted(self.radius_bins, clipped, side="right")
         if idx <= 0:
-            return float(self.margin)
-        idx = min(idx - 1, self.thresholds.size - 1)
-        return float(self.thresholds[idx] + self.margin)
+            idx = 0
+        else:
+            idx = min(idx - 1, self.keep_thresholds.size - 1)
+        keep = float(self.keep_thresholds[idx])
+        prune = float(self.prune_thresholds[idx])
+        return keep, prune
 
 
 @dataclass(frozen=True)
@@ -195,6 +342,9 @@ class ResidualPolicy:
     gate1_eps: float
     gate1_audit: bool
     gate1_radius_cap: float
+    gate1_band_eps: float
+    gate1_keep_pct: float
+    gate1_prune_pct: float
     gate1_profile_path: str | None
     gate1_profile_bins: int
     gate1_lookup_path: str | None
@@ -217,6 +367,9 @@ class ResidualPolicy:
             gate1_eps=runtime.residual_gate1_eps,
             gate1_audit=runtime.residual_gate1_audit,
             gate1_radius_cap=runtime.residual_gate1_radius_cap,
+            gate1_band_eps=runtime.residual_gate1_band_eps,
+            gate1_keep_pct=runtime.residual_gate1_keep_pct,
+            gate1_prune_pct=runtime.residual_gate1_prune_pct,
             gate1_profile_path=runtime.residual_gate1_profile_path,
             gate1_profile_bins=runtime.residual_gate1_profile_bins,
             gate1_lookup_path=runtime.residual_gate1_lookup_path,

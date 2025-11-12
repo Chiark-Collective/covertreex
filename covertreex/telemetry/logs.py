@@ -177,6 +177,7 @@ class BenchmarkLogWriter:
             "traversal_mask_ms": _ms(traversal_timings.mask_seconds),
             "traversal_semisort_ms": _ms(traversal_timings.semisort_seconds),
             "traversal_tile_ms": _ms(traversal_timings.tile_seconds),
+            "traversal_build_wall_ms": _ms(traversal_timings.build_wall_seconds),
             "conflict_pairwise_ms": _ms(conflict_timings.pairwise_seconds),
             "conflict_scope_group_ms": _ms(conflict_timings.scope_group_seconds),
             "conflict_adjacency_ms": _ms(conflict_timings.adjacency_seconds),
@@ -208,12 +209,22 @@ class BenchmarkLogWriter:
             "traversal_gate1_kept": int(traversal_timings.gate1_kept),
             "traversal_gate1_pruned": int(traversal_timings.gate1_pruned),
             "traversal_gate1_ms": _ms(traversal_timings.gate1_seconds),
+            "traversal_whitened_block_pairs": int(traversal_timings.whitened_block_pairs),
+            "traversal_whitened_block_ms": _ms(traversal_timings.whitened_block_seconds),
+            "traversal_whitened_block_calls": int(traversal_timings.whitened_block_calls),
+            "traversal_kernel_provider_pairs": int(traversal_timings.kernel_provider_pairs),
+            "traversal_kernel_provider_ms": _ms(traversal_timings.kernel_provider_seconds),
+            "traversal_kernel_provider_calls": int(traversal_timings.kernel_provider_calls),
             "batch_order_strategy": plan.batch_order_strategy,
             "conflict_grid_cells": int(plan.conflict_graph.grid_cells),
             "conflict_grid_leaders_raw": int(plan.conflict_graph.grid_leaders_raw),
             "conflict_grid_leaders_after": int(plan.conflict_graph.grid_leaders_after),
             "conflict_grid_local_edges": int(plan.conflict_graph.grid_local_edges),
         }
+        record["traversal_engine"] = getattr(plan.traversal, "engine", "unknown")
+        record["traversal_gate_active"] = int(
+            getattr(plan.traversal, "gate_active", False)
+        )
         if plan.batch_permutation is not None:
             record["batch_order_permutation_size"] = int(len(plan.batch_permutation))
         for key, value in plan.batch_order_metrics.items():

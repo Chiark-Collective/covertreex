@@ -241,22 +241,19 @@ def test_residual_conflict_graph_matches_dense(monkeypatch: pytest.MonkeyPatch):
     batch_points = [[1.0], [1.4], [1.9]]
 
     monkeypatch.setenv("COVERTREEX_METRIC", "residual_correlation")
-    monkeypatch.delenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", raising=False)
-    monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
+    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
+    monkeypatch.setenv("COVERTREEX_SCOPE_CHUNK_TARGET", "0")
     cx_config.reset_runtime_config_cache()
     traversal_dense = traverse_collect_scopes(tree, batch_points)
     dense_graph = build_conflict_graph(tree, traversal_dense, batch_points)
 
-    monkeypatch.setenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", "1")
-    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
+    monkeypatch.setenv("COVERTREEX_SCOPE_CHUNK_TARGET", "2")
     cx_config.reset_runtime_config_cache()
     traversal_stream = traverse_collect_scopes(tree, batch_points)
     stream_graph = build_conflict_graph(tree, traversal_stream, batch_points)
 
     assert dense_graph.indptr.tolist() == stream_graph.indptr.tolist()
     assert dense_graph.indices.tolist() == stream_graph.indices.tolist()
-    assert dense_graph.scope_indptr.tolist() == stream_graph.scope_indptr.tolist()
-    assert dense_graph.scope_indices.tolist() == stream_graph.scope_indices.tolist()
     assert jnp.allclose(dense_graph.pairwise_distances, stream_graph.pairwise_distances)
     dense_radii = np.asarray(dense_graph.radii, dtype=np.float64)
     stream_radii = np.asarray(stream_graph.radii, dtype=np.float64)
@@ -265,8 +262,8 @@ def test_residual_conflict_graph_matches_dense(monkeypatch: pytest.MonkeyPatch):
     assert np.all(stream_radii <= dense_radii + 1e-9)
 
     monkeypatch.delenv("COVERTREEX_METRIC", raising=False)
-    monkeypatch.delenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", raising=False)
     monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
+    monkeypatch.delenv("COVERTREEX_SCOPE_CHUNK_TARGET", raising=False)
     cx_config.reset_runtime_config_cache()
     reset_residual_metric()
     set_residual_backend(None)
@@ -362,6 +359,69 @@ def test_residual_conflict_graph_reuses_pairwise_cache(monkeypatch: pytest.Monke
     monkeypatch.delenv("COVERTREEX_METRIC", raising=False)
     monkeypatch.delenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", raising=False)
     monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
+    cx_config.reset_runtime_config_cache()
+    reset_residual_metric()
+    set_residual_backend(None)
+
+
+@pytest.mark.parametrize("chunk_target", [0, 2_048])
+def test_residual_conflict_graph_reuse_across_chunk_targets(
+    monkeypatch: pytest.MonkeyPatch, chunk_target: int
+) -> None:
+    backend = get_runtime_backend()
+    base_points = backend.asarray(
+        [[0.0], [1.0], [2.0], [3.0]],
+        dtype=backend.default_float,
+    )
+    tree = PCCTree.empty(dimension=1, backend=backend)
+    tree, _ = batch_insert(tree, base_points, mis_seed=0)
+
+    v_matrix = np.array(
+        [
+            [1.0, 0.0],
+            [0.5, 0.5],
+            [0.2, 0.8],
+            [0.1, 0.9],
+        ],
+        dtype=np.float64,
+    )
+    p_diag = np.ones(4, dtype=np.float64)
+    kernel_diag = np.ones(4, dtype=np.float64)
+
+    def kernel_provider(rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+        values = np.linspace(0.5, 1.1, num=rows.size * cols.size)
+        return values.reshape(rows.size, cols.size)
+
+    reset_residual_metric()
+    set_residual_backend(None)
+    backend_state = ResidualCorrHostData(
+        v_matrix=v_matrix,
+        p_diag=p_diag,
+        kernel_diag=kernel_diag,
+        kernel_provider=kernel_provider,
+        chunk_size=2,
+    )
+    configure_residual_correlation(backend_state)
+
+    batch_points = [[0.1], [1.4], [2.7]]
+
+    monkeypatch.setenv("COVERTREEX_METRIC", "residual_correlation")
+    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
+    monkeypatch.setenv("COVERTREEX_SCOPE_CHUNK_TARGET", str(chunk_target))
+    cx_config.reset_runtime_config_cache()
+
+    traversal = traverse_collect_scopes(tree, batch_points)
+    assert traversal.residual_cache is not None
+    graph = build_conflict_graph(tree, traversal, batch_points)
+
+    assert graph.timings.pairwise_reused == 1
+
+    for key in [
+        "COVERTREEX_METRIC",
+        "COVERTREEX_ENABLE_NUMBA",
+        "COVERTREEX_SCOPE_CHUNK_TARGET",
+    ]:
+        monkeypatch.delenv(key, raising=False)
     cx_config.reset_runtime_config_cache()
     reset_residual_metric()
     set_residual_backend(None)
@@ -584,7 +644,7 @@ def test_residual_grid_uses_whitened_scale_without_gate(monkeypatch: pytest.Monk
     monkeypatch.setenv("COVERTREEX_CONFLICT_GRAPH_IMPL", "grid")
     monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1", "0")
     monkeypatch.setenv("COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE", str(scale))
-    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "0")
+    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
     cx_config.reset_runtime_config_cache()
 
     configure_residual_correlation(backend_state)

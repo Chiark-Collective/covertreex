@@ -34,6 +34,8 @@ class TraversalResult:
     scope_indices: Any
     timings: "TraversalTimings"
     residual_cache: ResidualTraversalCache | None = None
+    engine: str = "unknown"
+    gate_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,7 @@ class TraversalTimings:
     sort_seconds: float = 0.0
     assemble_seconds: float = 0.0
     tile_seconds: float = 0.0
+    build_wall_seconds: float = 0.0
     scope_chunk_segments: int = 0
     scope_chunk_emitted: int = 0
     scope_chunk_max_members: int = 0
@@ -63,6 +66,12 @@ class TraversalTimings:
     scope_budget_final: int = 0
     scope_budget_escalations: int = 0
     scope_budget_early_terminate: int = 0
+    whitened_block_pairs: int = 0
+    whitened_block_seconds: float = 0.0
+    whitened_block_calls: int = 0
+    kernel_provider_pairs: int = 0
+    kernel_provider_seconds: float = 0.0
+    kernel_provider_calls: int = 0
 
 
 class TraversalStrategy(Protocol):

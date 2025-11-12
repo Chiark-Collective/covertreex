@@ -27,6 +27,23 @@ RESIDUAL_SCOPE_CAP_SCHEMA: Dict[str, object] = {
     "required": ("schema", "schema_id", "levels", "metadata"),
 }
 
+RESIDUAL_GATE_PROFILE_SCHEMA_VERSION = 2
+RESIDUAL_GATE_PROFILE_SCHEMA_ID = "covertreex.residual_gate_profile.v2"
+RESIDUAL_GATE_PROFILE_SCHEMA: Dict[str, object] = {
+    "id": RESIDUAL_GATE_PROFILE_SCHEMA_ID,
+    "version": RESIDUAL_GATE_PROFILE_SCHEMA_VERSION,
+    "description": "Aggregated Gate-1 profile payload derived from residual benchmark telemetry.",
+    "required": (
+        "schema_id",
+        "run_id",
+        "radius_bin_edges",
+        "max_whitened",
+        "max_ratio",
+        "counts",
+        "samples_total",
+    ),
+}
+
 RUNTIME_BREAKDOWN_SCHEMA_ID = "covertreex.runtime_breakdown.v1"
 RUNTIME_BREAKDOWN_SCHEMA: Dict[str, object] = {
     "id": RUNTIME_BREAKDOWN_SCHEMA_ID,
@@ -118,6 +135,9 @@ __all__ = [
     "RESIDUAL_SCOPE_CAP_SCHEMA",
     "RESIDUAL_SCOPE_CAP_SCHEMA_ID",
     "RESIDUAL_SCOPE_CAP_SCHEMA_VERSION",
+    "RESIDUAL_GATE_PROFILE_SCHEMA",
+    "RESIDUAL_GATE_PROFILE_SCHEMA_ID",
+    "RESIDUAL_GATE_PROFILE_SCHEMA_VERSION",
     "RUNTIME_BREAKDOWN_SCHEMA",
     "RUNTIME_BREAKDOWN_SCHEMA_ID",
     "RUNTIME_BREAKDOWN_CHUNK_FIELDS",
