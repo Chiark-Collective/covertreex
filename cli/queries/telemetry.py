@@ -1,11 +1,96 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Sequence
+from typing import Any, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
 import sys
 
+from covertreex import config as cx_config
+from covertreex.telemetry import (
+    BenchmarkLogWriter,
+    ResidualScopeCapRecorder,
+    timestamped_artifact,
+)
+
+from .runtime import _resolve_artifact_arg
+
+
+@dataclass
+class CLITelemetryHandles:
+    log_path: Optional[str]
+    log_writer: Optional[BenchmarkLogWriter]
+    scope_cap_recorder: Optional[ResidualScopeCapRecorder]
+    traversal_view: Optional["ResidualTraversalTelemetry"]
+
+    def close(self) -> None:
+        if self.scope_cap_recorder is not None:
+            self.scope_cap_recorder.dump()
+        if self.log_writer is not None:
+            self.log_writer.close()
+
+
+def initialise_cli_telemetry(
+    *,
+    args: Any,
+    run_id: str,
+    runtime_snapshot: Mapping[str, Any],
+    log_metadata: Mapping[str, Any],
+) -> CLITelemetryHandles:
+    if getattr(args, "no_log_file", False):
+        log_path = None
+    elif getattr(args, "log_file", None):
+        log_path = str(_resolve_artifact_arg(args.log_file))
+    else:
+        log_path = str(
+            timestamped_artifact(
+                category="benchmarks",
+                prefix=f"queries_{run_id}",
+                suffix=".jsonl",
+            )
+        )
+    log_writer = None
+    if log_path:
+        print(f"[queries] writing batch telemetry to {log_path}")
+        log_writer = BenchmarkLogWriter(
+            log_path,
+            run_id=run_id,
+            runtime=runtime_snapshot,
+            metadata=log_metadata,
+        )
+    scope_cap_recorder: Optional[ResidualScopeCapRecorder] = None
+    scope_cap_output = getattr(args, "residual_scope_cap_output", None)
+    if getattr(args, "metric", None) == "residual" and scope_cap_output:
+        runtime_config = cx_config.runtime_config()
+        resolved_output = str(_resolve_artifact_arg(scope_cap_output))
+        scope_cap_recorder = ResidualScopeCapRecorder(
+            output=resolved_output,
+            percentile=getattr(args, "residual_scope_cap_percentile", 0.5),
+            margin=getattr(args, "residual_scope_cap_margin", 0.05),
+            radius_floor=runtime_config.residual_radius_floor,
+        )
+        scope_cap_recorder.annotate(
+            run_id=run_id,
+            log_file=log_path,
+            tree_points=getattr(args, "tree_points", 0),
+            batch_size=getattr(args, "batch_size", 0),
+            scope_chunk_target=runtime_config.scope_chunk_target,
+            scope_chunk_max_segments=runtime_config.scope_chunk_max_segments,
+            residual_scope_cap_default=getattr(args, "residual_scope_cap_default", None),
+            seed=getattr(args, "seed", 0),
+            build_mode=getattr(args, "build_mode", "batch"),
+        )
+    traversal_view: Optional[ResidualTraversalTelemetry]
+    if getattr(args, "metric", None) == "residual":
+        traversal_view = ResidualTraversalTelemetry()
+    else:
+        traversal_view = None
+    return CLITelemetryHandles(
+        log_path=log_path,
+        log_writer=log_writer,
+        scope_cap_recorder=scope_cap_recorder,
+        traversal_view=traversal_view,
+    )
 
 @dataclass
 class _ResidualBatchTelemetry:
@@ -198,6 +283,13 @@ def _format_time(seconds: float) -> str:
     if seconds >= 1.0:
         return f"{seconds:.2f}s"
     return f"{seconds * 1e3:.1f}ms"
+
+
+__all__ = [
+    "CLITelemetryHandles",
+    "ResidualTraversalTelemetry",
+    "initialise_cli_telemetry",
+]
 
 
 def _format_ratio(value: float) -> str:
