@@ -2,6 +2,8 @@
 
 _Status snapshot (2025-11-12)._ The scope streamer + CSR builder are live, float32 staging landed end-to-end, and deterministic selection keeps sparsified scopes capped via argpartition. The November 12 Hilbert 32 k residual sweep (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert.jsonl`) still spent >1 h wall-clock with `traversal_semisort_ms` stuck in the tens-of-seconds regime, so we now treat that dataset strictly as a before/after validation pass—smaller shakedowns must pass before we touch 32 k again.
 
+> Historical log entries that used to live in this file are now indexed under [`docs/journal/2025-11.md`](journal/2025-11.md). Keep the high-level guidance here current and push dated telemetry into the journal.
+
 **Telemetry playbook (Phase 5).**
 - Always start with a 4 096-point Hilbert preset (`--tree-points 4096`, otherwise matching the 32 k CLI flags) and capture both the JSONL log and CSV summary under `artifacts/benchmarks/`. Verify `whitened_block_pairs_sum / kernel_provider_pairs_sum ≥ 0.95`, `traversal_semisort_ms` < 1 s median, and `conflict_pairwise_reused=1` for every batch before escalating.
 - Only after the 4 k run looks healthy should we launch the 32 k replay. Use the same environment (thread caps, gating knobs, chunk target 8 192) so we can diff telemetry directly. If the 32 k run still exceeds 1 h wall-clock or `traversal_semisort_ms` fails to collapse, halt and investigate before attempting further gate experiments.
