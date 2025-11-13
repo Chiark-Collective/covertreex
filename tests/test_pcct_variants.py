@@ -19,6 +19,21 @@ def reset_runtime_context() -> None:
     cx_config.reset_runtime_context()
 
 
+@pytest.fixture
+def residual_backend_config() -> None:
+    backend = build_residual_backend(
+        POINTS,
+        seed=7,
+        inducing_count=16,
+        variance=1.0,
+        lengthscale=1.0,
+        chunk_size=16,
+    )
+    configure_residual_correlation(backend)
+    yield
+    reset_residual_metric()
+
+
 def _knn_result(runtime: Runtime) -> tuple[np.ndarray, np.ndarray]:
     tree = PCCT(runtime).fit(POINTS, mis_seed=123)
     indices, distances = PCCT(runtime, tree).knn(
@@ -65,6 +80,16 @@ def test_knn_consistency_enable_numba_toggle() -> None:
     _assert_knn_equal(idx_a, dist_a, idx_b, dist_b)
 
 
+def test_knn_consistency_batch_order() -> None:
+    baseline = _base_runtime().with_updates(batch_order="natural")
+    hilbert = baseline.with_updates(batch_order="hilbert")
+
+    idx_a, dist_a = _knn_result(baseline)
+    idx_b, dist_b = _knn_result(hilbert)
+
+    _assert_knn_equal(idx_a, dist_a, idx_b, dist_b)
+
+
 def test_knn_consistency_sparse_toggle() -> None:
     dense_runtime = _base_runtime().with_updates(enable_sparse_traversal=False)
     sparse_runtime = dense_runtime.with_updates(enable_sparse_traversal=True)
@@ -75,16 +100,8 @@ def test_knn_consistency_sparse_toggle() -> None:
     _assert_knn_equal(idx_a, dist_a, idx_b, dist_b)
 
 
+@pytest.mark.usefixtures("residual_backend_config")
 def test_knn_consistency_residual_whitened_toggle() -> None:
-    residual_backend = build_residual_backend(
-        POINTS,
-        seed=42,
-        inducing_count=16,
-        variance=1.0,
-        lengthscale=1.0,
-        chunk_size=16,
-    )
-    configure_residual_correlation(residual_backend)
     runtime_base = Runtime(
         backend="numpy",
         precision="float64",
@@ -92,13 +109,29 @@ def test_knn_consistency_residual_whitened_toggle() -> None:
         enable_numba=True,
         enable_sparse_traversal=True,
     )
-    try:
-        dense = runtime_base.with_updates(residual_force_whitened=False)
-        whitened = runtime_base.with_updates(residual_force_whitened=True)
 
-        idx_a, dist_a = _knn_result(dense)
-        idx_b, dist_b = _knn_result(whitened)
+    dense = runtime_base.with_updates(residual_force_whitened=False)
+    whitened = runtime_base.with_updates(residual_force_whitened=True)
 
-        _assert_knn_equal(idx_a, dist_a, idx_b, dist_b)
-    finally:
-        reset_residual_metric()
+    idx_a, dist_a = _knn_result(dense)
+    idx_b, dist_b = _knn_result(whitened)
+
+    _assert_knn_equal(idx_a, dist_a, idx_b, dist_b)
+
+
+@pytest.mark.usefixtures("residual_backend_config")
+def test_knn_consistency_residual_scope_member_limit() -> None:
+    runtime_base = Runtime(
+        backend="numpy",
+        precision="float64",
+        metric="residual_correlation",
+        enable_numba=True,
+        enable_sparse_traversal=True,
+        residual_scope_member_limit=64,
+    )
+    uncapped = runtime_base.with_updates(residual_scope_member_limit=0)
+
+    idx_a, dist_a = _knn_result(runtime_base)
+    idx_b, dist_b = _knn_result(uncapped)
+
+    _assert_knn_equal(idx_a, dist_a, idx_b, dist_b)
