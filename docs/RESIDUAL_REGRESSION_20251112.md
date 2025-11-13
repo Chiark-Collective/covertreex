@@ -166,6 +166,14 @@ Until we restore the dense streamer’s fast path, Phase 5 remains blocked bec
   - `traversal_scope_chunk_points` unchanged at **262 144** total (512 queries × 512 points) because each query still inspects the full Hilbert chunk before the radius mask admits enough members to hit the 128-cap.
 - Takeaway: the vectorised kernel path trims ~60 % off the Python overhead (compare to the previous 0.41 s median when whitening SPIKES dominated), but the dominating cost is now the raw kernel evaluation. Without a smarter scope-selection budget (or smaller chunks), every dominated batch still visits ~262 k nodes before the mask saturates, so we remain an order of magnitude away from the 30 ms baseline.
 
+### 2025-11-14 Membership Trimming Pass
+
+- Added explicit membership pruning for the parallel streamer: whenever a query hits the member cap we now mark it saturated immediately, and after each batch we call `select_topk_by_level` to keep only the best `scope_limit` entries in level order.
+- Replayed the 4 k preset with the same flags (log `artifacts/benchmarks/artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_trimmed.jsonl`):
+  - `traversal_semisort_ms`: median **0.350 s**, p90 **0.387 s**, max **0.384 s**.
+  - `traversal_scope_chunk_points` finally tracks the desired limit: median/max **65,536** (512 queries × 128 survivors). Once a query fills its 128-slot budget we stop scanning further chunks, so the scope streamer no longer touches every tree point.
+- We still need ~12× additional headroom to reach 30 ms dominated batches, but the gap is now strictly compute-bound on the 65 k candidate set rather than 262 k. Next steps: shrink the dense chunk size (e.g., 128) or implement a radius/budget schedule that keeps survivors to **≤64**.
+
 ### Follow-up Mitigations (2025-11-12 evening)
 
 We tried both remediation ideas on the 4 k Hilbert “shakeout” before touching 32 k:

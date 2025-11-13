@@ -615,6 +615,10 @@ def _collect_residual_scopes_streaming_parallel(
                             obs = float(np.max(cache_distances[cache_include]))
                             if obs > observed_radii[qi]:
                                 observed_radii[qi] = obs
+                            if limit_value and scope_counts[qi] >= limit_value:
+                                trimmed_flags[qi] = True
+                                saturated[qi] = True
+                                saturated_flags[qi] = 1
                         if trimmed_flag:
                             trimmed_flags[qi] = True
                             saturated[qi] = True
@@ -686,6 +690,10 @@ def _collect_residual_scopes_streaming_parallel(
                             observed_radii[qi] = obs
                         if budget_applied[qi]:
                             budget_survivors[qi] += int(added)
+                        if limit_value and scope_counts[qi] >= limit_value:
+                            trimmed_flags[qi] = True
+                            saturated[qi] = True
+                            saturated_flags[qi] = 1
                     if trimmed_flag:
                         trimmed_flags[qi] = True
                         saturated[qi] = True
@@ -724,6 +732,9 @@ def _collect_residual_scopes_streaming_parallel(
                 int(scope_counts[qi]),
             )
             dedupe_hits[qi] += dedupe_delta
+            if limit_value and scope_counts[qi] >= limit_value:
+                trimmed_flags[qi] = True
+                saturated_flags[qi] = 1
             if trimmed_flag:
                 trimmed_flags[qi] = True
                 saturated_flags[qi] = 1
@@ -737,11 +748,17 @@ def _collect_residual_scopes_streaming_parallel(
                     int(scope_counts[qi]),
                 )
                 dedupe_hits[qi] += dedupe_delta
+                if limit_value and scope_counts[qi] >= limit_value:
+                    trimmed_flags[qi] = True
+                    saturated_flags[qi] = 1
                 if trimmed_flag:
                     trimmed_flags[qi] = True
                     saturated_flags[qi] = 1
 
             scope_vec = np.nonzero(flags_row)[0]
+            if limit_value and scope_vec.size > limit_value:
+                level_slice = top_levels_np[scope_vec]
+                scope_vec = select_topk_by_level(scope_vec, level_slice, limit_value)
             flags_row[: total_points] = 0
             original_size = scope_vec.size
             max_scope_members = max(max_scope_members, original_size)
