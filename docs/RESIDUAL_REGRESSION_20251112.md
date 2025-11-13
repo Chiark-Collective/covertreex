@@ -5,6 +5,7 @@
 - The audited dense residual run that previously clocked **≈83 s build / 0.030 s query (33.8 k q/s)** now takes **>2 hours** on the latest commit.
 - Replaying the historical recipe on the commit that introduced the scoped streamer (`48334de`, 2025-11-10) still produces the 83 s result, so the regression was introduced after that SHA.
 - The current head (`5030894`) can no longer reproduce any of the documented 32 k residual numbers (dense or sparse). Even the “safe” dense configuration spends 60–160 s per dominated batch before aborting.
+- Re-running the “historical” dense preset on this commit with all guardrails disabled (`COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT=0`) still yields **2.0–3.1 s** semisort pulses (median **2.03 s**) because every dominated batch streams the entire 262 k-point scope; see **2025-11-14 32 k Re-run** for details.
 
 We need to pause new features, bisect between `48334de` and HEAD, and restore the dense baseline before touching Phase 5 again.
 
@@ -173,6 +174,35 @@ Until we restore the dense streamer’s fast path, Phase 5 remains blocked bec
   - `traversal_semisort_ms`: median **0.350 s**, p90 **0.387 s**, max **0.384 s**.
   - `traversal_scope_chunk_points` finally tracks the desired limit: median/max **65,536** (512 queries × 128 survivors). Once a query fills its 128-slot budget we stop scanning further chunks, so the scope streamer no longer touches every tree point.
 - We still need ~12× additional headroom to reach 30 ms dominated batches, but the gap is now strictly compute-bound on the 65 k candidate set rather than 262 k. Next steps: shrink the dense chunk size (e.g., 128) or implement a radius/budget schedule that keeps survivors to **≤64**.
+
+### 2025-11-14 32 k Dense Re-run (guardrails off)
+
+- Command:
+
+  ```bash
+  COVERTREEX_BACKEND=numpy \
+  COVERTREEX_ENABLE_NUMBA=1 \
+  COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+  COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0 \
+  COVERTREEX_BATCH_ORDER=hilbert \
+  COVERTREEX_PREFIX_SCHEDULE=doubling \
+  COVERTREEX_RESIDUAL_GATE1=0 \
+  COVERTREEX_RESIDUAL_FORCE_WHITENED=0 \
+  COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT=0 \
+  python -m cli.queries \
+    --metric residual \
+    --dimension 8 --tree-points 32768 \
+    --batch-size 512 --queries 1024 --k 8 \
+    --seed 42 --baseline gpboost \
+    --log-file artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_current2.jsonl
+  ```
+
+- Results:
+  - 64 dominated batches; `traversal_semisort_ms` median **2.03 s**, p90 **2.54 s**, max **3.05 s**.
+  - `traversal_scope_chunk_points` stuck at **262 144** (512 queries × 512-point chunk) for every dominated batch; with the cap removed we once again stream the entire tree per batch.
+  - Kernel telemetry dominates (`kernel_seconds_total ≫ whitened_seconds_total`), confirming the slowdown comes from raw scope streaming rather than SGEMMs or conflict graph work.
+
+- Why the gap persists: even with all guardrails disabled, the Hilbert batch still loops over every 512-point chunk for each active query block. The radius test does not cull candidates early enough, so each dominated batch performs ~262 k residual evaluations before MIS/conflict. Hitting the historical **≈30 ms** target therefore requires a true membership budget (≤64 survivors) and/or smaller residual chunks so we stop scanning the full tree per batch.
 
 ### Follow-up Mitigations (2025-11-12 evening)
 
