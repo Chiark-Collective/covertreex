@@ -437,7 +437,7 @@ class RuntimeConfig:
         )
         residual_dynamic_query_block = _bool_from_env(
             os.getenv("COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK"),
-            default=False,
+            default=True,
         )
         raw_scope_member_limit = _parse_optional_int(
             os.getenv("COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT")

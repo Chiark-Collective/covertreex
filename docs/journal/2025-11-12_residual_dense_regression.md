@@ -199,6 +199,15 @@ Until we restore the dense streamer’s fast path, Phase 5 remains blocked bec
   - `--residual-dynamic-query-block` (`COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK=1`) lets `_collect_residual_scopes_streaming_parallel` shrink its query blocks once only a handful of survivors remain active, instead of always issuing 128-query kernel tiles.
 - Both toggles default to “off” so the ≤30 s baseline from `residual_dense_32768_maskopt_v2.jsonl` stays reproducible. The new knobs are purely experimental for now; we’ll keep them disabled until profiling shows a meaningful win, but they’re available to anyone investigating the remaining traversal headroom.
 
+#### 2025-11-17 Dynamic Query Block Scaling
+
+The `_block_ranges` iterator now advances correctly, so the dynamic-block streamer is reliable enough to ship as the default:
+
+- **32 k dense (`artifacts/benchmarks/residual_dense_32768_maskopt_v2_dynamic_fix.jsonl`):** dominated batches drop to `traversal_semisort_ms` median **≈257 ms** (from 264 ms) with total traversal **≈29.0 s** and slightly lower kernel cost (`traversal_kernel_provider_ms` median ≈28 ms).
+- **4 k guardrail (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_maskopt_v2_dynamic_fix.jsonl`):** the same knob regresses to `traversal_semisort_ms` median **≈333 ms**, because the extra block bookkeeping dominates once only a handful of dominated batches remain.
+
+**Policy:** keep `residual_dynamic_query_block` **on by default** (best for the realistic 32 k suite) and document that small-shakeout runs can disable it explicitly via `--residual-dynamic-query-block 0` / `COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK=0`.
+
 ### 2025-11-14 32 k Dense Re-run (guardrails off)
 
 - Command:

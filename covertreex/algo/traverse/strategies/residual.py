@@ -581,6 +581,7 @@ def _collect_residual_scopes_streaming_parallel(
                 break
             block_end = min(batch_size, block_start + block_size)
             yield block_start, block_end
+            block_start = block_end
     for block_start, block_end in _block_ranges():
         block_range = range(block_start, block_end)
         block_valid: list[int] = []

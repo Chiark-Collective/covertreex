@@ -120,6 +120,8 @@ def runtime_from_args(
     prefix_schedule = _get_arg(args, "prefix_schedule")
     if prefix_schedule:
         runtime_kwargs["prefix_schedule"] = prefix_schedule
+    elif metric == "residual":
+        runtime_kwargs["prefix_schedule"] = "doubling"
     prefix_density_low = _get_arg(args, "prefix_density_low")
     if prefix_density_low is not None:
         runtime_kwargs["prefix_density_low"] = float(prefix_density_low)
