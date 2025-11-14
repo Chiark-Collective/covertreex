@@ -4,14 +4,15 @@ The full investigative log now lives under [`docs/journal/2025-11-12_residual_de
 
 ## Current Snapshot — 2025-11-17
 
-- Dense residual builds hit **≈29 s total traversal** on the maskopt_v2 preset at HEAD (`pcct-20251114-082601-d2e6df`), using the defaults below.
-- Dynamic query blocks are **enabled by default**; disable via `--residual-dynamic-query-block 0` if you need to reproduce the 4 k guardrail numbers.
+- Dense residual builds hit **≈21.2 s wall / 18.8 s dominated traversal** on the dense-streamer preset at HEAD (`artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl`, `run_id=pcct-20251114-105500-6dc4f6`). Dominated batches sit at `traversal_semisort_ms≈62 ms` (p90 ≈76 ms).
+- The 4 k guardrail run (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_dense_streamer_gold.jsonl`, `run_id=pcct-20251114-105559-b7f965`) stays well under the `<1 s` threshold with `traversal_semisort_ms≈42 ms`.
+- Dynamic query blocks **and** the dense scope streamer are enabled by default; disable via `--residual-dynamic-query-block 0` or `--no-residual-dense-scope-streamer` if you need to reproduce the historical multi-pass telemetry.
 - Latest scaling checkpoints:
-  - 32 k: `artifacts/benchmarks/residual_dense_32768_maskopt_v2_dynamic_fix.jsonl` (median `traversal_semisort_ms≈257 ms`).
-  - 48 k: `artifacts/benchmarks/residual_dense_49152_maskopt_v2_default.jsonl` (median `≈244 ms`, traversal ≈53 s).
-  - 64 k: `artifacts/benchmarks/residual_dense_65536_maskopt_v2_default.jsonl` (median `≈232 ms`, traversal ≈76 s).
+  - 32 k: `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl` (median `traversal_semisort_ms≈62 ms`, total traversal ≈18.8 s, build summary `pcct | build=21.1754 s`).
+  - 48 k: `artifacts/benchmarks/residual_dense_49152_maskopt_v2_default.jsonl` (median `≈244 ms`, traversal ≈53 s) — rerun pending with the dense streamer.
+  - 64 k: `artifacts/benchmarks/residual_dense_65536_maskopt_v2_default.jsonl` (median `≈232 ms`, traversal ≈76 s) — rerun pending with the dense streamer.
 
-### Reproducible Baseline Command (Hilbert / maskopt_v2)
+### Reproducible Baseline Command (Hilbert / dense streamer)
 
 ```bash
 COVERTREEX_BACKEND=numpy \
@@ -23,12 +24,12 @@ python -m cli.queries \
   --dimension 8 --tree-points 32768 \
   --batch-size 512 --queries 1024 --k 8 \
   --seed 42 --baseline none \
-  --log-file artifacts/benchmarks/residual_dense_32768_maskopt_v2_dynamic_fix.jsonl
+  --log-file artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl
 ```
 
-- Prefix schedule defaults to `doubling` for residual metrics, and `residual_dynamic_query_block` / survivor ladder are on by default.
-- Adjust `--tree-points` (e.g., 49152, 65536) to reproduce the scaling results listed above.
-- For 4 k guardrail runs, append `--residual-dynamic-query-block 0` to avoid the small-scale regression.
+- Prefix schedule defaults to `doubling` for residual metrics, and both `residual_dynamic_query_block` plus the dense streamer are on by default.
+- Adjust `--tree-points` (e.g., 49152, 65536) to reproduce the scaling results listed above; rerun the scaling sweep once the dense streamer data lands.
+- For 4 k guardrail runs, the dense streamer already keeps dominated batches well below 50 ms (log `artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_dense_streamer_gold.jsonl`). Use `--no-residual-dense-scope-streamer` only if you need the legacy maskopt_v2 numbers.
 
 ### Scaling sweep helper
 
@@ -37,7 +38,7 @@ Use `tools/residual_scaling_sweep.py` to benchmark multiple tree sizes in sequen
 ```bash
 python tools/residual_scaling_sweep.py \
   --tree-sizes 4096,8192,16384,32768,49152,65536 \
-  --log-prefix residual_scaling_maskopt_v2
+  --log-prefix residual_scaling_dense_streamer
 ```
 
 Logs land under `artifacts/benchmarks/scaling/`; rerun with different flags to compare features (e.g., toggling the residual bitset) without hand-editing commands.

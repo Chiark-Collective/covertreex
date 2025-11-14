@@ -155,6 +155,9 @@ def runtime_from_args(
     residual_dynamic_query_block = _get_arg(args, "residual_dynamic_query_block")
     if residual_dynamic_query_block is not None:
         runtime_kwargs["residual_dynamic_query_block"] = bool(residual_dynamic_query_block)
+    residual_dense_scope_streamer = _get_arg(args, "residual_dense_scope_streamer")
+    if residual_dense_scope_streamer is not None:
+        runtime_kwargs["residual_dense_scope_streamer"] = bool(residual_dense_scope_streamer)
     residual_policy = _residual_policy_from_args(args)
     if residual_policy is not None:
         runtime_kwargs["residual"] = residual_policy

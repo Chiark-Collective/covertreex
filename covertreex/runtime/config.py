@@ -25,6 +25,7 @@ _DEFAULT_SCOPE_CHUNK_MAX_SEGMENTS = 512
 _DEFAULT_SCOPE_BUDGET_SCHEDULE: Tuple[int, ...] = ()
 _DEFAULT_RESIDUAL_SCOPE_BUDGET_SCHEDULE: Tuple[int, ...] = (32, 64, 96)
 _DEFAULT_RESIDUAL_STREAM_TILE = 64
+_DEFAULT_RESIDUAL_DENSE_SCOPE_STREAMER = True
 _DEFAULT_SCOPE_BUDGET_UP_THRESH = 0.015
 _DEFAULT_SCOPE_BUDGET_DOWN_THRESH = 0.002
 _DEFAULT_BATCH_ORDER_STRATEGY = "hilbert"
@@ -260,6 +261,7 @@ class RuntimeConfig:
     residual_stream_tile: int | None
     residual_scope_bitset: bool
     residual_dynamic_query_block: bool
+    residual_dense_scope_streamer: bool
     residual_scope_cap_path: str | None
     residual_scope_cap_default: float
     residual_prefilter_enabled: bool
@@ -439,6 +441,10 @@ class RuntimeConfig:
             os.getenv("COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK"),
             default=True,
         )
+        residual_dense_scope_streamer = _bool_from_env(
+            os.getenv("COVERTREEX_RESIDUAL_DENSE_SCOPE_STREAMER"),
+            default=_DEFAULT_RESIDUAL_DENSE_SCOPE_STREAMER,
+        )
         raw_scope_member_limit = _parse_optional_int(
             os.getenv("COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT")
         )
@@ -539,6 +545,7 @@ class RuntimeConfig:
             residual_stream_tile=residual_stream_tile,
             residual_scope_bitset=residual_scope_bitset,
             residual_dynamic_query_block=residual_dynamic_query_block,
+            residual_dense_scope_streamer=residual_dense_scope_streamer,
             residual_scope_cap_path=residual_scope_cap_path,
             residual_scope_cap_default=residual_scope_cap_default,
             residual_prefilter_enabled=residual_prefilter_enabled,

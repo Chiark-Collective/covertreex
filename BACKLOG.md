@@ -2,41 +2,41 @@
 
 _Last updated: 2025-11-14._
 
-This list is reprioritised to focus on the configurations that already deliver ~30 s 32 k builds. Items are grouped by the impact they can have on the current winning recipe; jobs that are less urgent (but still valuable) appear in the lower sections.
+This list is reprioritised to focus on the configurations that already deliver ≈20 s 32 k builds (dense streamer + Hilbert batches). Items are grouped by the impact they can have on the current winning recipe; jobs that are less urgent (but still valuable) appear in the lower sections.
 
-## A. Critical to Improving the 32 k / 30 s Baseline
+## A. Guarding the 32 k / <20 s Baseline
 
 ### Dense residual regression verification
-- **Goal:** Now that the dense residual preset hits ≈30 s again, confirm which commits fixed the >2 h regression and tag that SHA so future bisects have a known good point (or repeat the bisect if the fix was accidental).
+- **Goal:** Now that the dense residual preset hits ≈21 s build / 0.026 s query again, confirm which commits fixed the >2 h regression and tag that SHA so future bisects have a known good point (or repeat the bisect if the fix was accidental).
 - **Why high leverage:** Vecchia pipelines rely on the dense residual path; without a clearly documented “good” SHA we can’t prove future slowdowns are new regressions.
-- **Status:** `pcct-20251114-082601-d2e6df` (`git HEAD`, log `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_maskopt_v2.jsonl`) is the latest ≤30 s run (total traversal ≈29.8 s). Tag this commit once merged so future bisects can anchor on the mask+adaptive-tile baseline.
+- **Status:** `pcct-20251114-105500-6dc4f6` (`git HEAD`, log `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl`) is the latest ≤22 s run (total traversal ≈18.8 s; dominated `traversal_semisort_ms` median ≈62 ms). Tag this commit once merged so future bisects can anchor on the dense-scope-streamer baseline.
 - **Refs:** `docs/journal/2025-11-12_residual_dense_regression.md` (latest CLI snapshot).
 
 ### Scope streamer & budget fixes for dense runs
-- **Goal:** Reintroduce a dense scope streamer that scans each 512-point chunk once, honours ≤64 survivors/query, and restores `traversal_semisort_ms ≤ 50 ms`—the biggest lever left on the now-30 s pipeline.
-- **Why high leverage:** Even with Hilbert+grid, traversal is still the dominant cost; capping per-batch scans is the most direct way to push below 30 s without touching the rest of the pipeline.
-- **Status:** Survivor budgets drop queries via the `(32, 64, 96)` ladder, active-query masks cut the Python overhead, and the adaptive tile stride run (`artifacts/benchmarks/residual_phase05_hilbert_4k_maskopt_v2.jsonl`) sits at `traversal_ms≈305 ms`, `traversal_semisort_ms≈247 ms`, `traversal_scope_chunk_points≈4 096`. The dynamic query-block path is now **on by default** (it trims the 32 k run to ≈29 s; see `docs/journal/2025-11-12_residual_dense_regression.md`). The bitset streamer stays **off** by default because it slows the 32 k preset. Dense batches still need another ~5–10× reduction (smaller tiles as limits tighten + smarter prefetch/early exits) before we rerun 32 k.
+- **Goal:** Reintroduce a dense scope streamer that scans each 512-point chunk once, honours ≤64 survivors/query, and restores `traversal_semisort_ms ≤ 50 ms`—the biggest lever left on the now-sub-20 s pipeline.
+- **Why high leverage:** Even with Hilbert+grid, traversal is still the dominant cost; capping per-batch scans is the most direct way to push below 15 s without touching the rest of the pipeline.
+- **Status:** The new single-pass dense scope streamer (`--residual-dense-scope-streamer`, enabled by default) processes each 512-point chunk once per batch and keeps the ≤64 survivor cap intact. The latest 32 k Hilbert run (`artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl`) drops dominated batches to `traversal_semisort_ms≈62 ms` (p90 ≈76 ms) with total traversal **≈18.8 s**, a ≥2× improvement over the old maskopt_v2 baseline (`≈296 ms`, 34.5 s total). The 4 k guardrail (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_dense_streamer_gold.jsonl`) stays well under the `<1 s` target (median `≈42 ms`). Bitset streaming remains **off** by default; disable the dense streamer via `--no-residual-dense-scope-streamer` / `COVERTREEX_RESIDUAL_DENSE_SCOPE_STREAMER=0` for legacy comparisons.
 
 ### Chunk & degree-aware heuristics
-- **Goal:** Keep conflict shard counts bounded under `scope_chunk_target` by merging shards based on pair counts, capping degrees, and reusing arenas; directly reduces scatter/queue time in the 30 s build.
-- **Why high leverage:** The current fastest runs still spike when chunked scopes or high-degree nodes appear; these heuristics target exactly those residual hotspots so the 30 s recipe holds across datasets.
+- **Goal:** Keep conflict shard counts bounded under `scope_chunk_target` by merging shards based on pair counts, capping degrees, and reusing arenas; directly reduces scatter/queue time in the <20 s build.
+- **Why high leverage:** The current fastest runs still spike when chunked scopes or high-degree nodes appear; these heuristics target exactly those residual hotspots so the <20 s recipe holds across datasets.
 - **Status:** Not started; see `PARALLEL_COMPRESSED_PLAN.md §4`.
 
 ### Residual guardrails before 32 k
-- **Goal:** Enforce the 4 k Hilbert criteria (≥0.95 whitened coverage, `<1 s` semisort, non-zero gate prunes) before any 32 k reruns so we don’t regress the 30 s preset.
+- **Goal:** Enforce the 4 k Hilbert criteria (≥0.95 whitened coverage, `<1 s` semisort, non-zero gate prunes) before any 32 k reruns so we don’t regress the <20 s preset.
 - **Why high leverage:** A single bad run can silently degrade the fast config; automated guardrails ensure every 32 k benchmark still represents the tuned recipe before we publish new numbers.
 - **Status:** Criteria documented but not automated.  
 - **Refs:** `docs/journal/2025-11.md` (“Phase‑5 Shakedown Guardrails”).
 
 ### Instrumentation & benchmark refresh
-- **Goal:** Capture `grid_*`, `gate1_*`, `prefix_factor`, `arena_bytes`, and automate the 2 048/8 192/32 768 suites so every tweak to the 30 s config is measurable; refresh `docs/CORE_IMPLEMENTATIONS.md` + add an `AUDIT.md` response section.
+- **Goal:** Capture `grid_*`, `gate1_*`, `prefix_factor`, `arena_bytes`, and automate the 2 048/8 192/32 768 suites so every tweak to the <20 s config is measurable; refresh `docs/CORE_IMPLEMENTATIONS.md` + add an `AUDIT.md` response section.
 - **Why high leverage:** Without complete telemetry and scripted benchmarks, we can’t prove whether a change helps or hurts the winning build; finishing this work locks in observability for every future tweak.
 - **Status:** Partially done: batch-order telemetry exists and `tools/residual_scaling_sweep.py` now automates 4 k→64 k runs, but the full telemetry capture + CI wiring remain outstanding.  
 - **Refs:** `PARALLEL_COMPRESSED_PLAN.md §5`.
 
 ### Grid/prefix benchmark refresh & rollout guidance
 - **Goal:** Publish the before/after scatter tables for Hilbert + adaptive prefix + grid at 32 k (Euclidean + residual) and document when to fall back to legacy orders; keeps the winning recipe reproducible.
-- **Why high leverage:** The ~30 s result hinges on this combo; without public artefacts and guidance, the “winning formula” is tribal knowledge and hard to reproduce or compare against.
+- **Why high leverage:** The sub-20 s result hinges on this combo; without public artefacts and guidance, the “winning formula” is tribal knowledge and hard to reproduce or compare against.
 - **Status:** Euclidean rerun done; residual prefix run still timing out without the chunk tweaks above.
 
 ## B. Next-Level Optimisations (after A is healthy)
@@ -52,11 +52,11 @@ This list is reprioritised to focus on the configurations that already deliver ~
 - **Refs:** `PARALLEL_COMPRESSED_PLAN.md §3`.
 
 ### Grid builder: evaluate neighbor-cell micro-MIS
-- **Goal:** Decide whether the grid builder still needs the micro-MIS now that greedy priority filtering delivers the 30 s build; avoids unnecessary work in conflict construction.
+- **Goal:** Decide whether the grid builder still needs the micro-MIS now that greedy priority filtering delivers the <20 s build; avoids unnecessary work in conflict construction.
 - **Status:** Pending (step 3 in `PARALLEL_COMPRESSED_PLAN.md §1`).
 
 ### JSONL schema cleanup & benchmark automation
-- **Goal:** Finalise telemetry naming and script the canonical benchmark runs so improvements to the 30 s config can be validated automatically.
+- **Goal:** Finalise telemetry naming and script the canonical benchmark runs so improvements to the <20 s config can be validated automatically.
 - **Status:** Partially complete; automation not yet wired into CI.  
 - **Refs:** `PARALLEL_COMPRESSED_PLAN.md §5`, `docs/residual_metric_notes.md`.
 

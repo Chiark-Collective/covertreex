@@ -471,6 +471,7 @@ def _collect_residual_scopes_streaming_parallel(
     force_whitened: bool = False,
     bitset_enabled: bool = False,
     dynamic_query_block: bool = False,
+    dense_scope_streamer: bool = False,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -535,7 +536,10 @@ def _collect_residual_scopes_streaming_parallel(
         tile_size = min(tile_size, limit_value)
     tile_size = max(1, tile_size)
     query_block = max(1, min(batch_size, max(4, chunk // 4)))
-    if batch_size <= 32:
+    if dense_scope_streamer:
+        query_block = batch_size
+        dynamic_query_block = False
+    elif batch_size <= 32:
         query_block = 1
     shared_workspace = workspace or ResidualWorkspace(
         max_queries=max(1, query_block),
@@ -566,8 +570,10 @@ def _collect_residual_scopes_streaming_parallel(
     budget_applied = np.zeros(batch_size, dtype=bool)
     budget_early_flags = np.zeros(batch_size, dtype=np.uint8)
 
+    use_dynamic_blocks = dynamic_query_block
+
     def _block_ranges():
-        if not dynamic_query_block:
+        if not use_dynamic_blocks:
             for start in range(0, batch_size, query_block):
                 yield start, min(batch_size, start + query_block)
             return
@@ -1313,6 +1319,7 @@ def _collect_residual(
     )
     bitset_enabled = bool(getattr(runtime, "residual_scope_bitset", False))
     dynamic_query_block = bool(getattr(runtime, "residual_dynamic_query_block", False))
+    dense_scope_streamer = bool(getattr(runtime, "residual_dense_scope_streamer", False))
     engine_label = "residual_serial" if gate_active else "residual_parallel"
     (
         scope_indptr_np,
@@ -1350,6 +1357,7 @@ def _collect_residual(
         force_whitened=force_whitened_stream,
         bitset_enabled=bitset_enabled,
         dynamic_query_block=dynamic_query_block,
+        dense_scope_streamer=dense_scope_streamer,
     )
     semisort_seconds = time.perf_counter() - scope_start
     whitened_pairs_total = int(distance_telemetry.whitened_pairs)

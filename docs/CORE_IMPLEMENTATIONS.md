@@ -45,14 +45,37 @@ These files include the runtime configuration snapshot (`runtime_*` keys) so you
 |-----------------------------------|----------------|----------------|----------|----------------------|----------------|-------------------|-------------|--------------------|---------------|
 | 8 192 / 1 024 / 16                | 4.15           | 0.018          | 57 660   | 33.65               | 5 327         | 0.75              | 285         | 14.14              | 122           |
 | 32 768 / 1 024 / 8 (Euclidean)    | 16.75          | 0.039          | 25 973   | —                   | —             | 3.10              | 65.1        | —                  | —             |
-| 32 768 / 1 024 / 8 (Residual, dense)** | 257          | 0.027          | 37 600   | —                   | —             | 2.51              | 91.6        | —                  | —             |
+| 32 768 / 1 024 / 8 (Residual, dense)** | 21.18         | 0.026          | 38 952   | —                   | —             | 2.51              | 91.6        | —                  | —             |
 | 32 768 / 1 024 / 8 (Residual, sparse streamer)** | 493          | 0.027          | 37 600   | —                   | —             | 2.51              | 91.6        | —                  | —             |
 
 _*GPBoost remains Euclidean-only; the baseline numbers in the residual row are provided for throughput context only._
 
-_**Hilbert batches, diagnostics on, `COVERTREEX_SCOPE_CHUNK_TARGET=0` (dense) or 8 192 (sparse), Numba scope streamer enabled. Logs: `pcct-20251110-105043-101bb9`, `pcct-20251110-105526-68dddf`._
+_**Hilbert batches, diagnostics on, `COVERTREEX_SCOPE_CHUNK_TARGET=0` (dense) or 8 192 (sparse), Numba scope streamer enabled. Logs: `pcct-20251114-105500-6dc4f6` (dense streamer) and `pcct-20251110-105526-68dddf` (sparse streamer)._
 
-**Residual build status (2025-11-10).**
+**Residual build status (2025-11-17).**
+- Dense residual (gate off, dense scope streamer on) is the current gold baseline: `pcct-20251114-105500-6dc4f6` reports **≈21.2 s build**, dominated `traversal_semisort_ms≈62 ms` (p90 ≈76 ms), and `pcct | throughput=38,952 q/s`. Log: `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl`.
+- The 4 k guardrail (`pcct-20251114-105559-b7f965`, log `artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_dense_streamer_gold.jsonl`) clocks `traversal_semisort_ms≈42 ms`, keeping the `<1 s` criterion intact before any 32 k reruns.
+- Sparse residual + streamer + cap remains scan-cap dominated (historical `pcct-20251110-105526-68dddf` sits at ≈493 s); rerunning it with the dense scope streamer enabled is on the backlog.
+
+**Recommended CLI defaults (dense streamer, 2025-11-17).** Use the command below for the fastest audited residual numbers; it mirrors the log above and explicitly keeps the dense scope streamer enabled. Pass `--no-residual-dense-scope-streamer` if you need to reproduce the historical maskopt_v2 behaviour.
+
+```
+COVERTREEX_BACKEND=numpy \
+COVERTREEX_ENABLE_NUMBA=1 \
+COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0 \
+python -m cli.queries \
+  --metric residual \
+  --dimension 8 --tree-points 32768 \
+  --batch-size 512 --queries 1024 --k 8 \
+  --seed 42 --baseline none \
+  --residual-dense-scope-streamer \
+  --log-file artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl
+```
+
+**Gold-standard residual benchmark (dense streamer).** When publishing new numbers or triaging regressions, start from the `pcct-20251114-105500-6dc4f6` artefact pair (`artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl`, `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl`). Diagnostics remain on by default so telemetry stays comparable; disable them explicitly if you need apples-to-apples with the historical diag0 logs.
+
+**Historical residual build status (2025-11-10).**
 - Dense residual (gate off) remains the wall-clock leader: `pcct-20251110-105043-101bb9` reports ≈257 s build, `traversal_ms≈1.23 s`.
 - Sparse residual + streamer + cap trims the old 581 s baseline down to ≈493 s but is still scan-cap dominated (`traversal_scope_chunk_saturated` on 48/64 batches).
 - Sparse residual + profile capture `pcct-20251110-112936-0d2a25` mirrors the streamer run and feeds the refreshed lookup at `docs/data/residual_gate_profile_32768_caps.json`.
@@ -62,7 +85,7 @@ _**Hilbert batches, diagnostics on, `COVERTREEX_SCOPE_CHUNK_TARGET=0` (dense) or
 - Phase 5 deterministic selection (2025‑11‑12) swapped all residual/Euclidean scope builders to `select_topk_by_level` (argpartition + stable ties) and moved the limit logic into the Numba CSR path, so `traversal_semisort_ms` is expected to approach zero once the telemetry sweep is re-run. Because the latest Hilbert 32 k replay still exceeded an hour wall-clock, every residual audit now starts with a 4 k-point dry run (same flags, smaller `--tree-points`) and only scales to 32 k after the small run reports ≥95 % whitened coverage, `<1 s` median semisort, and `conflict_pairwise_reused=1` across batches.
 - Per-run telemetry is summarised with `python tools/export_benchmark_diagnostics.py --output artifacts/benchmarks/residual_budget_diagnostics.csv artifacts/benchmarks/artifacts/benchmarks/residual_{dense,sparse}_budget_4096.jsonl`: the dense control (no chunk target) records a **76.49 s** build while the budgeted sparse streamer (chunk target 4 096, schedule `1 024/2 048/4 096`) lands at **103.37 s** with budget amplification `3.73×` and ≥93.7 % pairwise reuse after the warm-up batch. Point perf reviews at that CSV instead of console output.
 
-**Recommended CLI defaults for “historical best” residual timings.** Use the dense traversal recipe from `pcct-20251110-105043-101bb9` whenever you need the fastest audited numbers or a known-good baseline. The command below leaves the gate off, keeps scopes unclamped, and mirrors every setting from the 257 s / 0.027 s build:
+**Historical CLI defaults (pre-dense-streamer, 2025-11-10).** Use the dense traversal recipe from `pcct-20251110-105043-101bb9` whenever you need the fastest audited numbers from the maskopt_v2 era. The command below leaves the gate off, keeps scopes unclamped, and mirrors every setting from the 257 s / 0.027 s build:
 
 ```
 COVERTREEX_BACKEND=numpy \
@@ -83,7 +106,7 @@ Treat this command as the default when publishing numbers or triaging regression
 
 The 32 768-point run currently logs PCCT and the GPBoost baseline; sequential/external baselines are still pending optimisations to keep runtime manageable at that scale.
 
-### Gold-standard residual benchmark (default path)
+### Historical gold-standard residual benchmark (default path)
 
 Fresh artefacts: `pcct-20251110-105043-101bb9` (dense) and `pcct-20251110-105526-68dddf` (sparse streamer + cap) capture the residual rows above with `COVERTREEX_BATCH_ORDER=hilbert`, `COVERTREEX_PREFIX_SCHEDULE=doubling`, `COVERTREEX_CONFLICT_GRAPH_IMPL=grid`, diagnostics on, and Numba enabled. Dense traversal leaves `COVERTREEX_SCOPE_CHUNK_TARGET=0`; sparse traversal sets it to 8 192.
 

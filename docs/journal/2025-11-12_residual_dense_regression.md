@@ -197,7 +197,7 @@ Until we restore the dense streamer’s fast path, Phase 5 remains blocked bec
 - Added optional runtime/CLI switches so we can iterate on more aggressive dedupe without rewriting the default dense path:
   - `--residual-scope-bitset` (`COVERTREEX_RESIDUAL_SCOPE_BITSET=1`) routes `_append_scope_positions` through a packed uint64 bitset before falling back to the boolean mask. This avoids repeated NumPy slicing when we revisit the 32 k bisect.
   - `--residual-dynamic-query-block` (`COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK=1`) lets `_collect_residual_scopes_streaming_parallel` shrink its query blocks once only a handful of survivors remain active, instead of always issuing 128-query kernel tiles.
-- Both toggles default to “off” so the ≤30 s baseline from `residual_dense_32768_maskopt_v2.jsonl` stays reproducible. The new knobs are purely experimental for now; we’ll keep them disabled until profiling shows a meaningful win, but they’re available to anyone investigating the remaining traversal headroom.
+- Both toggles defaulted to “off” at landing time so the ≤30 s baseline from `residual_dense_32768_maskopt_v2.jsonl` stayed reproducible. (See the 2025‑11‑17 updates below for the new default-on policy.)
 
 #### 2025-11-17 Dynamic Query Block Scaling
 
@@ -207,6 +207,49 @@ The `_block_ranges` iterator now advances correctly, so the dynamic-block stream
 - **4 k guardrail (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_maskopt_v2_dynamic_fix.jsonl`):** the same knob regresses to `traversal_semisort_ms` median **≈333 ms**, because the extra block bookkeeping dominates once only a handful of dominated batches remain.
 
 **Policy:** keep `residual_dynamic_query_block` **on by default** (best for the realistic 32 k suite) and document that small-shakeout runs can disable it explicitly via `--residual-dynamic-query-block 0` / `COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK=0`.
+
+#### 2025-11-17 Dense single-pass scope streamer
+
+- Introduced `residual_dense_scope_streamer` (CLI `--residual-dense-scope-streamer`, env `COVERTREEX_RESIDUAL_DENSE_SCOPE_STREAMER`) which forces `_collect_residual_scopes_streaming_parallel` to process each 512-point chunk once per batch by running with a single query block. The knob defaults to **on**; use `--no-residual-dense-scope-streamer` to recover the historical multi-pass telemetry.
+- 32 k Hilbert run:
+
+  ```bash
+  COVERTREEX_BACKEND=numpy \
+  COVERTREEX_ENABLE_NUMBA=1 \
+  COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+  COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0 \
+  python -m cli.queries \
+    --metric residual \
+    --dimension 8 --tree-points 32768 \
+    --batch-size 512 --queries 1024 --k 8 \
+    --seed 42 --baseline none \
+    --residual-dense-scope-streamer \
+    --log-file artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl
+  ```
+
+  - Dominated batches: 63; `traversal_semisort_ms` median **≈62 ms** (p90 **≈76 ms**), down from **296 ms** on the maskopt_v2 baseline (`artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_maskopt_v2_baseline.jsonl`).
+  - Total dominated traversal: **≈18.8 s**, vs **≈34.5 s** previously; CLI summary reports `pcct | build=21.1754 s` and `latency=0.0257 ms`.
+  - `traversal_kernel_provider_ms` median **≈20 ms** (p90 **≈38 ms**); kernel calls drop ~35 % because each chunk is scanned once instead of once per query block.
+
+- 4 k guardrail run:
+
+  ```bash
+  COVERTREEX_BACKEND=numpy \
+  COVERTREEX_ENABLE_NUMBA=1 \
+  COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+  COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0 \
+  python -m cli.queries \
+    --metric residual \
+    --dimension 8 --tree-points 4096 \
+    --batch-size 512 --queries 1024 --k 8 \
+    --seed 42 --baseline none \
+    --residual-dense-scope-streamer \
+    --log-file artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_dense_streamer_gold.jsonl
+  ```
+
+  - Dominated batches: 7; `traversal_semisort_ms` median **≈42 ms**, well under the `<1 s` guardrail.
+
+- Telemetry note: `traversal_scope_chunk_scans` and `..._points` now report **512** scans and **16 384** points because every chunk is streamed exactly once; use `traversal_semisort_ms`, total traversal, and kernel medians to compare runs across streamer versions.
 
 #### 2025-11-17 Higher-scale check-ins (48 k / 64 k)
 
@@ -269,13 +312,13 @@ All logs land under `artifacts/benchmarks/<log-prefix>_<size>.jsonl`, so we can 
     --log-file artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_maskopt_v2.jsonl
   ```
 
-- Snapshot (`run_id=pcct-20251114-082601-d2e6df`):
+- Historical snapshot (`run_id=pcct-20251114-082601-d2e6df`, pre-dense-streamer):
   - 63 dominated batches; `traversal_semisort_ms` median **0.260 s**, p90 **0.282 s**, max **0.337 s**.
   - `traversal_scope_chunk_points` median **4 096** (p90/max **12 288**), i.e., each query now inspects ≤8 tiles once the survivor ladder tightens.
   - `traversal_kernel_provider_ms` median **27.8 ms** (p90 **49.7 ms**); total traversal time across all dominated batches **≈29.8 s**, giving a new ≤30 s dense baseline without touching Gate‑1.
   - Log: `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_maskopt_v2.jsonl`.
 
-- This run supplant `pcct-20251113-170959-73d79a` as the fastest dense preset. Next steps are to script the same command into the CLI benchmark presets and refresh the public tables once we repeatability-test the 32 k sweep under CI.
+- This run supplanted `pcct-20251113-170959-73d79a` as the fastest dense preset at the time; see the 2025‑11‑17 dense streamer notes for the new <20 s baseline. Next steps are to script the same command into the CLI benchmark presets and refresh the public tables once we repeatability-test the 32 k sweep under CI.
 
 ### Follow-up Mitigations (2025-11-12 evening)
 
