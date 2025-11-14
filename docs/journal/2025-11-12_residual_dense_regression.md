@@ -417,7 +417,27 @@ We re-ran both the 4 k “shakeout” and the full 32 k Hilbert sweep with t
     --log-file artifacts/benchmarks/residual_dense_32768_tiled.jsonl
   ```
 
-  - 64 dominated batches, `traversal_semisort_ms` median **0.253 s** (p90 0.267 s, max 0.299 s) with scopes capped at **8 192** points and **64** survivors by construction.
+- 64 dominated batches, `traversal_semisort_ms` median **0.253 s** (p90 0.267 s, max 0.299 s) with scopes capped at **8 192** points and **64** survivors by construction.
+
+### 2025-11-14 Bitset streamer promotion (evening)
+
+- After porting `_append_scope_positions` and the masked append helper to Numba, we promoted the residual bitset path to a default feature flag and captured a new “gold” run with diagnostics on.
+- Command (dense preset, bitset ON):
+
+  ```bash
+  COVERTREEX_BACKEND=numpy \
+  COVERTREEX_ENABLE_NUMBA=1 \
+  COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+  COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0 \
+  python -m cli.queries \
+    --metric residual --dimension 8 --tree-points 32768 \
+    --batch-size 512 --queries 1024 --k 8 --seed 42 \
+    --baseline none --residual-dense-scope-streamer \
+    --residual-scope-bitset \
+    --log-file artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_bitset.jsonl
+  ```
+
+- Artefact `pcct-20251114-141549-e500d8` reports `build≈20.6 s`, `traversal_semisort_ms` median **46.9 ms** (p90 **66.3 ms**), total traversal **≈16.9 s**, and `traversal_scope_chunk_points` bounded at **1.03 M** (64 survivors/query). Cached pairwise reuse stayed at 64/64 batches and no budget escalations fired. This run supersedes `…dense_streamer_gold.jsonl` as the documented baseline going forward.
   - Total traversal time **≈34.1 s**, more than 6× faster than the guardrails-off rerun (2–3 s semisort pulses, >2 h wall, see earlier regression note).
 
 > **Default rollout:** `cli/queries` now passes `--residual-stream-tile 64` by default (and the runtime mirrors that when `COVERTREEX_RESIDUAL_STREAM_TILE` is unset), so every dense residual run automatically inherits the tiling cap unless operators explicitly override it. Keep the member cap enabled unless running an explicit “guardrails off” investigation; both knobs are surfaced in JSONL telemetry for auditing.

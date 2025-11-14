@@ -435,7 +435,7 @@ class RuntimeConfig:
         )
         residual_scope_bitset = _bool_from_env(
             os.getenv("COVERTREEX_RESIDUAL_SCOPE_BITSET"),
-            default=False,
+            default=residual_metric,
         )
         residual_dynamic_query_block = _bool_from_env(
             os.getenv("COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK"),

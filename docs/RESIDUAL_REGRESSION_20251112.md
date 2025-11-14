@@ -2,12 +2,12 @@
 
 The full investigative log now lives under [`docs/journal/2025-11-12_residual_dense_regression.md`](journal/2025-11-12_residual_dense_regression.md) so this document can stay focused on the current status and entry points back into the history.
 
-## Current Snapshot — 2025-11-17
+-## Current Snapshot — 2025-11-17
 
-- Dense residual builds hit **≈21.2 s wall / 18.8 s dominated traversal** on the dense-streamer preset at HEAD (`artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl`, `run_id=pcct-20251114-105500-6dc4f6`). Dominated batches sit at `traversal_semisort_ms≈62 ms` (p90 ≈76 ms).
+- Dense residual builds now land at **≈20.6 s wall / 16.9 s dominated traversal** when the bitset scope path is enabled by default (`artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_bitset.jsonl`, `run_id=pcct-20251114-141549-e500d8`). Dominated batches sit at `traversal_semisort_ms≈47 ms` (p90 ≈66 ms).
 - The 4 k guardrail run (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_dense_streamer_gold.jsonl`, `run_id=pcct-20251114-105559-b7f965`) stays well under the `<1 s` threshold with `traversal_semisort_ms≈42 ms`.
 - Dynamic query blocks **and** the dense scope streamer are enabled by default; disable via `--residual-dynamic-query-block 0` or `--no-residual-dense-scope-streamer` if you need to reproduce the historical multi-pass telemetry.
-- The dense streamer now ships with a masked-scope-append fast path (`--residual-masked-scope-append` / `COVERTREEX_RESIDUAL_MASKED_SCOPE_APPEND=1`, default **on**) that keeps both cache-prefetch hits and tile inserts inside the Numba helper. Disabling the flag falls back to the previous Python path for bisects.
+- Bitset dedupe is now part of the default preset (`--residual-scope-bitset` / `COVERTREEX_RESIDUAL_SCOPE_BITSET=1`); the new Numba helper keeps both cache-prefetch hits and scope inserts inside compiled code. Disable the flag for regressions that need the old Python set semantics.
 - Latest scaling checkpoints:
   - 32 k: `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl` (median `traversal_semisort_ms≈62 ms`, total traversal ≈18.8 s, build summary `pcct | build=21.1754 s`).
   - 48 k: `artifacts/benchmarks/residual_dense_49152_maskopt_v2_default.jsonl` (median `≈244 ms`, traversal ≈53 s) — rerun pending with the dense streamer.
@@ -20,12 +20,13 @@ COVERTREEX_BACKEND=numpy \
 COVERTREEX_ENABLE_NUMBA=1 \
 COVERTREEX_SCOPE_CHUNK_TARGET=0 \
 COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0 \
-python -m cli.queries \
-  --metric residual \
-  --dimension 8 --tree-points 32768 \
-  --batch-size 512 --queries 1024 --k 8 \
-  --seed 42 --baseline none \
-  --log-file artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl
+    python -m cli.queries \
+      --metric residual \
+      --dimension 8 --tree-points 32768 \
+      --batch-size 512 --queries 1024 --k 8 \
+      --seed 42 --baseline none \
+      --residual-scope-bitset \
+      --log-file artifacts/benchmarks/residual_dense_32768_dense_streamer_bitset.jsonl
 ```
 
 - Prefix schedule defaults to `doubling` for residual metrics, and both `residual_dynamic_query_block` plus the dense streamer are on by default.

@@ -345,6 +345,38 @@ def test_parallel_streaming_masked_append_toggle(monkeypatch: pytest.MonkeyPatch
     assert calls["masked"] == 0
 
 
+def test_parallel_streaming_masked_append_supports_bitset(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _build_host_backend(chunk_size=4)
+    tree = _dummy_tree(num_points=3)
+    workspace = ResidualWorkspace(max_queries=1, max_chunk=backend.chunk_size)
+    telemetry = ResidualDistanceTelemetry()
+
+    calls = {"masked": 0}
+
+    def fake_masked(**kwargs):  # type: ignore[no-untyped-def]
+        calls["masked"] = calls.get("masked", 0) + 1
+        return kwargs.get("scope_count", 0), 0, False, 0, 0.0
+
+    monkeypatch.setattr(residual_strategy, "_append_scope_positions_masked", fake_masked)
+
+    residual_strategy._collect_residual_scopes_streaming_parallel(
+        tree=tree,
+        host_backend=backend,
+        query_indices=np.array([0], dtype=np.int64),
+        tree_indices=np.array([0, 1, 2], dtype=np.int64),
+        parent_positions=np.array([0], dtype=np.int64),
+        radii=np.array([1.0], dtype=np.float64),
+        scope_limit=2,
+        stream_tile=1,
+        workspace=workspace,
+        telemetry=telemetry,
+        masked_scope_append=True,
+        bitset_enabled=True,
+    )
+
+    assert calls["masked"] > 0
+
+
 def test_compute_dynamic_tile_stride_delegates_to_numba(monkeypatch: pytest.MonkeyPatch) -> None:
     called: dict[str, int] = {}
 
@@ -451,3 +483,83 @@ def test_append_scope_positions_masked_prefers_numba_helper(monkeypatch: pytest.
     assert result[0] == 3
     assert result[1] == 1
     assert result[2] is True
+
+
+def test_append_scope_positions_bitset_uses_numba_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, int] = {}
+
+    def fake_bitset(
+        flags: np.ndarray,
+        bitset_row: np.ndarray,
+        positions: np.ndarray,
+        count: int,
+        limit: int,
+        *,
+        respect_limit: bool = True,
+    ) -> tuple[int, int, bool, int]:
+        called["bitset"] = called.get("bitset", 0) + 1
+        size = int(np.asarray(positions, dtype=np.int64).size)
+        new_count = int(count) + size
+        return new_count, 0, False, size
+
+    monkeypatch.setattr(residual_strategy, "residual_scope_append_bitset", fake_bitset)
+
+    flags_row = np.zeros(64, dtype=np.uint8)
+    bitset_row = np.zeros(1, dtype=np.uint64)
+    result = residual_strategy._append_scope_positions(
+        flags_row,
+        bitset_row,
+        np.array([1, 2], dtype=np.int64),
+        limit_value=8,
+        scope_count=0,
+    )
+
+    assert called.get("bitset") == 1
+    assert result == (2, 0, False, 2)
+
+
+def test_append_scope_positions_masked_prefers_bitset_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, int] = {"bitset": 0, "dense": 0}
+
+    def fake_masked_bitset(
+        flags: np.ndarray,
+        bitset_row: np.ndarray,
+        mask_row: np.ndarray,
+        distances_row: np.ndarray,
+        tile_positions: np.ndarray,
+        count: int,
+        limit: int,
+        *,
+        respect_limit: bool = True,
+    ) -> tuple[int, int, bool, int, float]:
+        called["bitset"] += 1
+        return int(count) + 1, 0, False, 1, 0.5
+
+    def fake_masked_dense(*args, **kwargs):  # type: ignore[no-untyped-def]
+        called["dense"] += 1
+        return kwargs.get("scope_count", 0), 0, False, 0, 0.0
+
+    monkeypatch.setattr(residual_strategy, "residual_scope_append_masked_bitset", fake_masked_bitset)
+    monkeypatch.setattr(residual_strategy, "residual_scope_append_masked", fake_masked_dense)
+
+    flags_row = np.zeros(64, dtype=np.uint8)
+    bitset_row = np.zeros(1, dtype=np.uint64)
+    mask_row = np.array([1, 0, 1], dtype=np.uint8)
+    distances_row = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+    tile_positions = np.array([0, 1, 2], dtype=np.int64)
+
+    result = residual_strategy._append_scope_positions_masked(
+        flags_row=flags_row,
+        bitset_row=bitset_row,
+        mask_row=mask_row,
+        distances_row=distances_row,
+        tile_positions=tile_positions,
+        limit_value=0,
+        scope_count=0,
+        buffer_row=None,
+    )
+
+    assert called["bitset"] == 1
+    assert called["dense"] == 0
+    assert result[0] == 1
+    assert result[3] == 1

@@ -22,7 +22,9 @@ from covertreex.metrics.residual.scope_caps import get_scope_cap_table
 
 from ..._residual_scope_numba import (
     residual_scope_append,
+    residual_scope_append_bitset,
     residual_scope_append_masked,
+    residual_scope_append_masked_bitset,
     residual_scope_reset,
     residual_scope_dynamic_tile_stride,
     residual_scope_update_budget_state,
@@ -569,7 +571,13 @@ def _collect_residual_scopes_streaming_parallel(
         if buffer_capacity > 0:
             scope_buffers = np.empty((batch_size, buffer_capacity), dtype=np.int64)
 
-    use_masked_append = bool(masked_scope_append and scope_buffers is not None and not bitset_enabled)
+    use_masked_append = bool(
+        masked_scope_append
+        and (
+            (scope_buffers is not None)
+            or (bitset_enabled and scope_bitsets is not None)
+        )
+    )
 
     scan_cap_value = scan_cap if scan_cap and scan_cap > 0 else None
 
@@ -671,7 +679,7 @@ def _collect_residual_scopes_streaming_parallel(
                             obs_val,
                         ) = _append_scope_positions_masked(
                             flags_row=flags_row,
-                            bitset_row=None,
+                            bitset_row=bitset_row if bitset_enabled else None,
                             mask_row=cache_mask,
                             distances_row=cache_distances,
                             tile_positions=valid_cached,
@@ -797,6 +805,7 @@ def _collect_residual_scopes_streaming_parallel(
                     mask_row = mask_block[local_idx]
                     distances_row = dist_block[local_idx]
                     if use_masked_append:
+                        buffer_row = scope_buffers[qi] if scope_buffers is not None else None
                         (
                             scope_counts[qi],
                             dedupe_delta,
@@ -805,13 +814,13 @@ def _collect_residual_scopes_streaming_parallel(
                             observed_val,
                         ) = _append_scope_positions_masked(
                             flags_row=flags_matrix[qi],
-                            bitset_row=None,
+                            bitset_row=scope_bitsets[qi] if bitset_enabled else None,
                             mask_row=mask_row,
                             distances_row=distances_row,
                             tile_positions=tile_positions,
                             limit_value=limit_value,
                             scope_count=int(scope_counts[qi]),
-                            buffer_row=scope_buffers[qi],
+                            buffer_row=buffer_row,
                         )
                     else:
                         include_idx = np.nonzero(mask_row)[0]
@@ -1165,10 +1174,26 @@ def _append_scope_positions_masked(
     scope_count: int,
     buffer_row: np.ndarray | None = None,
 ) -> tuple[int, int, bool, int, float]:
-    mask_arr = np.asarray(mask_row)
+    mask_arr = np.asarray(mask_row, dtype=np.uint8)
     if mask_arr.size == 0 or not np.any(mask_arr):
         return scope_count, 0, False, 0, 0.0
-    if bitset_row is None and buffer_row is not None:
+    if bitset_row is not None:
+        mask_u8 = np.ascontiguousarray(mask_arr, dtype=np.uint8)
+        distances_arr = np.ascontiguousarray(distances_row, dtype=np.float64)
+        tile_arr = np.ascontiguousarray(tile_positions, dtype=np.int64)
+        respect_limit = bool(limit_value and limit_value > 0)
+        limit_arg = int(limit_value) if respect_limit else 0
+        return residual_scope_append_masked_bitset(
+            flags_row,
+            bitset_row,
+            mask_u8,
+            distances_arr,
+            tile_arr,
+            int(scope_count),
+            limit_arg,
+            respect_limit=respect_limit,
+        )
+    if buffer_row is not None:
         mask_u8 = np.ascontiguousarray(mask_arr, dtype=np.uint8)
         distances_arr = np.ascontiguousarray(distances_row, dtype=np.float64)
         tile_arr = np.ascontiguousarray(tile_positions, dtype=np.int64)
@@ -1278,48 +1303,19 @@ def _append_scope_positions_bitset(
     limit_value: int,
     scope_count: int,
 ) -> tuple[int, int, bool, int]:
-    max_index = flags_row.shape[0]
     positions_arr = np.asarray(positions, dtype=np.int64)
     if positions_arr.size == 0:
         return scope_count, 0, False, 0
-    valid_mask = (positions_arr >= 0) & (positions_arr < max_index)
-    if not np.any(valid_mask):
-        return scope_count, 0, False, 0
-    positions_arr = positions_arr[valid_mask]
-    if positions_arr.size == 0:
-        return scope_count, 0, False, 0
-
-    word_idx = positions_arr >> 6
-    bit_mask = np.uint64(1) << np.uint64(positions_arr & 63)
-    existing_mask = (bitset_row[word_idx] & bit_mask) != 0
-    dedupe = int(np.count_nonzero(existing_mask))
-    new_positions = positions_arr[~existing_mask]
-    new_word_idx = word_idx[~existing_mask]
-    new_bit_mask = bit_mask[~existing_mask]
-
-    if new_positions.size == 0:
-        return scope_count, dedupe, False, 0
-
-    trimmed = False
-    max_allowed = limit_value if limit_value > 0 else None
-    if max_allowed is not None:
-        remaining = max_allowed - scope_count
-        if remaining <= 0:
-            return scope_count, dedupe, True, 0
-        if new_positions.size > remaining:
-            trimmed = True
-            new_positions = new_positions[:remaining]
-            new_word_idx = new_word_idx[:remaining]
-            new_bit_mask = new_bit_mask[:remaining]
-
-    np.bitwise_or.at(bitset_row, new_word_idx.astype(np.intp, copy=False), new_bit_mask)
-    flags_row[new_positions] = 1
-
-    scope_count += int(new_positions.size)
-    if max_allowed is not None and scope_count >= max_allowed:
-        trimmed = True
-
-    return scope_count, dedupe, trimmed, int(new_positions.size)
+    respect_limit = bool(limit_value and limit_value > 0)
+    limit_arg = int(limit_value) if respect_limit else 0
+    return residual_scope_append_bitset(
+        flags_row,
+        bitset_row,
+        positions_arr,
+        int(scope_count),
+        limit_arg,
+        respect_limit=respect_limit,
+    )
 
 
 def _compute_dynamic_tile_stride(

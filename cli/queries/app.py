@@ -415,7 +415,7 @@ def cli(
         Optional[bool],
         typer.Option(
             "--residual-scope-bitset/--no-residual-scope-bitset",
-            help="Prototype bitset dedupe for dense residual scopes (default off).",
+            help="Bitset dedupe for dense residual scopes (default on).",
             rich_help_panel=_RESIDUAL_PANEL,
         ),
     ] = None,

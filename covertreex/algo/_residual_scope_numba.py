@@ -95,6 +95,82 @@ if NUMBA_RESIDUAL_SCOPE_AVAILABLE:
         return current, dedupe, saturated, added, max_distance
 
     @njit(cache=True)
+    def _append_positions_bitset_impl(
+        flags: np.ndarray,
+        bitset_row: np.ndarray,
+        positions: np.ndarray,
+        count: int,
+        limit: int,
+        respect_limit: bool,
+    ) -> tuple[int, int, int, int]:
+        dedupe = 0
+        saturated = 0
+        added = 0
+        num_flags = flags.shape[0]
+        limit_enabled = respect_limit and limit > 0
+
+        for idx in range(positions.shape[0]):
+            pos = int(positions[idx])
+            if pos < 0 or pos >= num_flags:
+                continue
+            word = pos >> 6
+            bit_mask = np.uint64(1) << np.uint64(pos & 63)
+            if (bitset_row[word] & bit_mask) != 0:
+                dedupe += 1
+                continue
+            bitset_row[word] |= bit_mask
+            flags[pos] = 1
+            count += 1
+            added += 1
+            if limit_enabled and count >= limit:
+                saturated = 1
+                break
+
+        return count, dedupe, saturated, added
+
+    @njit(cache=True)
+    def _append_positions_masked_bitset_impl(
+        flags: np.ndarray,
+        bitset_row: np.ndarray,
+        mask_row: np.ndarray,
+        distances_row: np.ndarray,
+        tile_positions: np.ndarray,
+        count: int,
+        limit: int,
+        respect_limit: bool,
+    ) -> tuple[int, int, int, int, float]:
+        dedupe = 0
+        saturated = 0
+        added = 0
+        max_distance = 0.0
+        num_flags = flags.shape[0]
+        limit_enabled = respect_limit and limit > 0
+
+        for idx in range(mask_row.shape[0]):
+            if mask_row[idx] == 0:
+                continue
+            pos = int(tile_positions[idx])
+            if pos < 0 or pos >= num_flags:
+                continue
+            word = pos >> 6
+            bit_mask = np.uint64(1) << np.uint64(pos & 63)
+            if (bitset_row[word] & bit_mask) != 0:
+                dedupe += 1
+                continue
+            bitset_row[word] |= bit_mask
+            flags[pos] = 1
+            count += 1
+            added += 1
+            dist_val = float(distances_row[idx])
+            if dist_val > max_distance:
+                max_distance = dist_val
+            if limit_enabled and count >= limit:
+                saturated = 1
+                break
+
+        return count, dedupe, saturated, added, max_distance
+
+    @njit(cache=True)
     def _reset_flags_impl(flags: np.ndarray, buffer: np.ndarray, count: int) -> None:
         num_flags = flags.shape[0]
         total = buffer.shape[0]
@@ -275,6 +351,73 @@ else:  # pragma: no cover - executed when numba missing
 
         return current, dedupe, saturated, added, max_distance
 
+    def _append_positions_bitset_impl(flags, bitset_row, positions, count, limit, respect_limit):
+        dedupe = 0
+        saturated = 0
+        added = 0
+        num_flags = flags.shape[0]
+        limit_enabled = respect_limit and limit > 0
+
+        for pos in positions:
+            pos_int = int(pos)
+            if pos_int < 0 or pos_int >= num_flags:
+                continue
+            word = pos_int >> 6
+            bit_mask = np.uint64(1) << np.uint64(pos_int & 63)
+            if (bitset_row[word] & bit_mask) != 0:
+                dedupe += 1
+                continue
+            bitset_row[word] |= bit_mask
+            flags[pos_int] = 1
+            count += 1
+            added += 1
+            if limit_enabled and count >= limit:
+                saturated = 1
+                break
+
+        return count, dedupe, saturated, added
+
+    def _append_positions_masked_bitset_impl(
+        flags,
+        bitset_row,
+        mask_row,
+        distances_row,
+        tile_positions,
+        count,
+        limit,
+        respect_limit,
+    ):
+        dedupe = 0
+        saturated = 0
+        added = 0
+        max_distance = 0.0
+        num_flags = flags.shape[0]
+        limit_enabled = respect_limit and limit > 0
+
+        for idx, mask_val in enumerate(mask_row):
+            if mask_val == 0:
+                continue
+            pos = int(tile_positions[idx])
+            if pos < 0 or pos >= num_flags:
+                continue
+            word = pos >> 6
+            bit_mask = np.uint64(1) << np.uint64(pos & 63)
+            if (bitset_row[word] & bit_mask) != 0:
+                dedupe += 1
+                continue
+            bitset_row[word] |= bit_mask
+            flags[pos] = 1
+            count += 1
+            added += 1
+            dist_val = float(distances_row[idx])
+            if dist_val > max_distance:
+                max_distance = dist_val
+            if limit_enabled and count >= limit:
+                saturated = 1
+                break
+
+        return count, dedupe, saturated, added, max_distance
+
     def _reset_flags_impl(flags, buffer, count):
         num_flags = flags.shape[0]
         total = buffer.shape[0]
@@ -401,6 +544,28 @@ def residual_scope_append(
     return int(new_count), int(dedupe_hits), bool(saturated)
 
 
+def residual_scope_append_bitset(
+    flags: np.ndarray,
+    bitset_row: np.ndarray,
+    positions: np.ndarray,
+    count: int,
+    limit: int,
+    *,
+    respect_limit: bool = True,
+) -> tuple[int, int, bool, int]:
+    """Append scope members using the bitset representation."""
+
+    new_count, dedupe_hits, saturated, added = _append_positions_bitset_impl(
+        flags,
+        bitset_row,
+        positions,
+        int(count),
+        int(limit),
+        bool(respect_limit),
+    )
+    return int(new_count), int(dedupe_hits), bool(saturated), int(added)
+
+
 def residual_scope_reset(flags: np.ndarray, buffer: np.ndarray, count: int) -> None:
     """Clear flag entries for the members stored in the buffer."""
 
@@ -426,6 +591,38 @@ def residual_scope_append_masked(
         distances_row,
         tile_positions,
         buffer,
+        int(count),
+        int(limit),
+        bool(respect_limit),
+    )
+    return (
+        int(new_count),
+        int(dedupe_hits),
+        bool(saturated),
+        int(added),
+        float(observed),
+    )
+
+
+def residual_scope_append_masked_bitset(
+    flags: np.ndarray,
+    bitset_row: np.ndarray,
+    mask_row: np.ndarray,
+    distances_row: np.ndarray,
+    tile_positions: np.ndarray,
+    count: int,
+    limit: int,
+    *,
+    respect_limit: bool = True,
+) -> tuple[int, int, bool, int, float]:
+    """Append masked members when scopes are tracked via bitsets."""
+
+    new_count, dedupe_hits, saturated, added, observed = _append_positions_masked_bitset_impl(
+        flags,
+        bitset_row,
+        mask_row,
+        distances_row,
+        tile_positions,
         int(count),
         int(limit),
         bool(respect_limit),
@@ -508,8 +705,10 @@ def residual_scope_update_budget_state(
 __all__ = [
     "NUMBA_RESIDUAL_SCOPE_AVAILABLE",
     "residual_scope_append",
+    "residual_scope_append_bitset",
     "residual_scope_reset",
     "residual_scope_append_masked",
+    "residual_scope_append_masked_bitset",
     "residual_scope_dynamic_tile_stride",
     "residual_scope_update_budget_state",
 ]
