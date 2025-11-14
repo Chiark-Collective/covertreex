@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from typing import Any, Dict
+
 import numpy as np
 import pytest
 
 from covertreex import config as cx_config, reset_residual_metric
 from covertreex.api import PCCT, Runtime
-from covertreex.metrics import build_residual_backend, configure_residual_correlation
+from covertreex.metrics import (
+    build_residual_backend,
+    configure_residual_correlation,
+)
 
 POINTS = np.array([[float(i), float(i) * 0.5] for i in range(10)], dtype=np.float64)
 QUERIES = np.array([[0.1, 0.05], [4.9, 2.45], [8.05, 4.025]], dtype=np.float64)
@@ -34,11 +39,12 @@ def residual_backend_config() -> None:
     reset_residual_metric()
 
 
-def _knn_result(runtime: Runtime) -> tuple[np.ndarray, np.ndarray]:
+def _knn_result(runtime: Runtime, *, queries: np.ndarray | None = None, k: int = K) -> tuple[np.ndarray, np.ndarray]:
+    query_batch = QUERIES if queries is None else np.asarray(queries, dtype=np.float64)
     tree = PCCT(runtime).fit(POINTS, mis_seed=123)
     indices, distances = PCCT(runtime, tree).knn(
-        QUERIES,
-        k=K,
+        query_batch,
+        k=k,
         return_distances=True,
     )
     return np.asarray(indices), np.asarray(distances, dtype=np.float64)
@@ -135,3 +141,61 @@ def test_knn_consistency_residual_scope_member_limit() -> None:
     idx_b, dist_b = _knn_result(uncapped)
 
     _assert_knn_equal(idx_a, dist_a, idx_b, dist_b)
+
+
+def _residual_runtime(**overrides: Any) -> Runtime:
+    base_kwargs: Dict[str, Any] = {
+        "backend": "numpy",
+        "precision": "float64",
+        "metric": "residual_correlation",
+        "enable_numba": True,
+        "enable_sparse_traversal": False,
+        "residual_dense_scope_streamer": True,
+        "residual_scope_bitset": True,
+    }
+    base_kwargs.update(overrides)
+    return Runtime(**base_kwargs)
+
+
+@pytest.mark.usefixtures("residual_backend_config")
+def test_knn_consistency_residual_bitset_toggle() -> None:
+    runtime_on = _residual_runtime(residual_scope_bitset=True)
+    runtime_off = runtime_on.with_updates(residual_scope_bitset=False)
+
+    idx_on, dist_on = _knn_result(runtime_on)
+    idx_off, dist_off = _knn_result(runtime_off)
+
+    _assert_knn_equal(idx_on, dist_on, idx_off, dist_off)
+
+
+@pytest.mark.usefixtures("residual_backend_config")
+def test_knn_consistency_residual_dense_streamer_toggle() -> None:
+    runtime_dense = _residual_runtime(residual_dense_scope_streamer=True)
+    runtime_serial = runtime_dense.with_updates(residual_dense_scope_streamer=False)
+
+    idx_dense, dist_dense = _knn_result(runtime_dense)
+    idx_serial, dist_serial = _knn_result(runtime_serial)
+
+    _assert_knn_equal(idx_dense, dist_dense, idx_serial, dist_serial)
+
+
+@pytest.mark.usefixtures("residual_backend_config")
+def test_knn_consistency_residual_masked_append_toggle() -> None:
+    runtime_masked = _residual_runtime(residual_masked_scope_append=True)
+    runtime_legacy = runtime_masked.with_updates(residual_masked_scope_append=False)
+
+    idx_masked, dist_masked = _knn_result(runtime_masked)
+    idx_legacy, dist_legacy = _knn_result(runtime_legacy)
+
+    _assert_knn_equal(idx_masked, dist_masked, idx_legacy, dist_legacy)
+
+
+@pytest.mark.usefixtures("residual_backend_config")
+def test_knn_consistency_residual_sparse_toggle() -> None:
+    dense_runtime = _residual_runtime(enable_sparse_traversal=False)
+    sparse_runtime = dense_runtime.with_updates(enable_sparse_traversal=True)
+
+    idx_dense, dist_dense = _knn_result(dense_runtime)
+    idx_sparse, dist_sparse = _knn_result(sparse_runtime)
+
+    _assert_knn_equal(idx_dense, dist_dense, idx_sparse, dist_sparse)

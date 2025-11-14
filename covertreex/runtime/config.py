@@ -260,6 +260,7 @@ class RuntimeConfig:
     residual_scope_member_limit: int | None
     residual_stream_tile: int | None
     residual_scope_bitset: bool
+    residual_masked_scope_append: bool
     residual_dynamic_query_block: bool
     residual_dense_scope_streamer: bool
     residual_scope_cap_path: str | None
@@ -437,6 +438,10 @@ class RuntimeConfig:
             os.getenv("COVERTREEX_RESIDUAL_SCOPE_BITSET"),
             default=residual_metric,
         )
+        residual_masked_scope_append = _bool_from_env(
+            os.getenv("COVERTREEX_RESIDUAL_MASKED_SCOPE_APPEND"),
+            default=True,
+        )
         residual_dynamic_query_block = _bool_from_env(
             os.getenv("COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK"),
             default=True,
@@ -544,6 +549,7 @@ class RuntimeConfig:
             residual_scope_member_limit=residual_scope_member_limit,
             residual_stream_tile=residual_stream_tile,
             residual_scope_bitset=residual_scope_bitset,
+            residual_masked_scope_append=residual_masked_scope_append,
             residual_dynamic_query_block=residual_dynamic_query_block,
             residual_dense_scope_streamer=residual_dense_scope_streamer,
             residual_scope_cap_path=residual_scope_cap_path,

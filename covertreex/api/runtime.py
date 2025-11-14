@@ -193,6 +193,7 @@ class Runtime:
     residual_scope_member_limit: int | None = None
     residual_stream_tile: int | None = None
     residual_scope_bitset: bool | None = None
+    residual_masked_scope_append: bool | None = None
     residual_dynamic_query_block: bool | None = None
     residual_dense_scope_streamer: bool | None = None
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -244,6 +245,11 @@ class Runtime:
         )
         _apply_if_present(
             overrides,
+            "residual_masked_scope_append",
+            self.residual_masked_scope_append,
+        )
+        _apply_if_present(
+            overrides,
             "residual_dynamic_query_block",
             self.residual_dynamic_query_block,
         )
@@ -280,6 +286,8 @@ class Runtime:
             "residual_scope_member_limit": config.residual_scope_member_limit,
             "residual_stream_tile": config.residual_stream_tile,
             "residual_dense_scope_streamer": config.residual_dense_scope_streamer,
+            "residual_scope_bitset": config.residual_scope_bitset,
+            "residual_masked_scope_append": config.residual_masked_scope_append,
         }
 
     def with_updates(self, **kwargs: Any) -> "Runtime":
@@ -318,5 +326,7 @@ class Runtime:
             residual_force_whitened=config.residual_force_whitened,
             residual_scope_member_limit=config.residual_scope_member_limit,
             residual_stream_tile=config.residual_stream_tile,
+            residual_scope_bitset=config.residual_scope_bitset,
+            residual_masked_scope_append=config.residual_masked_scope_append,
             residual_dense_scope_streamer=config.residual_dense_scope_streamer,
         )
