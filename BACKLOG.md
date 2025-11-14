@@ -6,21 +6,31 @@ This list is reprioritised to focus on the configurations that already deliver �
 
 ## A. Guarding the 32 k / <20 s Baseline
 
-### Dense residual regression verification
-- **Goal:** Now that the dense residual preset hits ≈21 s build / 0.026 s query again, confirm which commits fixed the >2 h regression and tag that SHA so future bisects have a known good point (or repeat the bisect if the fix was accidental).
-- **Why high leverage:** Vecchia pipelines rely on the dense residual path; without a clearly documented “good” SHA we can’t prove future slowdowns are new regressions.
-- **Status:** `pcct-20251114-105500-6dc4f6` (`git HEAD`, log `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl`) is the latest ≤22 s run (total traversal ≈18.8 s; dominated `traversal_semisort_ms` median ≈62 ms). Tag this commit once merged so future bisects can anchor on the dense-scope-streamer baseline.
-- **Refs:** `docs/journal/2025-11-12_residual_dense_regression.md` (latest CLI snapshot).
-
 ### Scope streamer & budget fixes for dense runs
 - **Goal:** Reintroduce a dense scope streamer that scans each 512-point chunk once, honours ≤64 survivors/query, and restores `traversal_semisort_ms ≤ 50 ms`—the biggest lever left on the now-sub-20 s pipeline.
 - **Why high leverage:** Even with Hilbert+grid, traversal is still the dominant cost; capping per-batch scans is the most direct way to push below 15 s without touching the rest of the pipeline.
 - **Status:** The new single-pass dense scope streamer (`--residual-dense-scope-streamer`, enabled by default) processes each 512-point chunk once per batch and keeps the ≤64 survivor cap intact. The latest 32 k Hilbert run (`artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl`) drops dominated batches to `traversal_semisort_ms≈62 ms` (p90 ≈76 ms) with total traversal **≈18.8 s**, a ≥2× improvement over the old maskopt_v2 baseline (`≈296 ms`, 34.5 s total). The 4 k guardrail (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_dense_streamer_gold.jsonl`) stays well under the `<1 s` target (median `≈42 ms`). Bitset streaming remains **off** by default; disable the dense streamer via `--no-residual-dense-scope-streamer` / `COVERTREEX_RESIDUAL_DENSE_SCOPE_STREAMER=0` for legacy comparisons.
 
+### Scope streamer hot path → Numba / JIT
+- **Goal:** Move the remaining Python loops in `_collect_residual_scopes_streaming_parallel` onto the existing Numba helpers so dense runs stop burning time on per-tile Python bookkeeping once tiles shrink below 64 points.
+- **Why high leverage:** The dense streamer still spends double-digit milliseconds per tile in `_append_scope_positions` and friends even when kernel work is tiny. Porting the dedupe path to `residual_scope_append`/`residual_scope_reset` and hoisting the per-query cache scan into a vectorised or Numba block keeps traversal CPU overhead in line with the ~60 ms kernel medians.
+- **Status:** Not started. Targets: `_append_scope_positions[_dense|_bitset]`, the cache-prefetch path at `covertreex/algo/traverse/strategies/residual.py:600-671`, and the block/tile loop at lines 676-795. Reuse `_residual_scope_numba.py` primitives and add regression tests in `tests/test_residual_parents.py` to guard the new fast path.
+
+### Scope-budget + tile math JIT
+- **Goal:** JIT the pure-Python helpers `_compute_dynamic_tile_stride` and `_update_scope_budget_state` (plus the tiny budget arrays they drive) so query-block scheduling scales with smaller tiles instead of fighting the GIL every iteration.
+- **Why high leverage:** Dense tiles now fire these helpers per Hilbert chunk; turning them into cached `@njit` routines would eliminate millions of Python/NumPy transitions per 32 k run and keep traversal overhead negligible compared to kernel time.
+- **Status:** Not started. Add small Numba modules (mirroring `_residual_scope_numba.py`) that accept plain `np.ndarray` inputs, expose them via the strategy module, and backstop with unit tests covering budget escalations / early exits.
+
 ### Chunk & degree-aware heuristics
 - **Goal:** Keep conflict shard counts bounded under `scope_chunk_target` by merging shards based on pair counts, capping degrees, and reusing arenas; directly reduces scatter/queue time in the <20 s build.
 - **Why high leverage:** The current fastest runs still spike when chunked scopes or high-degree nodes appear; these heuristics target exactly those residual hotspots so the <20 s recipe holds across datasets.
 - **Status:** Not started; see `PARALLEL_COMPRESSED_PLAN.md §4`.
+
+### Dense residual regression verification
+- **Goal:** Now that the dense residual preset hits ≈21 s build / 0.026 s query again, confirm which commits fixed the >2 h regression and tag that SHA so future bisects have a known good point (or repeat the bisect if the fix was accidental).
+- **Why high leverage:** Vecchia pipelines rely on the dense residual path; without a clearly documented “good” SHA we can’t prove future slowdowns are new regressions.
+- **Status:** `pcct-20251114-105500-6dc4f6` (`git HEAD`, log `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_gold.jsonl`) is the latest ≤22 s run (total traversal ≈18.8 s; dominated `traversal_semisort_ms` median ≈62 ms). Tag this commit once merged so future bisects can anchor on the dense-scope-streamer baseline.
+- **Refs:** `docs/journal/2025-11-12_residual_dense_regression.md` (latest CLI snapshot).
 
 ### Residual guardrails before 32 k
 - **Goal:** Enforce the 4 k Hilbert criteria (≥0.95 whitened coverage, `<1 s` semisort, non-zero gate prunes) before any 32 k reruns so we don’t regress the <20 s preset.
