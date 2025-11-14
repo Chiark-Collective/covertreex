@@ -22,6 +22,7 @@ _BATCH_ORDER_STRATEGIES = {"natural", "random", "hilbert"}
 _PREFIX_SCHEDULES = {"doubling", "adaptive"}
 _DEFAULT_SCOPE_CHUNK_TARGET = 0
 _DEFAULT_SCOPE_CHUNK_MAX_SEGMENTS = 512
+_DEFAULT_CONFLICT_DEGREE_CAP = 0
 _DEFAULT_SCOPE_BUDGET_SCHEDULE: Tuple[int, ...] = ()
 _DEFAULT_RESIDUAL_SCOPE_BUDGET_SCHEDULE: Tuple[int, ...] = (32, 64, 96)
 _DEFAULT_RESIDUAL_STREAM_TILE = 64
@@ -230,6 +231,7 @@ class RuntimeConfig:
     scope_segment_dedupe: bool
     scope_chunk_target: int
     scope_chunk_max_segments: int
+    conflict_degree_cap: int
     scope_budget_schedule: Tuple[int, ...]
     scope_budget_up_thresh: float
     scope_budget_down_thresh: float
@@ -322,6 +324,11 @@ class RuntimeConfig:
             scope_chunk_max_segments = 0
         else:
             scope_chunk_max_segments = raw_chunk_segments
+        raw_degree_cap = _parse_optional_int(os.getenv("COVERTREEX_DEGREE_CAP"))
+        if raw_degree_cap is None or raw_degree_cap <= 0:
+            conflict_degree_cap = _DEFAULT_CONFLICT_DEGREE_CAP
+        else:
+            conflict_degree_cap = raw_degree_cap
         scope_budget_schedule = _parse_scope_budget_schedule(
             os.getenv("COVERTREEX_SCOPE_BUDGET_SCHEDULE")
         )
@@ -524,6 +531,7 @@ class RuntimeConfig:
             scope_segment_dedupe=scope_segment_dedupe,
             scope_chunk_target=scope_chunk_target,
             scope_chunk_max_segments=scope_chunk_max_segments,
+            conflict_degree_cap=conflict_degree_cap,
             scope_budget_schedule=scope_budget_schedule,
             scope_budget_up_thresh=scope_budget_up_thresh,
             scope_budget_down_thresh=scope_budget_down_thresh,
@@ -708,6 +716,7 @@ def describe_runtime() -> Dict[str, Any]:
         "scope_segment_dedupe": config.scope_segment_dedupe,
         "scope_chunk_target": config.scope_chunk_target,
         "scope_chunk_max_segments": config.scope_chunk_max_segments,
+        "conflict_degree_cap": config.conflict_degree_cap,
         "scope_budget_schedule": config.scope_budget_schedule,
         "scope_budget_up_thresh": config.scope_budget_up_thresh,
         "scope_budget_down_thresh": config.scope_budget_down_thresh,

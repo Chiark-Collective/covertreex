@@ -37,6 +37,8 @@ class ScopeAdjacencyResult:
     chunk_pairs_cap: int = 0
     chunk_pairs_before: int = 0
     chunk_pairs_after: int = 0
+    degree_cap: int = 0
+    degree_pruned_pairs: int = 0
 
 
 @dataclass(frozen=True)
@@ -606,7 +608,7 @@ if NUMBA_SCOPE_AVAILABLE:
         return s2, t2
 
     @nb.njit(cache=True, parallel=True)
-    def _expand_pairs_directed(
+    def _expand_pairs_directed_impl(
         values: np.ndarray,
         indptr: np.ndarray,
         kept_nodes: np.ndarray,
@@ -648,6 +650,90 @@ if NUMBA_SCOPE_AVAILABLE:
         return sources, targets, used
 
     @nb.njit(cache=True)
+    def _expand_pairs_directed_capped_impl(
+        values: np.ndarray,
+        indptr: np.ndarray,
+        kept_nodes: np.ndarray,
+        offsets: np.ndarray,
+        pairwise: np.ndarray,
+        radii: np.ndarray,
+        degree_cap: int,
+    ):
+        k = kept_nodes.size
+        capacity = offsets[-1]
+        sources = np.empty(capacity, dtype=I32)
+        targets = np.empty(capacity, dtype=I32)
+        used = np.zeros(k, dtype=I64)
+        max_nodes = pairwise.shape[0]
+        degree_usage = np.zeros(max_nodes, dtype=I64)
+        pruned = I64(0)
+
+        for idx in range(k):
+            node = int(kept_nodes[idx])
+            s = indptr[node]
+            e = indptr[node + 1]
+            c = e - s
+            if c <= 1:
+                continue
+            base = offsets[idx]
+            write = 0
+            for a in range(c - 1):
+                pa = int(values[s + a])
+                if pa >= max_nodes:
+                    continue
+                ra = radii[pa]
+                for b in range(a + 1, c):
+                    pb = int(values[s + b])
+                    if pb >= max_nodes:
+                        continue
+                    rb = radii[pb]
+                    bound = ra if ra < rb else rb
+                    if pairwise[pa, pb] <= bound:
+                        if degree_usage[pa] >= degree_cap or degree_usage[pb] >= degree_cap:
+                            pruned += I64(2)
+                            continue
+                        sources[base + write] = pa
+                        targets[base + write] = pb
+                        write += 1
+                        sources[base + write] = pb
+                        targets[base + write] = pa
+                        write += 1
+                        degree_usage[pa] += 1
+                        degree_usage[pb] += 1
+            used[idx] = write
+
+        return sources, targets, used, int(pruned)
+
+    def _expand_pairs_directed(
+        values: np.ndarray,
+        indptr: np.ndarray,
+        kept_nodes: np.ndarray,
+        offsets: np.ndarray,
+        pairwise: np.ndarray,
+        radii: np.ndarray,
+        degree_cap: int,
+    ):
+        if degree_cap <= 0:
+            sources, targets, used = _expand_pairs_directed_impl(
+                values,
+                indptr,
+                kept_nodes,
+                offsets,
+                pairwise,
+                radii,
+            )
+            return sources, targets, used, 0
+        return _expand_pairs_directed_capped_impl(
+            values,
+            indptr,
+            kept_nodes,
+            offsets,
+            pairwise,
+            radii,
+            int(degree_cap),
+        )
+
+    @nb.njit(cache=True)
     def _expand_pairs_chunked_to_csr(
         values: np.ndarray,
         indptr: np.ndarray,
@@ -656,11 +742,18 @@ if NUMBA_SCOPE_AVAILABLE:
         pairwise: np.ndarray,
         radii: np.ndarray,
         batch_size: int,
-    ) -> tuple[np.ndarray, np.ndarray, int, int, int]:
+        degree_cap: int,
+    ) -> tuple[np.ndarray, np.ndarray, int, int, int, int]:
         counts = np.zeros(batch_size, dtype=I64)
         chunk_emitted = 0
         chunk_max_members = 0
         total_pairs = I64(0)
+        degree_pruned = I64(0)
+        use_degree_cap = degree_cap > 0
+        if use_degree_cap:
+            degree_usage = np.zeros(batch_size, dtype=I64)
+        else:
+            degree_usage = np.empty(0, dtype=I64)
 
         chunk_count = chunk_ranges.shape[0]
         for chunk_idx in range(chunk_count):
@@ -688,8 +781,16 @@ if NUMBA_SCOPE_AVAILABLE:
                         rb = radii[pb]
                         bound = ra if ra < rb else rb
                         if pairwise[pa, pb] <= bound:
+                            if use_degree_cap and (
+                                degree_usage[pa] >= degree_cap or degree_usage[pb] >= degree_cap
+                            ):
+                                degree_pruned += I64(2)
+                                continue
                             counts[pa] += 1
                             counts[pb] += 1
+                            if use_degree_cap:
+                                degree_usage[pa] += 1
+                                degree_usage[pb] += 1
                             total_pairs += I64(2)
                             chunk_has_edges = True
             if chunk_has_edges:
@@ -703,6 +804,7 @@ if NUMBA_SCOPE_AVAILABLE:
                 0,
                 chunk_emitted,
                 chunk_max_members,
+                int(degree_pruned),
             )
 
         indptr_out = np.empty(batch_size + 1, dtype=I64)
@@ -743,7 +845,14 @@ if NUMBA_SCOPE_AVAILABLE:
                             indices_out[pos_b] = pa
                             heads[pb] = pos_b + 1
 
-        return indptr_out, indices_out, total_pairs_int, chunk_emitted, chunk_max_members
+        return (
+            indptr_out,
+            indices_out,
+            total_pairs_int,
+            chunk_emitted,
+            chunk_max_members,
+            int(degree_pruned),
+        )
 
     @nb.njit(cache=True)
     def _pairs_to_csr(
@@ -859,6 +968,7 @@ if NUMBA_SCOPE_AVAILABLE:
         chunk_max_segments: int = 0,
         pairwise: np.ndarray | None = None,
         radii: np.ndarray | None = None,
+        degree_cap: int = 0,
     ) -> ScopeAdjacencyResult:
         if scope_indices.size == 0:
             return ScopeAdjacencyResult(
@@ -884,6 +994,7 @@ if NUMBA_SCOPE_AVAILABLE:
 
         pairwise_arr = np.ascontiguousarray(np.asarray(pairwise, dtype=np.float64))
         radii_arr = np.asarray(radii, dtype=np.float64)
+        degree_cap_value = int(degree_cap) if int(degree_cap) > 0 else 0
 
         total = scope_indices.size
         point_ids = _membership_point_ids_from_indptr(scope_indptr.astype(I64), total)
@@ -923,6 +1034,8 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_pairs_cap=0,
                 chunk_pairs_before=0,
                 chunk_pairs_after=0,
+                degree_cap=int(degree_cap_value),
+                degree_pruned_pairs=0,
             )
 
         directed_total_pairs = int(total_pairs * 2)
@@ -946,6 +1059,8 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_pairs_cap=0,
                 chunk_pairs_before=0,
                 chunk_pairs_after=0,
+                degree_cap=int(degree_cap_value),
+                degree_pruned_pairs=0,
             )
 
         chunk_ranges_list, chunk_stats = _chunk_ranges_from_indptr(
@@ -982,21 +1097,24 @@ if NUMBA_SCOPE_AVAILABLE:
                     candidate_pairs=candidate_pairs,
                     num_groups=num_groups,
                     num_unique_groups=num_unique_groups,
-                    chunk_count=chunk_count,
-                    chunk_emitted=0,
-                    chunk_max_members=full_volume,
-                    chunk_pairs_cap=chunk_pairs_cap,
-                    chunk_pairs_before=chunk_pairs_before,
-                    chunk_pairs_after=chunk_pairs_after,
-                )
+                chunk_count=chunk_count,
+                chunk_emitted=0,
+                chunk_max_members=full_volume,
+                chunk_pairs_cap=chunk_pairs_cap,
+                chunk_pairs_before=chunk_pairs_before,
+                chunk_pairs_after=chunk_pairs_after,
+                degree_cap=int(degree_cap_value),
+                degree_pruned_pairs=0,
+            )
 
-            sources, targets, used_counts = _expand_pairs_directed(
+            sources, targets, used_counts, degree_pruned = _expand_pairs_directed(
                 node_members,
                 indptr_nodes,
                 kept_nodes,
                 offsets,
                 pairwise_arr,
                 radii_arr,
+                degree_cap_value,
             )
             csr_indptr, csr_indices, actual_pairs = _pairs_to_csr(
                 sources,
@@ -1016,13 +1134,15 @@ if NUMBA_SCOPE_AVAILABLE:
                     candidate_pairs=candidate_pairs,
                     num_groups=num_groups,
                     num_unique_groups=num_unique_groups,
-                    chunk_count=chunk_count,
-                    chunk_emitted=0,
-                    chunk_max_members=full_volume,
-                    chunk_pairs_cap=chunk_pairs_cap,
-                    chunk_pairs_before=chunk_pairs_before,
-                    chunk_pairs_after=chunk_pairs_after,
-                )
+                chunk_count=chunk_count,
+                chunk_emitted=0,
+                chunk_max_members=full_volume,
+                chunk_pairs_cap=chunk_pairs_cap,
+                chunk_pairs_before=chunk_pairs_before,
+                chunk_pairs_after=chunk_pairs_after,
+                degree_cap=int(degree_cap_value),
+                degree_pruned_pairs=0,
+            )
             return ScopeAdjacencyResult(
                 sources=np.empty(0, dtype=I32),
                 targets=np.empty(0, dtype=I32),
@@ -1039,6 +1159,8 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_pairs_cap=chunk_pairs_cap,
                 chunk_pairs_before=chunk_pairs_before,
                 chunk_pairs_after=chunk_pairs_after,
+                degree_cap=int(degree_cap_value),
+                degree_pruned_pairs=int(degree_pruned),
             )
 
         (
@@ -1047,6 +1169,7 @@ if NUMBA_SCOPE_AVAILABLE:
             total_pairs_accum,
             chunk_emitted,
             chunk_max_members,
+            degree_pruned_pairs,
         ) = _expand_pairs_chunked_to_csr(
             node_members,
             indptr_nodes,
@@ -1055,6 +1178,7 @@ if NUMBA_SCOPE_AVAILABLE:
             pairwise_arr,
             radii_arr,
             batch_size,
+            degree_cap_value,
         )
 
         if total_pairs_accum == 0:
@@ -1074,6 +1198,8 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_pairs_cap=chunk_pairs_cap,
                 chunk_pairs_before=chunk_pairs_before,
                 chunk_pairs_after=chunk_pairs_after,
+                degree_cap=int(degree_cap_value),
+                degree_pruned_pairs=int(degree_pruned_pairs),
             )
 
         return ScopeAdjacencyResult(
@@ -1092,6 +1218,8 @@ if NUMBA_SCOPE_AVAILABLE:
             chunk_pairs_cap=chunk_pairs_cap,
             chunk_pairs_before=chunk_pairs_before,
             chunk_pairs_after=chunk_pairs_after,
+            degree_cap=int(degree_cap_value),
+            degree_pruned_pairs=int(degree_pruned_pairs),
         )
 
 else:  # pragma: no cover - executed when numba missing

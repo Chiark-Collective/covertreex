@@ -17,6 +17,7 @@ from covertreex.algo._scope_numba import (
     warmup_scope_builder,
 )
 from covertreex.algo.semisort import group_by_int
+from .arena import get_conflict_arena
 from covertreex.core.tree import TreeBackend
 
 
@@ -57,6 +58,9 @@ class AdjacencyBuild:
     grid_leaders_raw: int = 0
     grid_leaders_after: int = 0
     grid_local_edges: int = 0
+    arena_bytes: int = 0
+    degree_cap: int = 0
+    degree_pruned_pairs: int = 0
 
 
 def build_dense_adjacency(
@@ -87,6 +91,7 @@ def build_dense_adjacency(
     scope_domination_ratio = 0.0
     bytes_d2h = 0
     bytes_h2d = 0
+    arena_bytes = 0
     radius_pruned = False
     csr_indptr_np: np.ndarray | None = None
     csr_indices_np: np.ndarray | None = None
@@ -97,11 +102,20 @@ def build_dense_adjacency(
     scope_chunk_pairs_before = 0
     scope_chunk_pairs_after = 0
 
+    degree_cap_metric = 0
+    degree_pruned_pairs = 0
+
     if batch_size and scope_indices.size:
         runtime = cx_config.runtime_config()
         chunk_target = runtime.scope_chunk_target
         if chunk_target_override is not None and chunk_target_override > 0:
             chunk_target = int(chunk_target_override)
+        degree_cap = int(runtime.conflict_degree_cap or 0)
+        if degree_cap < 0:
+            degree_cap = 0
+        degree_cap_metric = degree_cap
+        degree_pruned_pairs = 0
+        arena_bytes = 0
         membership_start = time.perf_counter()
         scope_indptr_np = np.asarray(backend.to_numpy(scope_indptr), dtype=np.int64)
         scope_indices_np = np.asarray(backend.to_numpy(scope_indices), dtype=np.int64)
@@ -140,6 +154,7 @@ def build_dense_adjacency(
                 chunk_max_segments=runtime.scope_chunk_max_segments,
                 pairwise=pairwise_np,
                 radii=radii_np,
+                degree_cap=degree_cap,
             )
             numba_seconds = time.perf_counter() - numba_start
             sources = adjacency.sources.astype(np.int32, copy=False)
@@ -163,6 +178,8 @@ def build_dense_adjacency(
             scope_chunk_pair_cap = int(adjacency.chunk_pairs_cap)
             scope_chunk_pairs_before = int(adjacency.chunk_pairs_before)
             scope_chunk_pairs_after = int(adjacency.chunk_pairs_after)
+            degree_cap_metric = int(adjacency.degree_cap)
+            degree_pruned_pairs = int(adjacency.degree_pruned_pairs)
         else:
             counts_np = np.diff(scope_indptr_np)
             if scope_indices_np.size == 0:
@@ -368,13 +385,27 @@ def build_dense_adjacency(
                 edge_sources.append(src[mask])
                 edge_targets.append(tgt[mask])
 
-            if edge_sources:
-                stacked_sources = np.concatenate(edge_sources)
-                stacked_targets = np.concatenate(edge_targets)
+            arena = get_conflict_arena()
+            total_edges = sum(int(arr.size) for arr in edge_sources)
+            if total_edges:
+                stacked_sources = arena.borrow_sources(total_edges)
+                offset = 0
+                for chunk in edge_sources:
+                    size = int(chunk.size)
+                    stacked_sources[offset : offset + size] = chunk
+                    offset += size
+                stacked_targets = arena.borrow_targets(total_edges)
+                offset = 0
+                for chunk in edge_targets:
+                    size = int(chunk.size)
+                    stacked_targets[offset : offset + size] = chunk
+                    offset += size
+                candidate_pairs = total_edges
             else:
-                stacked_sources = np.empty((0,), dtype=np.int64)
-                stacked_targets = np.empty((0,), dtype=np.int64)
+                stacked_sources = arena.borrow_sources(0)
+                stacked_targets = arena.borrow_targets(0)
                 candidate_pairs = 0
+            arena_bytes = arena.total_bytes
 
             sources = backend.asarray(stacked_sources, dtype=backend.default_int)
             targets = backend.asarray(stacked_targets, dtype=backend.default_int)
@@ -410,6 +441,9 @@ def build_dense_adjacency(
         scope_chunk_pair_cap=scope_chunk_pair_cap,
         scope_chunk_pairs_before=scope_chunk_pairs_before,
         scope_chunk_pairs_after=scope_chunk_pairs_after,
+        arena_bytes=arena_bytes,
+        degree_cap=degree_cap_metric,
+        degree_pruned_pairs=degree_pruned_pairs,
     )
 
 

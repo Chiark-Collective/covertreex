@@ -282,6 +282,9 @@ def build_conflict_graph(
     grid_leaders_raw = adjacency_build.grid_leaders_raw
     grid_leaders_after = adjacency_build.grid_leaders_after
     grid_local_edges = adjacency_build.grid_local_edges
+    arena_bytes = adjacency_build.arena_bytes
+    degree_cap = adjacency_build.degree_cap
+    degree_pruned_pairs = adjacency_build.degree_pruned_pairs
 
     if sources.size and not radius_pruned:
         filter_start = time.perf_counter()
@@ -496,6 +499,9 @@ def build_conflict_graph(
             grid_leaders_raw=grid_leaders_raw,
             grid_leaders_after=grid_leaders_after,
             grid_local_edges=grid_local_edges,
+            arena_bytes=arena_bytes,
+            degree_cap=degree_cap,
+            degree_pruned_pairs=degree_pruned_pairs,
         ),
         forced_selected=forced_selected,
         forced_dominated=forced_dominated,

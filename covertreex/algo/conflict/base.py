@@ -81,6 +81,9 @@ class ConflictGraphTimings:
     grid_leaders_raw: int = 0
     grid_leaders_after: int = 0
     grid_local_edges: int = 0
+    arena_bytes: int = 0
+    degree_cap: int = 0
+    degree_pruned_pairs: int = 0
 
 
 @dataclass(frozen=True)

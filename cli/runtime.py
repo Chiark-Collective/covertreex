@@ -111,6 +111,9 @@ def runtime_from_args(
     scope_chunk_max_segments = _get_arg(args, "scope_chunk_max_segments")
     if scope_chunk_max_segments is not None:
         runtime_kwargs["scope_chunk_max_segments"] = int(scope_chunk_max_segments)
+    degree_cap = _get_arg(args, "degree_cap")
+    if degree_cap is not None:
+        runtime_kwargs["degree_cap"] = int(degree_cap)
     batch_order = _get_arg(args, "batch_order")
     if batch_order:
         runtime_kwargs["batch_order"] = batch_order

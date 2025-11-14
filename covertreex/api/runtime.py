@@ -180,6 +180,7 @@ class Runtime:
     scope_segment_dedupe: bool | None = None
     scope_chunk_target: int | None = None
     scope_chunk_max_segments: int | None = None
+    degree_cap: int | None = None
     batch_order: str | None = None
     batch_order_seed: int | None = None
     prefix_schedule: str | None = None
@@ -217,6 +218,7 @@ class Runtime:
         _apply_if_present(overrides, "scope_segment_dedupe", self.scope_segment_dedupe)
         _apply_if_present(overrides, "scope_chunk_target", self.scope_chunk_target)
         _apply_if_present(overrides, "scope_chunk_max_segments", self.scope_chunk_max_segments)
+        _apply_if_present(overrides, "conflict_degree_cap", self.degree_cap)
         _apply_if_present(overrides, "batch_order_strategy", self.batch_order)
         _apply_if_present(overrides, "batch_order_seed", self.batch_order_seed)
         _apply_if_present(overrides, "prefix_schedule", self.prefix_schedule)
@@ -283,6 +285,7 @@ class Runtime:
             "metric": config.metric,
             "devices": config.devices,
             "conflict_graph": config.conflict_graph_impl,
+            "conflict_degree_cap": config.conflict_degree_cap,
             "batch_order": config.batch_order_strategy,
             "prefix_schedule": config.prefix_schedule,
             "enable_numba": config.enable_numba,
@@ -320,6 +323,7 @@ class Runtime:
             scope_segment_dedupe=config.scope_segment_dedupe,
             scope_chunk_target=config.scope_chunk_target,
             scope_chunk_max_segments=config.scope_chunk_max_segments,
+            degree_cap=config.conflict_degree_cap,
             batch_order=config.batch_order_strategy,
             batch_order_seed=config.batch_order_seed,
             prefix_schedule=config.prefix_schedule,

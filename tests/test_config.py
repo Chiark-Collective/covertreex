@@ -22,6 +22,7 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "COVERTREEX_SCOPE_SEGMENT_DEDUP",
         "COVERTREEX_SCOPE_CHUNK_TARGET",
         "COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS",
+        "COVERTREEX_DEGREE_CAP",
         "COVERTREEX_SCOPE_BUDGET_SCHEDULE",
         "COVERTREEX_SCOPE_BUDGET_UP_THRESH",
         "COVERTREEX_SCOPE_BUDGET_DOWN_THRESH",
@@ -59,6 +60,7 @@ def test_runtime_config_defaults(monkeypatch: pytest.MonkeyPatch):
     assert runtime.primary_platform is None
     assert runtime.enable_sparse_traversal is False
     assert runtime.scope_chunk_target == 0
+    assert runtime.conflict_degree_cap == 0
     assert runtime.metric == "euclidean"
     assert runtime.batch_order_strategy == "hilbert"
     assert runtime.batch_order_seed is None
@@ -175,6 +177,7 @@ def test_describe_runtime_reports_expected_fields(monkeypatch: pytest.MonkeyPatc
     assert summary["conflict_graph_impl"] == "dense"
     assert summary["scope_chunk_target"] == 0
     assert summary["scope_chunk_max_segments"] == 512
+    assert summary["conflict_degree_cap"] == 0
     assert summary["scope_budget_schedule"] == ()
     assert summary["scope_budget_up_thresh"] == pytest.approx(0.015)
     assert summary["scope_budget_down_thresh"] == pytest.approx(0.002)
@@ -318,6 +321,23 @@ def test_scope_chunk_max_segments_disable(monkeypatch: pytest.MonkeyPatch):
     assert runtime.scope_chunk_max_segments == 0
 
 
+def test_degree_cap_default(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.conflict_degree_cap == 0
+
+
+def test_degree_cap_override(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("COVERTREEX_DEGREE_CAP", "48")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.conflict_degree_cap == 48
+
+
 def test_scope_budget_schedule_parsing(monkeypatch: pytest.MonkeyPatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("COVERTREEX_SCOPE_BUDGET_SCHEDULE", "1024, 4096,8192")
@@ -407,6 +427,20 @@ def test_runtime_from_args_defaults_sparse_numba_for_residual(monkeypatch: pytes
     assert config.metric == "residual_correlation"
     assert config.enable_sparse_traversal is True
     assert config.enable_numba is True
+
+
+def test_runtime_from_args_degree_cap_override(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    cx_config.reset_runtime_config_cache()
+
+    args = SimpleNamespace(
+        metric="euclidean",
+        degree_cap=64,
+    )
+    runtime = runtime_from_args(args)
+    config = runtime.to_config(cx_config.RuntimeConfig.from_env())
+
+    assert config.conflict_degree_cap == 64
 
 
 def test_residual_gate1_env_overrides(monkeypatch: pytest.MonkeyPatch):

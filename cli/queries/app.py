@@ -54,6 +54,7 @@ class QueryCLIOptions:
     scope_segment_dedupe: bool | None = None
     scope_chunk_target: int | None = None
     scope_chunk_max_segments: int | None = None
+    degree_cap: int | None = None
     batch_order: str | None = None
     batch_order_seed: int | None = None
     prefix_schedule: str | None = None
@@ -289,6 +290,14 @@ def cli(
         typer.Option(
             "--scope-chunk-max-segments",
             help="Upper bound on concurrent scope chunk segments.",
+            rich_help_panel=_RUNTIME_PANEL,
+        ),
+    ] = None,
+    degree_cap: Annotated[
+        Optional[int],
+        typer.Option(
+            "--degree-cap",
+            help="Limit conflict-graph degree per node (0 disables).",
             rich_help_panel=_RUNTIME_PANEL,
         ),
     ] = None,
@@ -698,6 +707,7 @@ def cli(
         scope_segment_dedupe=scope_segment_dedupe,
         scope_chunk_target=scope_chunk_target,
         scope_chunk_max_segments=scope_chunk_max_segments,
+        degree_cap=degree_cap,
         batch_order=batch_order,
         batch_order_seed=batch_order_seed,
         prefix_schedule=prefix_schedule,

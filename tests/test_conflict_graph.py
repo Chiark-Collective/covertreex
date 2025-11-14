@@ -185,6 +185,38 @@ def test_chunked_conflict_graph_matches_dense(monkeypatch: pytest.MonkeyPatch):
     cx_config.reset_runtime_config_cache()
 
 
+def test_degree_cap_limits_conflict_edges(monkeypatch: pytest.MonkeyPatch):
+    if not NUMBA_SCOPE_AVAILABLE:
+        pytest.skip("Numba conflict builder unavailable.")
+
+    backend = get_runtime_backend()
+    tree = PCCTree.empty(dimension=2, backend=backend)
+    base_points = backend.asarray(
+        [[float(i), float(i % 2)] for i in range(12)],
+        dtype=backend.default_float,
+    )
+    tree, _ = batch_insert(tree, base_points, mis_seed=0)
+    batch_points = [[i + 0.1, (i % 3) * 0.1] for i in range(6)]
+
+    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
+    monkeypatch.setenv("COVERTREEX_SCOPE_CHUNK_TARGET", "4")
+    monkeypatch.setenv("COVERTREEX_DEGREE_CAP", "1")
+    cx_config.reset_runtime_config_cache()
+
+    traversal = traverse_collect_scopes(tree, batch_points)
+    graph = build_conflict_graph(tree, traversal, batch_points)
+
+    degrees = np.diff(np.asarray(graph.indptr))
+    assert np.all(degrees <= 1)
+    assert graph.timings.degree_cap == 1
+    assert graph.timings.degree_pruned_pairs >= 0
+
+    monkeypatch.delenv("COVERTREEX_SCOPE_CHUNK_TARGET", raising=False)
+    monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
+    monkeypatch.delenv("COVERTREEX_DEGREE_CAP", raising=False)
+    cx_config.reset_runtime_config_cache()
+
+
 def test_residual_conflict_graph_matches_dense(monkeypatch: pytest.MonkeyPatch):
     backend = get_runtime_backend()
     points = backend.asarray([[0.0], [1.0], [2.0]], dtype=backend.default_float)

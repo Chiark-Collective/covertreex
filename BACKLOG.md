@@ -9,7 +9,7 @@ This list is reprioritised to focus on the configurations that already deliver �
 ### Chunk & degree-aware heuristics
 - **Goal:** Keep conflict shard counts bounded under `scope_chunk_target` by merging shards based on pair counts, capping degrees, and reusing arenas; directly reduces scatter/queue time in the <20 s build.
 - **Why high leverage:** The current fastest runs still spike when chunked scopes or high-degree nodes appear; these heuristics target exactly those residual hotspots so the <20 s recipe holds across datasets.
-- **Status:** Not started; see `PARALLEL_COMPRESSED_PLAN.md §4`.
+- **Status:** **In progress.** Dense + residual conflict graphs now honour `COVERTREEX_DEGREE_CAP` / `--degree-cap`, enforcing per-node limits inside both the chunked (`_expand_pairs_chunked_to_csr`) and unchunked (`_expand_pairs_directed`) Numba builders with telemetry (`degree_cap`, `degree_pruned_pairs`). The fallback Python builder reuses a scratch arena for `sources` / `targets`, reports `arena_bytes`, and the CLI/runtime expose the flag. Remaining work: smarter shard-merging heuristics for pathological pair-count distributions and per-node buffer reuse on the Numba path (`PARALLEL_COMPRESSED_PLAN.md §4`).
 
 ### Dense residual regression verification
 - **Goal:** Now that the dense residual preset hits ≈21 s build / 0.026 s query again, confirm which commits fixed the >2 h regression and tag that SHA so future bisects have a known good point (or repeat the bisect if the fix was accidental).
