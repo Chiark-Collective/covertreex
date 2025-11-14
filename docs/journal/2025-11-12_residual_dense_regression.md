@@ -175,6 +175,23 @@ Until we restore the dense streamer’s fast path, Phase 5 remains blocked bec
   - `traversal_scope_chunk_points` finally tracks the desired limit: median/max **65,536** (512 queries × 128 survivors). Once a query fills its 128-slot budget we stop scanning further chunks, so the scope streamer no longer touches every tree point.
 - We still need ~12× additional headroom to reach 30 ms dominated batches, but the gap is now strictly compute-bound on the 65 k candidate set rather than 262 k. Next steps: shrink the dense chunk size (e.g., 128) or implement a radius/budget schedule that keeps survivors to **≤64**.
 
+### 2025-11-14 Active-mask scope streaming (afternoon)
+
+- Replaced the Python-heavy `(block_positions, active_pairs)` bookkeeping in `_collect_residual_scopes_streaming_parallel` with a boolean mask that tracks which queries within each dominated block still need scope streaming. The new path issues vectorised `np.nonzero` lookups per tile and drops the dict/list churn that previously re-built the active set hundreds of times per chunk.
+- Validation command (same 4 k preset + env as above) produced two artifacts for A/B comparison:
+  - **Before:** `artifacts/benchmarks/residual_phase05_hilbert_4k_pre_maskopt.jsonl` — dominated batches show `traversal_semisort_ms` median **294.8 ms**, p90 **299.5 ms**, max **299.6 ms** with `traversal_scope_chunk_points=8 192` and `traversal_kernel_provider_pairs≈1.34 M`.
+  - **After:** `artifacts/benchmarks/residual_phase05_hilbert_4k_maskopt.jsonl` — same scope/telemetry envelope but `traversal_semisort_ms` drops to **260.5 ms** median (p90 **269.9 ms**, max **271.8 ms**); kernel work and survivor budgets are unchanged.
+- Takeaway: eliminating the per-tile Python churn buys a **~12%** reduction in dense semisort wall time without touching kernel math or budgets. Remaining hotspots are now the pure NumPy bookkeeping inside the tile loop, so the next levers are bitset-based scope buffers (`residual_scope_append`) or smaller tiles.
+
+### 2025-11-14 Adaptive tile stride (evening)
+
+- Added `_compute_dynamic_tile_stride`, which shrinks the per-tile residual fetch to the largest remaining survivor budget among active queries. Dense runs now request fewer than 64 candidates as soon as the `(32, 64, 96)` ladder or the dense member cap leaves <64 free slots, halving unnecessary kernel evaluations late in each dominated batch.
+- Validation (same 4 k preset) log: `artifacts/benchmarks/residual_phase05_hilbert_4k_maskopt_v2.jsonl`.
+  - `traversal_semisort_ms`: median **0.247 s**, p90 **0.292 s**, max **0.313 s** (≈5 % faster than the mask-only run).
+  - `traversal_scope_chunk_points`: median **4 096**, p90/max **12 288** — down from a flat 8 192 previously because the tile schedule now matches the remaining survivor allowance.
+  - `traversal_kernel_provider_ms`: statistically flat (median **10.8 ms**), confirming the win comes purely from doing fewer per-query post-processing steps once budgets tighten.
+- Next up: reclaim another ~5–10× by (a) reblocking query batches when only a handful remain active, so kernel calls target ≤32 survivors, and (b) exploring bitset-backed `_append_scope_positions` to remove the per-query NumPy scans.
+
 ### 2025-11-14 32 k Dense Re-run (guardrails off)
 
 - Command:
@@ -203,6 +220,31 @@ Until we restore the dense streamer’s fast path, Phase 5 remains blocked bec
   - Kernel telemetry dominates (`kernel_seconds_total ≫ whitened_seconds_total`), confirming the slowdown comes from raw scope streaming rather than SGEMMs or conflict graph work.
 
 - Why the gap persists: even with all guardrails disabled, the Hilbert batch still loops over every 512-point chunk for each active query block. The radius test does not cull candidates early enough, so each dominated batch performs ~262 k residual evaluations before MIS/conflict. Hitting the historical **≈30 ms** target therefore requires a true membership budget (≤64 survivors) and/or smaller residual chunks so we stop scanning the full tree per batch.
+
+### 2025-11-14 32 k Dense Re-run (mask + adaptive tiles)
+
+- Command (same as the guardrails-off recipe, but leaving the dense member cap + stream tiling at their defaults):
+
+  ```bash
+  COVERTREEX_BACKEND=numpy \
+  COVERTREEX_ENABLE_NUMBA=1 \
+  COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+  COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0 \
+  python -m cli.queries \
+    --metric residual \
+    --dimension 8 --tree-points 32768 \
+    --batch-size 512 --queries 1024 --k 8 \
+    --seed 42 --baseline gpboost \
+    --log-file artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_maskopt_v2.jsonl
+  ```
+
+- Snapshot (`run_id=pcct-20251114-082601-d2e6df`):
+  - 63 dominated batches; `traversal_semisort_ms` median **0.260 s**, p90 **0.282 s**, max **0.337 s**.
+  - `traversal_scope_chunk_points` median **4 096** (p90/max **12 288**), i.e., each query now inspects ≤8 tiles once the survivor ladder tightens.
+  - `traversal_kernel_provider_ms` median **27.8 ms** (p90 **49.7 ms**); total traversal time across all dominated batches **≈29.8 s**, giving a new ≤30 s dense baseline without touching Gate‑1.
+  - Log: `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_maskopt_v2.jsonl`.
+
+- This run supplant `pcct-20251113-170959-73d79a` as the fastest dense preset. Next steps are to script the same command into the CLI benchmark presets and refresh the public tables once we repeatability-test the 32 k sweep under CI.
 
 ### Follow-up Mitigations (2025-11-12 evening)
 
@@ -319,7 +361,7 @@ Document every future run (4 k shakeout first, then 32 k) with the commands 
 
 ### 2025-11-13 Default CLI Dense 32 k Snapshot
 
-After wiring the Typer callback to run without a subcommand and defaulting `--residual-gate` to `"off"` on 2025-11-13, the CLI now reproduces the fast dense preset with zero environment tweaks. Latest run (log `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_tiled_run3.jsonl`):
+After wiring the Typer callback to run without a subcommand and defaulting `--residual-gate` to `"off"` on 2025-11-13, the CLI now reproduces the fast dense preset with zero environment tweaks. Latest run (log `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_tiled_run3.jsonl`, run ID `pcct-20251113-170959-73d79a`, git `70bc38e` / tag `stable`):
 
 ```bash
 python -m cli.queries \
@@ -335,3 +377,26 @@ python -m cli.queries \
 - Dominated batches: `traversal_semisort_ms` median **0.263 s**, p90 **0.280 s**, max **0.289 s** (64 batches). Each batch capped at `traversal_scope_chunk_points=8,192` and `traversal_scope_chunk_max_members=64`.
 
 These numbers line up with the earlier “tiled” section and confirm the new CLI defaults serve the audit-friendly fast preset out of the box.
+
+### 2025-11-13 Scope Streamer Gap Analysis
+
+Even in the 33 s run above, the JSONL highlights why dense traversal is still the bottleneck:
+
+- Across all 64 batch events the **median traversal time is 465 ms** (p90 ≈688 ms), so the total build is effectively `0.465 s × 64 ≈ 30 s`.
+- `traversal_semisort_ms` mirrors that cost (median 263 ms), proving we are still scanning entire 8 192-point chunks per dominated batch despite the new budgets.
+- Every dominated batch reports `traversal_scope_chunk_points=8 192`, `traversal_scope_chunk_scans=128`, and `traversal_scope_chunk_emitted=512`, meaning each query walks every chunk tile even when only 64 survivors are needed.
+
+To squeeze more time out of the current preset we need to:
+
+1. **Stop per-query chunk loops.** Rework `_collect_residual_scopes_streaming_serial` so dense runs scan each tree chunk once (shared kernel block) and fan results out to all queries, instead of the current double loop that repeats the kernel call per query.
+2. **Honor ≤64 survivors/query in the dense path.** Enforce `_RESIDUAL_SCOPE_DENSE_FALLBACK_LIMIT` as a hard stop (or shrink it further) so tile scans terminate as soon as `(survivors >= budget)` rather than traversing all 512 tiles.
+3. **Add scope-prefetch/cache hints.** Use Hilbert order + parent levels to preload likely survivors, reducing the number of tiles and dedupe passes each query touches before the budget limit trips.
+4. **Expose smaller default tiles.** The present 64-wide stream tile keeps scopes tidy but still costs ~0.26 s/batch; giving the CLI/runtime a dense-specific tile schedule (32 → 16 → 8) would chip away at the “per chunk” kernel cost without touching the sparse path.
+
+**Update 2025-11-13:** `_update_scope_budget_state` now compares survivor counts against the schedule limits (instead of the number of scanned points), so dense runs bail out as soon as they collect the configured `(32, 64, 96)` members. Combined with the existing `scope_limit` enforcement this stops queries from walking the entire 8 192-point chunk once the survivor budget is satisfied; re-run the 4 k shakeout to quantify the drop before touching 32 k.
+
+These bullets now feed the “Scope streamer & budget fixes for dense runs” backlog item so we have concrete success criteria (e.g., `traversal_semisort_ms ≤ 50 ms`, `traversal_scope_chunk_scans ≤ 16`) when we implement the rewrite.
+
+**Update 2025-11-13 (chunk sharing prototype):** `_collect_residual_scopes_streaming_parallel` now batches active queries per chunk tile and calls `compute_residual_distances_block_no_gate(...)` once per tile, instead of looping per query. A 4 096-point sanity run (`artifacts/benchmarks/artifacts/benchmarks/artifacts/benchmarks/residual_dense_4096_budget_test2.jsonl`) still reports median `traversal_ms≈322 ms`, `traversal_semisort_ms≈272 ms`, and `traversal_scope_chunk_points=8 192`, so chunk sharing alone isn’t enough—the remaining work is to stop launching all 128 tiles once each query hits its survivor budget (prefetch/prune, dynamic tile schedules, and a true dense streamer).
+
+**Update 2025-11-14:** After reverting the tile-prioritisation experiment and re-running the 4 k preset (`residual_dense_4096_budget_test_nochange.jsonl`), medians remain `traversal_ms≈322 ms`, `traversal_semisort_ms≈285 ms`, and `traversal_scope_chunk_points=8 192`. In other words, the chunk-sharing refactor hasn’t moved the needles yet; the backlog item now explicitly tracks the remaining streamer work (adaptive tile sizes, smarter prefetch/early-exit heuristics, and eventually dense-specific tiling) before we rerun 32 k.

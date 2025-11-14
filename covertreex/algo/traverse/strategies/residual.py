@@ -265,7 +265,7 @@ def _collect_residual_scopes_streaming_serial(
                     saturated = True
                     fully_scanned = False
                     break
-                if budget_active and chunk_points[qi] >= budget_current_limit:
+                if budget_active and budget_survivors >= budget_current_limit:
                     saturated = True
                     fully_scanned = False
                     cap_reached = True
@@ -338,7 +338,7 @@ def _collect_residual_scopes_streaming_serial(
                             break
                     else:
                         budget_low_streak = 0
-                if budget_active and chunk_points[qi] >= budget_current_limit:
+                if budget_active and budget_survivors >= budget_current_limit:
                     cap_reached = True
                 if saturated or cap_reached:
                     saturated = True
@@ -636,66 +636,85 @@ def _collect_residual_scopes_streaming_parallel(
                             saturated_flags[qi] = 1
             block_valid.append(qi)
 
-        active_block = [qi for qi in block_valid if not saturated[qi]]
+        block_idx_arr = np.asarray(block_valid, dtype=np.int64)
+        if block_idx_arr.size == 0:
+            continue
+        block_query_ids_np = query_indices[block_idx_arr]
+        block_radii_np = radii[block_idx_arr]
         for start in range(0, total_points, chunk):
-            if not active_block:
+            active_mask = np.logical_not(saturated[block_idx_arr])
+            if not np.any(active_mask):
                 break
             stop = min(start + chunk, total_points)
             chunk_ids = tree_indices_np[start:stop]
             if chunk_ids.size == 0:
                 continue
             chunk_positions = tree_positions_np[start:stop]
-            tile_stride = tile_size if tile_size > 0 else chunk_ids.size
-            tile_stride = max(1, tile_stride)
-            tile_range = range(0, chunk_ids.size, tile_stride)
-            for tile_start in tile_range:
-                if not active_block:
+            base_stride = tile_size if tile_size > 0 else chunk_ids.size
+            base_stride = max(1, base_stride)
+            tile_start = 0
+            while tile_start < chunk_ids.size:
+                active_idx = np.nonzero(active_mask)[0]
+                if active_idx.size == 0:
                     break
-                tile_stop = min(tile_start + tile_stride, chunk_ids.size)
+                stride = _compute_dynamic_tile_stride(
+                    base_stride,
+                    active_idx,
+                    block_idx_arr,
+                    scope_counts,
+                    limit_value,
+                    budget_enabled,
+                    budget_applied,
+                    budget_limits,
+                )
+                tile_stop = min(tile_start + stride, chunk_ids.size)
                 tile_ids = chunk_ids[tile_start:tile_stop]
                 if tile_ids.size == 0:
-                    continue
+                    break
                 tile_positions = chunk_positions[tile_start:tile_stop]
-                block_arr = np.asarray(active_block, dtype=np.int64)
-                block_query_ids = query_indices[block_arr]
-                block_radii = radii[block_arr]
+                active_qis = block_idx_arr[active_idx]
+                chunk_iterations[active_qis] += 1
+                chunk_points[active_qis] += tile_ids.size
+                tile_query_ids = block_query_ids_np[active_idx]
+                tile_radii = block_radii_np[active_idx]
                 kernel_start = time.perf_counter()
-                kernel_block = host_backend.kernel_provider(block_query_ids, tile_ids)
+                kernel_block = host_backend.kernel_provider(tile_query_ids, tile_ids)
                 kernel_elapsed = time.perf_counter() - kernel_start
                 distance_telemetry.record_kernel(
-                    int(block_query_ids.size), int(tile_ids.size), kernel_elapsed
+                    int(tile_query_ids.size),
+                    int(tile_ids.size),
+                    kernel_elapsed,
                 )
-                next_active: list[int] = []
                 if force_whitened:
-                    active_dist_block = None
-                else:
-                    dist_block, mask_block = compute_residual_distances_block_no_gate(
-                        backend=host_backend,
-                        query_indices=block_query_ids,
-                        chunk_indices=tile_ids,
-                        kernel_block=kernel_block,
-                        radii=block_radii,
-                    )
-                for local_idx, qi in enumerate(active_block):
-                    if saturated[qi]:
-                        continue
-                    chunk_iterations[qi] += 1
-                    chunk_points[qi] += tile_ids.size
-                    if force_whitened:
-                        query_dataset_idx = int(block_query_ids[local_idx])
+                    dist_block = np.empty((tile_query_ids.size, tile_ids.size), dtype=np.float64)
+                    mask_block = np.empty((tile_query_ids.size, tile_ids.size), dtype=np.uint8)
+                    for local_idx in range(tile_query_ids.size):
                         distances_row, mask_row = compute_residual_distances_with_radius(
                             backend=host_backend,
-                            query_index=query_dataset_idx,
+                            query_index=int(tile_query_ids[local_idx]),
                             chunk_indices=tile_ids,
                             kernel_row=kernel_block[local_idx],
-                            radius=float(block_radii[local_idx]),
+                            radius=float(tile_radii[local_idx]),
                             workspace=shared_workspace,
                             telemetry=distance_telemetry,
                             force_whitened=True,
                         )
-                    else:
-                        distances_row = dist_block[local_idx]
-                        mask_row = mask_block[local_idx]
+                        dist_block[local_idx] = distances_row
+                        mask_block[local_idx] = mask_row
+                else:
+                    dist_block, mask_block = compute_residual_distances_block_no_gate(
+                        backend=host_backend,
+                        query_indices=tile_query_ids,
+                        chunk_indices=tile_ids,
+                        kernel_block=kernel_block,
+                        radii=tile_radii,
+                    )
+                for local_idx, block_slot in enumerate(active_idx):
+                    qi = int(block_idx_arr[block_slot])
+                    if saturated[qi]:
+                        continue
+                    distances_row = dist_block[local_idx]
+                    mask_row = mask_block[local_idx]
                     include_idx = np.nonzero(mask_row)[0]
                     if include_idx.size:
                         include_positions = tile_positions[include_idx]
@@ -738,10 +757,10 @@ def _collect_residual_scopes_streaming_parallel(
                         saturated,
                         saturated_flags,
                     )
-                    if not saturated[qi]:
-                        next_active.append(qi)
-                active_block = next_active
-            if not active_block:
+                if active_qis.size:
+                    active_mask[active_idx] = np.logical_not(saturated[active_qis])
+                tile_start = tile_stop
+            if not np.any(active_mask):
                 break
 
         for qi in block_valid:
@@ -952,7 +971,7 @@ def _update_scope_budget_state(
         budget_applied[qi]
         and not saturated[qi]
         and budget_limits[qi] > 0
-        and chunk_points[qi] >= budget_limits[qi]
+        and budget_survivors[qi] >= budget_limits[qi]
     ):
         saturated[qi] = True
         saturated_flags[qi] = 1
@@ -994,6 +1013,42 @@ def _append_scope_positions(
         flags_row[new_positions] = 1
         scope_count += added
     return scope_count, dedupe, trimmed, added
+
+
+def _compute_dynamic_tile_stride(
+    base_stride: int,
+    active_idx: np.ndarray,
+    block_idx_arr: np.ndarray,
+    scope_counts: np.ndarray,
+    limit_value: int,
+    budget_enabled: bool,
+    budget_applied: np.ndarray,
+    budget_limits: np.ndarray,
+) -> int:
+    """Shrink tile length once surviving budgets are nearly saturated."""
+
+    stride = max(1, base_stride)
+    if active_idx.size == 0 or (limit_value <= 0 and not budget_enabled):
+        return stride
+
+    max_remaining = 0
+    for local_slot in active_idx:
+        qi = int(block_idx_arr[int(local_slot)])
+        cap = limit_value if limit_value > 0 else 0
+        if budget_enabled and budget_applied[qi]:
+            budget_cap = int(budget_limits[qi])
+            if budget_cap > 0:
+                cap = budget_cap if cap <= 0 else min(cap, budget_cap)
+        if cap <= 0:
+            continue
+        remaining = cap - int(scope_counts[qi])
+        if remaining > max_remaining:
+            max_remaining = remaining
+            if max_remaining >= stride:
+                return stride
+    if max_remaining <= 0:
+        return stride
+    return max(1, min(stride, max_remaining))
 
 def _collect_residual(
     tree: PCCTree,

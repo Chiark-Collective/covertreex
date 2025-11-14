@@ -218,3 +218,36 @@ def test_parallel_streaming_tiles_with_scope_limit() -> None:
     )
 
     assert recorded and max(recorded) <= 3
+
+
+def test_parallel_streaming_dynamic_tile_respects_budget() -> None:
+    backend = _build_host_backend(chunk_size=32)
+    base_kernel = backend.kernel_provider
+    recorded: list[int] = []
+
+    def tracking_kernel(rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+        recorded.append(int(np.asarray(cols, dtype=np.int64).size))
+        return base_kernel(rows, cols)
+
+    backend = replace(backend, kernel_provider=tracking_kernel)
+    tree_indices = np.tile(np.array([0, 1, 2], dtype=np.int64), 16)
+    tree = _dummy_tree(num_points=tree_indices.size)
+    workspace = ResidualWorkspace(max_queries=1, max_chunk=backend.chunk_size)
+    telemetry = ResidualDistanceTelemetry()
+
+    residual_strategy._collect_residual_scopes_streaming_parallel(
+        tree=tree,
+        host_backend=backend,
+        query_indices=np.array([0], dtype=np.int64),
+        tree_indices=tree_indices,
+        parent_positions=np.array([0], dtype=np.int64),
+        radii=np.array([1.0], dtype=np.float64),
+        scope_limit=64,
+        scope_budget_schedule=(4,),
+        scope_budget_up_thresh=2.0,
+        scope_budget_down_thresh=0.5,
+        workspace=workspace,
+        telemetry=telemetry,
+    )
+
+    assert recorded and max(recorded) <= 4
