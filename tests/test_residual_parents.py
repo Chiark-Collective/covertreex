@@ -251,3 +251,203 @@ def test_parallel_streaming_dynamic_tile_respects_budget() -> None:
     )
 
     assert recorded and max(recorded) <= 4
+
+
+def test_parallel_streaming_uses_numba_scope_append(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _build_host_backend(chunk_size=4)
+    tree = _dummy_tree(num_points=3)
+    workspace = ResidualWorkspace(max_queries=1, max_chunk=backend.chunk_size)
+    telemetry = ResidualDistanceTelemetry()
+
+    append_calls: list[int] = []
+    reset_counts: list[int] = []
+
+    def fake_append(
+        flags: np.ndarray,
+        positions: np.ndarray,
+        buffer: np.ndarray,
+        count: int,
+        limit: int,
+        *,
+        respect_limit: bool = True,
+    ) -> tuple[int, int, bool]:
+        append_calls.append(int(np.asarray(positions, dtype=np.int64).size))
+        new_count = int(count) + append_calls[-1]
+        return new_count, 0, False
+
+    def fake_reset(flags: np.ndarray, buffer: np.ndarray, count: int) -> None:
+        reset_counts.append(int(count))
+
+    monkeypatch.setattr(residual_strategy, "residual_scope_append", fake_append)
+    monkeypatch.setattr(residual_strategy, "residual_scope_reset", fake_reset)
+
+    residual_strategy._collect_residual_scopes_streaming_parallel(
+        tree=tree,
+        host_backend=backend,
+        query_indices=np.array([0], dtype=np.int64),
+        tree_indices=np.array([0, 1, 2], dtype=np.int64),
+        parent_positions=np.array([0], dtype=np.int64),
+        radii=np.array([1.0], dtype=np.float64),
+        scope_limit=2,
+        stream_tile=1,
+        workspace=workspace,
+        telemetry=telemetry,
+    )
+
+    assert append_calls, "expected the Numba append helper to be used"
+    assert reset_counts and reset_counts[0] > 0
+
+
+def test_parallel_streaming_masked_append_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _build_host_backend(chunk_size=4)
+    tree = _dummy_tree(num_points=3)
+    workspace = ResidualWorkspace(max_queries=1, max_chunk=backend.chunk_size)
+    telemetry = ResidualDistanceTelemetry()
+
+    calls = {"masked": 0}
+
+    def fake_masked(**kwargs):  # type: ignore[no-untyped-def]
+        calls["masked"] = calls.get("masked", 0) + 1
+        scope_count = int(kwargs.get("scope_count", 0))
+        return scope_count + 1, 0, False, 1, 0.25
+
+    monkeypatch.setattr(residual_strategy, "_append_scope_positions_masked", fake_masked)
+
+    residual_strategy._collect_residual_scopes_streaming_parallel(
+        tree=tree,
+        host_backend=backend,
+        query_indices=np.array([0], dtype=np.int64),
+        tree_indices=np.array([0, 1, 2], dtype=np.int64),
+        parent_positions=np.array([0], dtype=np.int64),
+        radii=np.array([1.0], dtype=np.float64),
+        scope_limit=2,
+        stream_tile=1,
+        workspace=workspace,
+        telemetry=telemetry,
+        masked_scope_append=True,
+    )
+    assert calls["masked"] > 0
+
+    calls["masked"] = 0
+    residual_strategy._collect_residual_scopes_streaming_parallel(
+        tree=tree,
+        host_backend=backend,
+        query_indices=np.array([0], dtype=np.int64),
+        tree_indices=np.array([0, 1, 2], dtype=np.int64),
+        parent_positions=np.array([0], dtype=np.int64),
+        radii=np.array([1.0], dtype=np.float64),
+        scope_limit=2,
+        stream_tile=1,
+        workspace=workspace,
+        telemetry=telemetry,
+        masked_scope_append=False,
+    )
+    assert calls["masked"] == 0
+
+
+def test_compute_dynamic_tile_stride_delegates_to_numba(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, int] = {}
+
+    def fake_stride(*args, **kwargs):
+        called["count"] = called.get("count", 0) + 1
+        return 7
+
+    monkeypatch.setattr(residual_strategy, "NUMBA_RESIDUAL_SCOPE_AVAILABLE", True)
+    monkeypatch.setattr(residual_strategy, "residual_scope_dynamic_tile_stride", fake_stride)
+    stride = residual_strategy._compute_dynamic_tile_stride(
+        base_stride=16,
+        active_idx=np.array([0], dtype=np.int64),
+        block_idx_arr=np.array([0], dtype=np.int64),
+        scope_counts=np.array([0], dtype=np.int64),
+        limit_value=32,
+        budget_enabled=True,
+        budget_applied=np.array([True]),
+        budget_limits=np.array([32], dtype=np.int64),
+    )
+    assert stride == 7
+    assert called.get("count") == 1
+
+
+def test_update_scope_budget_state_delegates_to_numba(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, int] = {}
+
+    def fake_update(*args, **kwargs):
+        called["count"] = called.get("count", 0) + 1
+
+    monkeypatch.setattr(residual_strategy, "NUMBA_RESIDUAL_SCOPE_AVAILABLE", True)
+    monkeypatch.setattr(residual_strategy, "residual_scope_update_budget_state", fake_update)
+    residual_strategy._update_scope_budget_state(
+        qi=0,
+        chunk_points=np.array([0], dtype=np.int64),
+        scan_cap_value=10,
+        budget_applied=np.array([True]),
+        budget_up=2.0,
+        budget_down=0.5,
+        budget_schedule_arr=np.array([2, 4], dtype=np.int64),
+        budget_indices=np.array([0], dtype=np.int64),
+        budget_limits=np.array([2], dtype=np.int64),
+        budget_final_limits=np.array([2], dtype=np.int64),
+        budget_escalations=np.array([0], dtype=np.int64),
+        budget_low_streak=np.array([0], dtype=np.int64),
+        budget_survivors=np.array([0], dtype=np.int64),
+        budget_early_flags=np.array([0], dtype=np.uint8),
+        saturated=np.array([False]),
+        saturated_flags=np.array([0], dtype=np.uint8),
+    )
+    assert called.get("count") == 1
+
+
+def test_residual_scope_append_masked_appends_members() -> None:
+    flags = np.zeros(8, dtype=np.uint8)
+    buffer = np.zeros(4, dtype=np.int64)
+    mask_row = np.array([1, 0, 1, 0], dtype=np.uint8)
+    distances_row = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float64)
+    tile_positions = np.array([0, 1, 2, 3], dtype=np.int64)
+
+    new_count, dedupe, trimmed, added, observed = residual_strategy.residual_scope_append_masked(
+        flags,
+        buffer,
+        mask_row,
+        distances_row,
+        tile_positions,
+        count=0,
+        limit=4,
+    )
+
+    assert new_count == 2
+    assert added == 2
+    assert dedupe == 0
+    assert not trimmed
+    assert observed == pytest.approx(0.3)
+
+
+def test_append_scope_positions_masked_prefers_numba_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, int] = {}
+
+    def fake_masked(*args, **kwargs):
+        called["count"] = called.get("count", 0) + 1
+        return 3, 1, True, 2, 0.5
+
+    monkeypatch.setattr(residual_strategy, "residual_scope_append_masked", fake_masked)
+
+    flags_row = np.zeros(6, dtype=np.uint8)
+    buffer_row = np.zeros(4, dtype=np.int64)
+    mask_row = np.array([1, 0, 1], dtype=np.uint8)
+    distances_row = np.array([0.1, 0.2, 0.3], dtype=np.float64)
+    tile_positions = np.array([0, 1, 2], dtype=np.int64)
+
+    result = residual_strategy._append_scope_positions_masked(
+        flags_row=flags_row,
+        bitset_row=None,
+        mask_row=mask_row,
+        distances_row=distances_row,
+        tile_positions=tile_positions,
+        limit_value=4,
+        scope_count=0,
+        buffer_row=buffer_row,
+    )
+
+    assert called.get("count") == 1
+    assert result[0] == 3
+    assert result[1] == 1
+    assert result[2] is True

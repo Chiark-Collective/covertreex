@@ -72,6 +72,7 @@ class QueryCLIOptions:
     residual_scope_bitset: bool | None = None
     residual_dynamic_query_block: bool | None = None
     residual_dense_scope_streamer: bool | None = None
+    residual_masked_scope_append: bool | None = None
     residual_gate: str | None = "off"
     residual_gate_lookup_path: str = "docs/data/residual_gate_profile_diag0.json"
     residual_gate_margin: float = 0.02
@@ -431,6 +432,14 @@ def cli(
         typer.Option(
             "--residual-dense-scope-streamer/--no-residual-dense-scope-streamer",
             help="Force dense scope streaming to scan each chunk once per batch.",
+            rich_help_panel=_RESIDUAL_PANEL,
+        ),
+    ] = None,
+    residual_masked_scope_append: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--residual-masked-scope-append/--no-residual-masked-scope-append",
+            help="Use the Numba masked append path for dense scope streaming.",
             rich_help_panel=_RESIDUAL_PANEL,
         ),
     ] = None,

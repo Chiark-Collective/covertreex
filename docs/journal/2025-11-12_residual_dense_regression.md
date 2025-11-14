@@ -251,6 +251,15 @@ The `_block_ranges` iterator now advances correctly, so the dynamic-block stream
 
 - Telemetry note: `traversal_scope_chunk_scans` and `..._points` now report **512** scans and **16 384** points because every chunk is streamed exactly once; use `traversal_semisort_ms`, total traversal, and kernel medians to compare runs across streamer versions.
 
+#### 2025-11-14 Masked scope append toggle
+
+- Added `--residual-masked-scope-append` (default **on**) to keep both cache-prefetch hits and tile inserts inside the Numba helper. When the flag is enabled, each dense tile feeds its mask/dist arrays directly into `residual_scope_append` without allocating new `np.nonzero` buffers; disabling it restores the Python fallback for bisects.
+- Benchmark deltas (all dense streamer presets, diagnostics on):
+  - `pcct-20251114-134307-62e1f4` (`artifacts/benchmarks/residual_dense_32768_dense_streamer_maskappend_on_run1.jsonl`, seed 42) — dominated `traversal_semisort_ms≈55.7 ms` (p90 ≈69.2 ms) with total traversal medians ≈262 ms and `build≈20.0 s`.
+  - `pcct-20251114-134434-cf31f8` (same seed, `--no-residual-masked-scope-append`, log `…maskappend_off_run1.jsonl`) keeps semisort medians ≈52.9 ms but traversal medians inflate to ≈355 ms and wall clock drifts to ≈24.7 s because every cache-prefetch batch re-enters Python.
+  - Alternate seed (`pcct-20251114-134406-a7ebba` vs. `pcct-20251114-134507-6efbf5`) shows smaller spreads (~±1 ms semisort, ±1 s wall), so keep both pairs for regression diffs.
+- Masked append is automatically disabled when bitset scopes are enabled or when `scope_limit` is unset, so sparse/legacy flows stay untouched.
+
 #### 2025-11-17 Higher-scale check-ins (48 k / 64 k)
 
 - **48 k run (`artifacts/benchmarks/residual_dense_49152_maskopt_v2_default.jsonl`):** median dominated `traversal_semisort_ms≈244 ms`, kernel medians ≈39 ms, total traversal across 95 dominated batches ≈53.2 s. Build wall ≈60 s, so scaling from 32 k is still close to linear in traversal time.

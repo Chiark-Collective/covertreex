@@ -20,7 +20,14 @@ from covertreex.metrics.residual import (
 )
 from covertreex.metrics.residual.scope_caps import get_scope_cap_table
 
-from ..._residual_scope_numba import residual_scope_append, residual_scope_reset
+from ..._residual_scope_numba import (
+    residual_scope_append,
+    residual_scope_append_masked,
+    residual_scope_reset,
+    residual_scope_dynamic_tile_stride,
+    residual_scope_update_budget_state,
+    NUMBA_RESIDUAL_SCOPE_AVAILABLE,
+)
 from ..._scope_numba import build_scope_csr_from_pairs
 from ...semisort import select_topk_by_level
 from ..base import (
@@ -165,6 +172,8 @@ def _collect_residual_scopes_streaming_serial(
     cache_hits_total = 0
     cache_prefetch_total = 0
     budget_schedule = tuple(scope_budget_schedule or ())
+    budget_schedule_arr = np.asarray(budget_schedule, dtype=np.int64)
+    budget_schedule_arr = np.asarray(budget_schedule, dtype=np.int64)
     budget_up = float(scope_budget_up_thresh) if scope_budget_up_thresh is not None else 0.0
     budget_down = float(scope_budget_down_thresh) if scope_budget_down_thresh is not None else 0.0
     budget_enabled = bool(budget_schedule)
@@ -472,6 +481,7 @@ def _collect_residual_scopes_streaming_parallel(
     bitset_enabled: bool = False,
     dynamic_query_block: bool = False,
     dense_scope_streamer: bool = False,
+    masked_scope_append: bool = True,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -553,10 +563,19 @@ def _collect_residual_scopes_streaming_parallel(
     max_scope_after = 0
     saturation_flags = np.zeros(batch_size, dtype=np.uint8)
 
+    scope_buffers: np.ndarray | None = None
+    if not bitset_enabled and limit_value > 0:
+        buffer_capacity = min(limit_value, max_points)
+        if buffer_capacity > 0:
+            scope_buffers = np.empty((batch_size, buffer_capacity), dtype=np.int64)
+
+    use_masked_append = bool(masked_scope_append and scope_buffers is not None and not bitset_enabled)
+
     scan_cap_value = scan_cap if scan_cap and scan_cap > 0 else None
 
     tree_positions_np = np.arange(total_points, dtype=np.int64)
     budget_schedule = tuple(scope_budget_schedule or ())
+    budget_schedule_arr = np.asarray(budget_schedule, dtype=np.int64)
     budget_up = float(scope_budget_up_thresh) if scope_budget_up_thresh is not None else 0.0
     budget_down = float(scope_budget_down_thresh) if scope_budget_down_thresh is not None else 0.0
     budget_enabled = bool(budget_schedule)
@@ -600,6 +619,7 @@ def _collect_residual_scopes_streaming_parallel(
             radius = float(radii[qi])
             flags_row = flags_matrix[qi]
             bitset_row = scope_bitsets[qi] if bitset_enabled else None
+            buffer_row = scope_buffers[qi] if scope_buffers is not None else None
             if budget_enabled:
                 initial_limit = budget_schedule[0] if budget_schedule else 0
                 if scan_cap_value is not None:
@@ -640,32 +660,61 @@ def _collect_residual_scopes_streaming_parallel(
                         telemetry=distance_telemetry,
                         force_whitened=force_whitened,
                     )
-                    cache_include = np.nonzero(cache_mask)[0]
-                    if cache_include.size:
-                        cache_hits_total += int(cache_include.size)
-                        include_positions = valid_cached[cache_include]
-                        scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
-                            flags_row,
-                            bitset_row,
-                            include_positions,
-                            limit_value,
-                            int(scope_counts[qi]),
+                    cache_included = 0
+                    if use_masked_append:
+                        cache_included = int(np.count_nonzero(cache_mask))
+                        (
+                            scope_counts[qi],
+                            dedupe_delta,
+                            trimmed_flag,
+                            added,
+                            obs_val,
+                        ) = _append_scope_positions_masked(
+                            flags_row=flags_row,
+                            bitset_row=None,
+                            mask_row=cache_mask,
+                            distances_row=cache_distances,
+                            tile_positions=valid_cached,
+                            limit_value=limit_value,
+                            scope_count=int(scope_counts[qi]),
+                            buffer_row=buffer_row,
                         )
-                        if added and budget_applied[qi]:
-                            budget_survivors[qi] += int(added)
-                        dedupe_hits[qi] += dedupe_delta
-                        if added:
-                            obs = float(np.max(cache_distances[cache_include]))
-                            if obs > observed_radii[qi]:
-                                observed_radii[qi] = obs
-                            if limit_value and scope_counts[qi] >= limit_value:
-                                trimmed_flags[qi] = True
-                                saturated[qi] = True
-                                saturated_flags[qi] = 1
-                        if trimmed_flag:
+                    else:
+                        cache_include = np.nonzero(cache_mask)[0]
+                        dedupe_delta = 0
+                        trimmed_flag = False
+                        added = 0
+                        obs_val = 0.0
+                        if cache_include.size:
+                            cache_hits_total += int(cache_include.size)
+                            include_positions = valid_cached[cache_include]
+                            scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
+                                flags_row,
+                                bitset_row,
+                                include_positions,
+                                limit_value,
+                                int(scope_counts[qi]),
+                                buffer_row=buffer_row,
+                            )
+                            if added:
+                                obs_val = float(np.max(cache_distances[cache_include]))
+                            cache_included = int(cache_include.size)
+                    if cache_included:
+                        cache_hits_total += cache_included
+                    if added and budget_applied[qi]:
+                        budget_survivors[qi] += int(added)
+                    dedupe_hits[qi] += dedupe_delta
+                    if added:
+                        if obs_val > observed_radii[qi]:
+                            observed_radii[qi] = obs_val
+                        if limit_value and scope_counts[qi] >= limit_value:
                             trimmed_flags[qi] = True
                             saturated[qi] = True
                             saturated_flags[qi] = 1
+                    if trimmed_flag:
+                        trimmed_flags[qi] = True
+                        saturated[qi] = True
+                        saturated_flags[qi] = 1
             block_valid.append(qi)
 
         block_idx_arr = np.asarray(block_valid, dtype=np.int64)
@@ -745,33 +794,57 @@ def _collect_residual_scopes_streaming_parallel(
                     qi = int(block_idx_arr[block_slot])
                     if saturated[qi]:
                         continue
-                    distances_row = dist_block[local_idx]
                     mask_row = mask_block[local_idx]
-                    include_idx = np.nonzero(mask_row)[0]
-                    if include_idx.size:
-                        include_positions = tile_positions[include_idx]
-                        scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
-                            flags_matrix[qi],
-                            scope_bitsets[qi] if bitset_enabled else None,
-                            include_positions,
-                            limit_value,
-                            int(scope_counts[qi]),
+                    distances_row = dist_block[local_idx]
+                    if use_masked_append:
+                        (
+                            scope_counts[qi],
+                            dedupe_delta,
+                            trimmed_flag,
+                            added,
+                            observed_val,
+                        ) = _append_scope_positions_masked(
+                            flags_row=flags_matrix[qi],
+                            bitset_row=None,
+                            mask_row=mask_row,
+                            distances_row=distances_row,
+                            tile_positions=tile_positions,
+                            limit_value=limit_value,
+                            scope_count=int(scope_counts[qi]),
+                            buffer_row=scope_buffers[qi],
                         )
-                        dedupe_hits[qi] += dedupe_delta
-                        if added:
-                            obs = float(np.max(distances_row[include_idx]))
-                            if obs > observed_radii[qi]:
-                                observed_radii[qi] = obs
-                            if budget_applied[qi]:
-                                budget_survivors[qi] += int(added)
-                            if limit_value and scope_counts[qi] >= limit_value:
-                                trimmed_flags[qi] = True
-                                saturated[qi] = True
-                                saturated_flags[qi] = 1
-                        if trimmed_flag:
+                    else:
+                        include_idx = np.nonzero(mask_row)[0]
+                        dedupe_delta = 0
+                        trimmed_flag = False
+                        added = 0
+                        observed_val = 0.0
+                        if include_idx.size:
+                            include_positions = tile_positions[include_idx]
+                            scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
+                                flags_matrix[qi],
+                                scope_bitsets[qi] if bitset_enabled else None,
+                                include_positions,
+                                limit_value,
+                                int(scope_counts[qi]),
+                                buffer_row=scope_buffers[qi] if scope_buffers is not None else None,
+                            )
+                            if added:
+                                observed_val = float(np.max(distances_row[include_idx]))
+                    dedupe_hits[qi] += dedupe_delta
+                    if added:
+                        if observed_val > observed_radii[qi]:
+                            observed_radii[qi] = observed_val
+                        if budget_applied[qi]:
+                            budget_survivors[qi] += int(added)
+                        if limit_value and scope_counts[qi] >= limit_value:
                             trimmed_flags[qi] = True
                             saturated[qi] = True
                             saturated_flags[qi] = 1
+                    if trimmed_flag:
+                        trimmed_flags[qi] = True
+                        saturated[qi] = True
+                        saturated_flags[qi] = 1
                     _update_scope_budget_state(
                         qi,
                         chunk_points,
@@ -779,7 +852,7 @@ def _collect_residual_scopes_streaming_parallel(
                         budget_applied,
                         budget_up,
                         budget_down,
-                        budget_schedule,
+                        budget_schedule_arr,
                         budget_indices,
                         budget_limits,
                         budget_final_limits,
@@ -807,6 +880,7 @@ def _collect_residual_scopes_streaming_parallel(
                 np.asarray([parent_pos], dtype=np.int64),
                 limit_value,
                 int(scope_counts[qi]),
+                buffer_row=scope_buffers[qi] if scope_buffers is not None else None,
             )
             dedupe_hits[qi] += dedupe_delta
             if limit_value and scope_counts[qi] >= limit_value:
@@ -824,6 +898,7 @@ def _collect_residual_scopes_streaming_parallel(
                     chain_positions,
                     limit_value,
                     int(scope_counts[qi]),
+                    buffer_row=scope_buffers[qi] if scope_buffers is not None else None,
                 )
                 dedupe_hits[qi] += dedupe_delta
                 if limit_value and scope_counts[qi] >= limit_value:
@@ -837,7 +912,14 @@ def _collect_residual_scopes_streaming_parallel(
             if limit_value and scope_vec.size > limit_value:
                 level_slice = top_levels_np[scope_vec]
                 scope_vec = select_topk_by_level(scope_vec, level_slice, limit_value)
-            flags_row[: total_points] = 0
+            if scope_buffers is not None:
+                residual_scope_reset(
+                    flags_row,
+                    scope_buffers[qi],
+                    int(scope_counts[qi]),
+                )
+            else:
+                flags_row[: total_points] = 0
             if bitset_enabled and scope_bitsets is not None:
                 scope_bitsets[qi].fill(0)
             original_size = scope_vec.size
@@ -960,7 +1042,7 @@ def _update_scope_budget_state(
     budget_applied: np.ndarray,
     budget_up: float,
     budget_down: float,
-    budget_schedule: Tuple[int, ...] | None,
+    budget_schedule_arr: np.ndarray,
     budget_indices: np.ndarray,
     budget_limits: np.ndarray,
     budget_final_limits: np.ndarray,
@@ -971,22 +1053,41 @@ def _update_scope_budget_state(
     saturated: np.ndarray,
     saturated_flags: np.ndarray,
 ) -> None:
+    if NUMBA_RESIDUAL_SCOPE_AVAILABLE:
+        scan_value = int(scan_cap_value) if scan_cap_value is not None else -1
+        residual_scope_update_budget_state(
+            qi,
+            chunk_points,
+            scan_value,
+            budget_applied,
+            budget_up,
+            budget_down,
+            budget_schedule_arr,
+            budget_indices,
+            budget_limits,
+            budget_final_limits,
+            budget_escalations,
+            budget_low_streak,
+            budget_survivors,
+            budget_early_flags,
+            saturated,
+            saturated_flags,
+        )
+        return
+
+    schedule_tuple = tuple(int(x) for x in np.asarray(budget_schedule_arr, dtype=np.int64))
     if scan_cap_value and chunk_points[qi] >= scan_cap_value:
         saturated[qi] = True
         saturated_flags[qi] = 1
         return
-    if (
-        budget_applied[qi]
-        and not saturated[qi]
-        and chunk_points[qi] > 0
-    ):
+    if budget_applied[qi] and not saturated[qi] and chunk_points[qi] > 0:
         ratio = budget_survivors[qi] / float(chunk_points[qi])
         if (
             ratio >= budget_up
-            and budget_schedule
-            and budget_indices[qi] + 1 < len(budget_schedule)
+            and schedule_tuple
+            and budget_indices[qi] + 1 < len(schedule_tuple)
         ):
-            next_limit = budget_schedule[budget_indices[qi] + 1]
+            next_limit = schedule_tuple[budget_indices[qi] + 1]
             if scan_cap_value is not None:
                 next_limit = min(next_limit, scan_cap_value)
             if next_limit > budget_limits[qi]:
@@ -1031,16 +1132,107 @@ def _append_scope_positions(
     positions: np.ndarray,
     limit_value: int,
     scope_count: int,
+    *,
+    buffer_row: np.ndarray | None = None,
 ) -> tuple[int, int, bool, int]:
-    if bitset_row is None:
-        return _append_scope_positions_dense(flags_row, positions, limit_value, scope_count)
-    return _append_scope_positions_bitset(
+    if bitset_row is not None:
+        return _append_scope_positions_bitset(
+            flags_row,
+            bitset_row,
+            positions,
+            limit_value,
+            scope_count,
+        )
+    if buffer_row is not None:
+        return _append_scope_positions_numba(
+            flags_row,
+            buffer_row,
+            positions,
+            limit_value,
+            scope_count,
+        )
+    return _append_scope_positions_dense(flags_row, positions, limit_value, scope_count)
+
+
+def _append_scope_positions_masked(
+    *,
+    flags_row: np.ndarray,
+    bitset_row: np.ndarray | None,
+    mask_row: np.ndarray,
+    distances_row: np.ndarray,
+    tile_positions: np.ndarray,
+    limit_value: int,
+    scope_count: int,
+    buffer_row: np.ndarray | None = None,
+) -> tuple[int, int, bool, int, float]:
+    mask_arr = np.asarray(mask_row)
+    if mask_arr.size == 0 or not np.any(mask_arr):
+        return scope_count, 0, False, 0, 0.0
+    if bitset_row is None and buffer_row is not None:
+        mask_u8 = np.ascontiguousarray(mask_arr, dtype=np.uint8)
+        distances_arr = np.ascontiguousarray(distances_row, dtype=np.float64)
+        tile_arr = np.ascontiguousarray(tile_positions, dtype=np.int64)
+        respect_limit = bool(limit_value and limit_value > 0)
+        if respect_limit:
+            limit_arg = min(int(limit_value), int(buffer_row.shape[0]))
+        else:
+            limit_arg = int(buffer_row.shape[0])
+        new_count, dedupe_hits, trimmed, added, observed = residual_scope_append_masked(
+            flags_row,
+            buffer_row,
+            mask_u8,
+            distances_arr,
+            tile_arr,
+            int(scope_count),
+            limit_arg,
+            respect_limit=respect_limit,
+        )
+        return new_count, dedupe_hits, trimmed, added, observed
+
+    include_idx = np.nonzero(mask_arr)[0]
+    if include_idx.size == 0:
+        return scope_count, 0, False, 0, 0.0
+    positions_arr = np.asarray(tile_positions, dtype=np.int64)[include_idx]
+    distances_arr = np.asarray(distances_row, dtype=np.float64)
+    observed = float(np.max(distances_arr[include_idx])) if include_idx.size else 0.0
+    new_count, dedupe_hits, trimmed, added = _append_scope_positions(
         flags_row,
         bitset_row,
-        positions,
+        positions_arr,
         limit_value,
         scope_count,
+        buffer_row=buffer_row,
     )
+    return new_count, dedupe_hits, trimmed, added, observed
+
+
+def _append_scope_positions_numba(
+    flags_row: np.ndarray,
+    buffer_row: np.ndarray,
+    positions: np.ndarray,
+    limit_value: int,
+    scope_count: int,
+) -> tuple[int, int, bool, int]:
+    positions_arr = np.asarray(positions, dtype=np.int64)
+    if positions_arr.size == 0:
+        return scope_count, 0, False, 0
+    respect_limit = limit_value > 0
+    if respect_limit:
+        limit_arg = int(min(limit_value, buffer_row.shape[0]))
+    else:
+        limit_arg = int(buffer_row.shape[0])
+    prev_count = int(scope_count)
+    new_count, dedupe_hits, saturated = residual_scope_append(
+        flags_row,
+        positions_arr,
+        buffer_row,
+        prev_count,
+        limit_arg,
+        respect_limit=bool(respect_limit),
+    )
+    added = int(new_count - prev_count)
+    trimmed = bool(saturated)
+    return int(new_count), int(dedupe_hits), trimmed, added
 
 
 def _append_scope_positions_dense(
@@ -1141,6 +1333,18 @@ def _compute_dynamic_tile_stride(
     budget_limits: np.ndarray,
 ) -> int:
     """Shrink tile length once surviving budgets are nearly saturated."""
+
+    if NUMBA_RESIDUAL_SCOPE_AVAILABLE:
+        return residual_scope_dynamic_tile_stride(
+            int(base_stride),
+            active_idx,
+            block_idx_arr,
+            scope_counts,
+            int(limit_value),
+            bool(budget_enabled),
+            budget_applied,
+            budget_limits,
+        )
 
     stride = max(1, base_stride)
     if active_idx.size == 0 or (limit_value <= 0 and not budget_enabled):
@@ -1320,6 +1524,7 @@ def _collect_residual(
     bitset_enabled = bool(getattr(runtime, "residual_scope_bitset", False))
     dynamic_query_block = bool(getattr(runtime, "residual_dynamic_query_block", False))
     dense_scope_streamer = bool(getattr(runtime, "residual_dense_scope_streamer", False))
+    masked_scope_append = bool(getattr(runtime, "residual_masked_scope_append", True))
     engine_label = "residual_serial" if gate_active else "residual_parallel"
     (
         scope_indptr_np,
@@ -1358,6 +1563,7 @@ def _collect_residual(
         bitset_enabled=bitset_enabled,
         dynamic_query_block=dynamic_query_block,
         dense_scope_streamer=dense_scope_streamer,
+        masked_scope_append=masked_scope_append,
     )
     semisort_seconds = time.perf_counter() - scope_start
     whitened_pairs_total = int(distance_telemetry.whitened_pairs)

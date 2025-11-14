@@ -14,7 +14,12 @@ This list is reprioritised to focus on the configurations that already deliver �
 ### Scope streamer hot path → Numba / JIT
 - **Goal:** Move the remaining Python loops in `_collect_residual_scopes_streaming_parallel` onto the existing Numba helpers so dense runs stop burning time on per-tile Python bookkeeping once tiles shrink below 64 points.
 - **Why high leverage:** The dense streamer still spends double-digit milliseconds per tile in `_append_scope_positions` and friends even when kernel work is tiny. Porting the dedupe path to `residual_scope_append`/`residual_scope_reset` and hoisting the per-query cache scan into a vectorised or Numba block keeps traversal CPU overhead in line with the ~60 ms kernel medians.
-- **Status:** Not started. Targets: `_append_scope_positions[_dense|_bitset]`, the cache-prefetch path at `covertreex/algo/traverse/strategies/residual.py:600-671`, and the block/tile loop at lines 676-795. Reuse `_residual_scope_numba.py` primitives and add regression tests in `tests/test_residual_parents.py` to guard the new fast path.
+- **Status:** **In flight.** The masked append helper now handles both tile loops and cache-prefetch hits (default flag `--residual-masked-scope-append` / `COVERTREEX_RESIDUAL_MASKED_SCOPE_APPEND=0/1`). Logs `residual_dense_32768_dense_streamer_maskappend_on_run[12].jsonl` show per-batch traversal dropping ≈4–5 s wall vs. the Python path on seed 42 runs; cache-prefetch is no longer bottlenecked on `np.nonzero`.
+
+### Level-cache batching & parent chain Numba port
+- **Goal:** Batch the level-scope prefetch and parent/chain append paths so cached Hilbert windows, parent guarantees, and next-chain inserts use Numba helpers instead of per-query Python loops.
+- **Why high leverage:** Every dominated batch still spends several milliseconds walking `valid_cached` arrays, calling the kernel provider one query at a time, and appending parent/chain positions through Python. Moving those loops into a Numba helper (or vectorising the cache hits) removes the last non-JIT hot spots in the dense streamer.
+- **Status:** Not started. Targets: cache-prefetch block (`strategies/residual.py:600-671`), `_collect_next_chain` insert loop (`strategies/residual.py:799-835`), and `_collect_next_chain` itself in `strategies/common.py`.
 
 ### Scope-budget + tile math JIT
 - **Goal:** JIT the pure-Python helpers `_compute_dynamic_tile_stride` and `_update_scope_budget_state` (plus the tiny budget arrays they drive) so query-block scheduling scales with smaller tiles instead of fighting the GIL every iteration.

@@ -49,6 +49,52 @@ if NUMBA_RESIDUAL_SCOPE_AVAILABLE:
         return count, dedupe, saturated
 
     @njit(cache=True)
+    def _append_positions_masked_impl(
+        flags: np.ndarray,
+        mask_row: np.ndarray,
+        distances_row: np.ndarray,
+        tile_positions: np.ndarray,
+        buffer: np.ndarray,
+        count: int,
+        limit: int,
+        respect_limit: bool,
+    ) -> tuple[int, int, int, int, float]:
+        dedupe = 0
+        saturated = 0
+        added = 0
+        max_distance = 0.0
+        num_flags = flags.shape[0]
+        capacity = buffer.shape[0]
+        limit_enabled = respect_limit and limit > 0
+        current = count
+
+        for col in range(mask_row.shape[0]):
+            if mask_row[col] == 0:
+                continue
+            pos = int(tile_positions[col])
+            if pos < 0 or pos >= num_flags:
+                continue
+            if flags[pos] != 0:
+                dedupe += 1
+                continue
+            flags[pos] = 1
+            if capacity > 0 and current < capacity:
+                buffer[current] = pos
+            current += 1
+            added += 1
+            dist_val = float(distances_row[col])
+            if dist_val > max_distance:
+                max_distance = dist_val
+            if capacity > 0 and current >= capacity:
+                saturated = 1
+                break
+            if limit_enabled and current >= limit:
+                saturated = 1
+                break
+
+        return current, dedupe, saturated, added, max_distance
+
+    @njit(cache=True)
     def _reset_flags_impl(flags: np.ndarray, buffer: np.ndarray, count: int) -> None:
         num_flags = flags.shape[0]
         total = buffer.shape[0]
@@ -57,6 +103,103 @@ if NUMBA_RESIDUAL_SCOPE_AVAILABLE:
             pos = int(buffer[idx])
             if 0 <= pos < num_flags:
                 flags[pos] = 0
+
+    @njit(cache=True)
+    def _dynamic_tile_stride_impl(
+        base_stride: int,
+        active_idx: np.ndarray,
+        block_idx_arr: np.ndarray,
+        scope_counts: np.ndarray,
+        limit_value: int,
+        budget_enabled: bool,
+        budget_applied: np.ndarray,
+        budget_limits: np.ndarray,
+    ) -> int:
+        stride = base_stride if base_stride > 0 else 1
+        if active_idx.size == 0 or (limit_value <= 0 and not budget_enabled):
+            return stride
+        max_remaining = 0
+        for slot in active_idx:
+            qi = int(block_idx_arr[int(slot)])
+            cap = limit_value if limit_value > 0 else 0
+            if budget_enabled and budget_applied[qi]:
+                budget_cap = int(budget_limits[qi])
+                if budget_cap > 0:
+                    if cap <= 0 or budget_cap < cap:
+                        cap = budget_cap
+            if cap <= 0:
+                continue
+            remaining = cap - int(scope_counts[qi])
+            if remaining > max_remaining:
+                max_remaining = remaining
+                if max_remaining >= stride:
+                    return stride
+        if max_remaining <= 0:
+            return stride
+        if max_remaining < stride:
+            stride = max_remaining
+        if stride <= 0:
+            return 1
+        return stride
+
+    @njit(cache=True)
+    def _update_budget_state_impl(
+        qi: int,
+        chunk_points: np.ndarray,
+        scan_cap_value: int,
+        budget_applied: np.ndarray,
+        budget_up: float,
+        budget_down: float,
+        budget_schedule: np.ndarray,
+        budget_indices: np.ndarray,
+        budget_limits: np.ndarray,
+        budget_final_limits: np.ndarray,
+        budget_escalations: np.ndarray,
+        budget_low_streak: np.ndarray,
+        budget_survivors: np.ndarray,
+        budget_early_flags: np.ndarray,
+        saturated: np.ndarray,
+        saturated_flags: np.ndarray,
+    ) -> None:
+        cap_value = scan_cap_value if scan_cap_value > 0 else -1
+        if cap_value > 0 and chunk_points[qi] >= cap_value:
+            saturated[qi] = True
+            saturated_flags[qi] = 1
+            return
+        if budget_applied[qi] and (not saturated[qi]) and chunk_points[qi] > 0:
+            ratio = budget_survivors[qi] / float(chunk_points[qi])
+            schedule_size = budget_schedule.shape[0]
+            if (
+                ratio >= budget_up
+                and schedule_size > 0
+                and budget_indices[qi] + 1 < schedule_size
+            ):
+                next_limit = int(budget_schedule[budget_indices[qi] + 1])
+                if cap_value > 0 and next_limit > cap_value:
+                    next_limit = cap_value
+                if next_limit > budget_limits[qi]:
+                    budget_indices[qi] += 1
+                    budget_limits[qi] = next_limit
+                    budget_final_limits[qi] = next_limit
+                    budget_escalations[qi] += 1
+                    budget_low_streak[qi] = 0
+            elif ratio < budget_down:
+                budget_low_streak[qi] += 1
+                if budget_low_streak[qi] >= 2:
+                    budget_early_flags[qi] = 1
+                    saturated[qi] = True
+                    saturated_flags[qi] = 1
+                    return
+            else:
+                budget_low_streak[qi] = 0
+        if (
+            budget_applied[qi]
+            and not saturated[qi]
+            and budget_limits[qi] > 0
+            and budget_survivors[qi] >= budget_limits[qi]
+        ):
+            saturated[qi] = True
+            saturated_flags[qi] = 1
 
 else:  # pragma: no cover - executed when numba missing
 
@@ -87,6 +230,51 @@ else:  # pragma: no cover - executed when numba missing
 
         return count, dedupe, saturated
 
+    def _append_positions_masked_impl(
+        flags,
+        mask_row,
+        distances_row,
+        tile_positions,
+        buffer,
+        count,
+        limit,
+        respect_limit,
+    ):
+        dedupe = 0
+        saturated = 0
+        added = 0
+        max_distance = 0.0
+        num_flags = flags.shape[0]
+        capacity = buffer.shape[0]
+        limit_enabled = respect_limit and limit > 0
+        current = count
+
+        for col in range(len(mask_row)):
+            if mask_row[col] == 0:
+                continue
+            pos = int(tile_positions[col])
+            if pos < 0 or pos >= num_flags:
+                continue
+            if flags[pos] != 0:
+                dedupe += 1
+                continue
+            flags[pos] = 1
+            if capacity > 0 and current < capacity:
+                buffer[current] = pos
+            current += 1
+            added += 1
+            dist_val = float(distances_row[col])
+            if dist_val > max_distance:
+                max_distance = dist_val
+            if capacity > 0 and current >= capacity:
+                saturated = 1
+                break
+            if limit_enabled and current >= limit:
+                saturated = 1
+                break
+
+        return current, dedupe, saturated, added, max_distance
+
     def _reset_flags_impl(flags, buffer, count):
         num_flags = flags.shape[0]
         total = buffer.shape[0]
@@ -95,6 +283,97 @@ else:  # pragma: no cover - executed when numba missing
             pos = int(buffer[idx])
             if 0 <= pos < num_flags:
                 flags[pos] = 0
+
+    def _dynamic_tile_stride_impl(
+        base_stride,
+        active_idx,
+        block_idx_arr,
+        scope_counts,
+        limit_value,
+        budget_enabled,
+        budget_applied,
+        budget_limits,
+    ):
+        stride = base_stride if base_stride > 0 else 1
+        if len(active_idx) == 0 or (limit_value <= 0 and not budget_enabled):
+            return stride
+        max_remaining = 0
+        for slot in active_idx:
+            qi = int(block_idx_arr[int(slot)])
+            cap = limit_value if limit_value > 0 else 0
+            if budget_enabled and budget_applied[qi]:
+                budget_cap = int(budget_limits[qi])
+                if budget_cap > 0:
+                    if cap <= 0 or budget_cap < cap:
+                        cap = budget_cap
+            if cap <= 0:
+                continue
+            remaining = cap - int(scope_counts[qi])
+            if remaining > max_remaining:
+                max_remaining = remaining
+                if max_remaining >= stride:
+                    return stride
+        if max_remaining <= 0:
+            return stride
+        stride = max(1, min(stride, max_remaining))
+        return stride
+
+    def _update_budget_state_impl(
+        qi,
+        chunk_points,
+        scan_cap_value,
+        budget_applied,
+        budget_up,
+        budget_down,
+        budget_schedule,
+        budget_indices,
+        budget_limits,
+        budget_final_limits,
+        budget_escalations,
+        budget_low_streak,
+        budget_survivors,
+        budget_early_flags,
+        saturated,
+        saturated_flags,
+    ):
+        cap_value = scan_cap_value if scan_cap_value and scan_cap_value > 0 else -1
+        if cap_value > 0 and chunk_points[qi] >= cap_value:
+            saturated[qi] = True
+            saturated_flags[qi] = 1
+            return
+        if budget_applied[qi] and not saturated[qi] and chunk_points[qi] > 0:
+            ratio = budget_survivors[qi] / float(chunk_points[qi])
+            if (
+                ratio >= budget_up
+                and budget_schedule.size > 0
+                and budget_indices[qi] + 1 < budget_schedule.size
+            ):
+                next_limit = int(budget_schedule[budget_indices[qi] + 1])
+                if cap_value > 0 and next_limit > cap_value:
+                    next_limit = cap_value
+                if next_limit > budget_limits[qi]:
+                    budget_indices[qi] += 1
+                    budget_limits[qi] = next_limit
+                    budget_final_limits[qi] = next_limit
+                    budget_escalations[qi] += 1
+                    budget_low_streak[qi] = 0
+            elif ratio < budget_down:
+                budget_low_streak[qi] += 1
+                if budget_low_streak[qi] >= 2:
+                    budget_early_flags[qi] = 1
+                    saturated[qi] = True
+                    saturated_flags[qi] = 1
+                    return
+            else:
+                budget_low_streak[qi] = 0
+        if (
+            budget_applied[qi]
+            and not saturated[qi]
+            and budget_limits[qi] > 0
+            and budget_survivors[qi] >= budget_limits[qi]
+        ):
+            saturated[qi] = True
+            saturated_flags[qi] = 1
 
 
 def residual_scope_append(
@@ -128,8 +407,109 @@ def residual_scope_reset(flags: np.ndarray, buffer: np.ndarray, count: int) -> N
     _reset_flags_impl(flags, buffer, int(count))
 
 
+def residual_scope_append_masked(
+    flags: np.ndarray,
+    buffer: np.ndarray,
+    mask_row: np.ndarray,
+    distances_row: np.ndarray,
+    tile_positions: np.ndarray,
+    count: int,
+    limit: int,
+    *,
+    respect_limit: bool = True,
+) -> tuple[int, int, bool, int, float]:
+    """Append members selected by a boolean mask without copying positions."""
+
+    new_count, dedupe_hits, saturated, added, observed = _append_positions_masked_impl(
+        flags,
+        mask_row,
+        distances_row,
+        tile_positions,
+        buffer,
+        int(count),
+        int(limit),
+        bool(respect_limit),
+    )
+    return (
+        int(new_count),
+        int(dedupe_hits),
+        bool(saturated),
+        int(added),
+        float(observed),
+    )
+
+
+def residual_scope_dynamic_tile_stride(
+    base_stride: int,
+    active_idx: np.ndarray,
+    block_idx_arr: np.ndarray,
+    scope_counts: np.ndarray,
+    limit_value: int,
+    budget_enabled: bool,
+    budget_applied: np.ndarray,
+    budget_limits: np.ndarray,
+) -> int:
+    """Return the stride to use for the next kernel tile."""
+
+    return int(
+        _dynamic_tile_stride_impl(
+            int(base_stride),
+            active_idx,
+            block_idx_arr,
+            scope_counts,
+            int(limit_value),
+            bool(budget_enabled),
+            budget_applied,
+            budget_limits,
+        )
+    )
+
+
+def residual_scope_update_budget_state(
+    qi: int,
+    chunk_points: np.ndarray,
+    scan_cap_value: int,
+    budget_applied: np.ndarray,
+    budget_up: float,
+    budget_down: float,
+    budget_schedule: np.ndarray,
+    budget_indices: np.ndarray,
+    budget_limits: np.ndarray,
+    budget_final_limits: np.ndarray,
+    budget_escalations: np.ndarray,
+    budget_low_streak: np.ndarray,
+    budget_survivors: np.ndarray,
+    budget_early_flags: np.ndarray,
+    saturated: np.ndarray,
+    saturated_flags: np.ndarray,
+) -> None:
+    """Update budget escalation/early-stop state for a single query."""
+
+    _update_budget_state_impl(
+        int(qi),
+        chunk_points,
+        int(scan_cap_value),
+        budget_applied,
+        float(budget_up),
+        float(budget_down),
+        budget_schedule,
+        budget_indices,
+        budget_limits,
+        budget_final_limits,
+        budget_escalations,
+        budget_low_streak,
+        budget_survivors,
+        budget_early_flags,
+        saturated,
+        saturated_flags,
+    )
+
+
 __all__ = [
     "NUMBA_RESIDUAL_SCOPE_AVAILABLE",
     "residual_scope_append",
     "residual_scope_reset",
+    "residual_scope_append_masked",
+    "residual_scope_dynamic_tile_stride",
+    "residual_scope_update_budget_state",
 ]

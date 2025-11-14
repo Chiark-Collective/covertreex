@@ -158,6 +158,9 @@ def runtime_from_args(
     residual_dense_scope_streamer = _get_arg(args, "residual_dense_scope_streamer")
     if residual_dense_scope_streamer is not None:
         runtime_kwargs["residual_dense_scope_streamer"] = bool(residual_dense_scope_streamer)
+    residual_masked_scope_append = _get_arg(args, "residual_masked_scope_append")
+    if residual_masked_scope_append is not None:
+        runtime_kwargs["residual_masked_scope_append"] = bool(residual_masked_scope_append)
     residual_policy = _residual_policy_from_args(args)
     if residual_policy is not None:
         runtime_kwargs["residual"] = residual_policy
