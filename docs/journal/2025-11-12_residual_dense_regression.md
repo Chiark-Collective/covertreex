@@ -438,6 +438,7 @@ We re-ran both the 4 k “shakeout” and the full 32 k Hilbert sweep with t
   ```
 
 - Artefact `pcct-20251114-141549-e500d8` reports `build≈20.6 s`, `traversal_semisort_ms` median **46.9 ms** (p90 **66.3 ms**), total traversal **≈16.9 s**, and `traversal_scope_chunk_points` bounded at **1.03 M** (64 survivors/query). Cached pairwise reuse stayed at 64/64 batches and no budget escalations fired. This run supersedes `…dense_streamer_gold.jsonl` as the documented baseline going forward.
+- **Update (2025-11-17):** Enabling level-cache batching + the new `residual_collect_next_chain` helper drops the same 32 k preset to `build≈18.4 s`, `traversal_semisort_ms≈37 ms` (`pcct-20251114-162220-9efaf0`, log `artifacts/benchmarks/residual_dense_32768_dense_streamer_levelcache_rerun.jsonl`). Diagnostics-off best-of-3: **19.09 s** wall.
   - Total traversal time **≈34.1 s**, more than 6× faster than the guardrails-off rerun (2–3 s semisort pulses, >2 h wall, see earlier regression note).
 
 > **Default rollout:** `cli/queries` now passes `--residual-stream-tile 64` by default (and the runtime mirrors that when `COVERTREEX_RESIDUAL_STREAM_TILE` is unset), so every dense residual run automatically inherits the tiling cap unless operators explicitly override it. Keep the member cap enabled unless running an explicit “guardrails off” investigation; both knobs are surfaced in JSONL telemetry for auditing.

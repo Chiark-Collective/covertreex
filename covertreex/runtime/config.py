@@ -263,6 +263,7 @@ class RuntimeConfig:
     residual_masked_scope_append: bool
     residual_dynamic_query_block: bool
     residual_dense_scope_streamer: bool
+    residual_level_cache_batching: bool
     residual_scope_cap_path: str | None
     residual_scope_cap_default: float
     residual_prefilter_enabled: bool
@@ -450,6 +451,10 @@ class RuntimeConfig:
             os.getenv("COVERTREEX_RESIDUAL_DENSE_SCOPE_STREAMER"),
             default=_DEFAULT_RESIDUAL_DENSE_SCOPE_STREAMER,
         )
+        residual_level_cache_batching = _bool_from_env(
+            os.getenv("COVERTREEX_RESIDUAL_LEVEL_CACHE_BATCHING"),
+            default=True,
+        )
         raw_scope_member_limit = _parse_optional_int(
             os.getenv("COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT")
         )
@@ -552,6 +557,7 @@ class RuntimeConfig:
             residual_masked_scope_append=residual_masked_scope_append,
             residual_dynamic_query_block=residual_dynamic_query_block,
             residual_dense_scope_streamer=residual_dense_scope_streamer,
+            residual_level_cache_batching=residual_level_cache_batching,
             residual_scope_cap_path=residual_scope_cap_path,
             residual_scope_cap_default=residual_scope_cap_default,
             residual_prefilter_enabled=residual_prefilter_enabled,
@@ -731,6 +737,7 @@ def describe_runtime() -> Dict[str, Any]:
         "residual_force_whitened": config.residual_force_whitened,
         "residual_scope_bitset": config.residual_scope_bitset,
         "residual_dynamic_query_block": config.residual_dynamic_query_block,
+        "residual_level_cache_batching": config.residual_level_cache_batching,
         "residual_scope_member_limit": config.residual_scope_member_limit,
         "residual_scope_cap_path": config.residual_scope_cap_path,
         "residual_scope_cap_default": config.residual_scope_cap_default,

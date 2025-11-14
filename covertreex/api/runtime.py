@@ -196,6 +196,7 @@ class Runtime:
     residual_masked_scope_append: bool | None = None
     residual_dynamic_query_block: bool | None = None
     residual_dense_scope_streamer: bool | None = None
+    residual_level_cache_batching: bool | None = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_config(self, base: cx_config.RuntimeConfig | None = None) -> cx_config.RuntimeConfig:
@@ -257,6 +258,11 @@ class Runtime:
             overrides,
             "residual_dense_scope_streamer",
             self.residual_dense_scope_streamer,
+        )
+        _apply_if_present(
+            overrides,
+            "residual_level_cache_batching",
+            self.residual_level_cache_batching,
         )
         overrides.update(self.extra)
         if not overrides:

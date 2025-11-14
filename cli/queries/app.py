@@ -73,6 +73,7 @@ class QueryCLIOptions:
     residual_dynamic_query_block: bool | None = None
     residual_dense_scope_streamer: bool | None = None
     residual_masked_scope_append: bool | None = None
+    residual_level_cache_batching: bool | None = True
     residual_gate: str | None = "off"
     residual_gate_lookup_path: str = "docs/data/residual_gate_profile_diag0.json"
     residual_gate_margin: float = 0.02
@@ -443,6 +444,14 @@ def cli(
             rich_help_panel=_RESIDUAL_PANEL,
         ),
     ] = None,
+    residual_level_cache_batching: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--residual-level-cache-batching/--no-residual-level-cache-batching",
+            help="Batch level-scope cache prefetching + parent-chain insertion (default on).",
+            rich_help_panel=_RESIDUAL_PANEL,
+        ),
+    ] = True,
     residual_scope_caps: Annotated[
         Optional[str],
         typer.Option(
@@ -707,6 +716,8 @@ def cli(
         residual_scope_bitset=residual_scope_bitset,
         residual_dynamic_query_block=residual_dynamic_query_block,
         residual_dense_scope_streamer=residual_dense_scope_streamer,
+        residual_masked_scope_append=residual_masked_scope_append,
+        residual_level_cache_batching=residual_level_cache_batching,
         residual_scope_caps=residual_scope_caps,
         residual_scope_cap_default=residual_scope_cap_default,
         residual_scope_cap_output=residual_scope_cap_output,

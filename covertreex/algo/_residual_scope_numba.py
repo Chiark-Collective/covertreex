@@ -702,6 +702,69 @@ def residual_scope_update_budget_state(
     )
 
 
+if NUMBA_RESIDUAL_SCOPE_AVAILABLE:
+
+    @njit(cache=True)
+    def _collect_next_chain_impl(
+        next_cache: np.ndarray,
+        start: int,
+        visited: np.ndarray,
+        buffer: np.ndarray,
+    ) -> int:
+        count = 0
+        total = next_cache.shape[0]
+        current = int(start)
+        while 0 <= current < total:
+            if visited[current] != 0:
+                break
+            visited[current] = 1
+            buffer[count] = current
+            count += 1
+            nxt = int(next_cache[current])
+            if nxt < 0:
+                break
+            current = nxt
+        for idx in range(count):
+            node = int(buffer[idx])
+            if 0 <= node < total:
+                visited[node] = 0
+        return count
+
+
+def residual_collect_next_chain(
+    next_cache: np.ndarray,
+    start: int,
+    visited: np.ndarray,
+    buffer: np.ndarray,
+) -> int:
+    """Collect parent→child chains using a reusable scratch buffer."""
+
+    if start < 0 or start >= next_cache.shape[0]:
+        return 0
+
+    if NUMBA_RESIDUAL_SCOPE_AVAILABLE:
+        return int(_collect_next_chain_impl(next_cache, int(start), visited, buffer))
+
+    total = next_cache.shape[0]
+    count = 0
+    current = int(start)
+    while 0 <= current < total:
+        if visited[current] != 0:
+            break
+        visited[current] = 1
+        buffer[count] = current
+        count += 1
+        nxt = int(next_cache[current])
+        if nxt < 0:
+            break
+        current = nxt
+    for idx in range(count):
+        node = int(buffer[idx])
+        if 0 <= node < total:
+            visited[node] = 0
+    return count
+
+
 __all__ = [
     "NUMBA_RESIDUAL_SCOPE_AVAILABLE",
     "residual_scope_append",
@@ -711,4 +774,5 @@ __all__ = [
     "residual_scope_append_masked_bitset",
     "residual_scope_dynamic_tile_stride",
     "residual_scope_update_budget_state",
+    "residual_collect_next_chain",
 ]

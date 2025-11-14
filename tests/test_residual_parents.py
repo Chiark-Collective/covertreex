@@ -220,6 +220,76 @@ def test_parallel_streaming_tiles_with_scope_limit() -> None:
     assert recorded and max(recorded) <= 3
 
 
+def test_level_cache_prefetch_batches_queries() -> None:
+    backend = _build_host_backend()
+    base_kernel = backend.kernel_provider
+    counter = {"calls": 0}
+
+    def tracking_kernel(rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+        counter["calls"] += 1
+        return base_kernel(rows, cols)
+
+    backend = replace(backend, kernel_provider=tracking_kernel)
+    tree_indices = np.array([0, 1, 2], dtype=np.int64)
+    query_indices = np.array([0, 1], dtype=np.int64)
+    radii = np.array([1.0, 1.0], dtype=np.float64)
+    flags_matrix = np.zeros((2, tree_indices.size), dtype=np.uint8)
+    scope_counts = np.zeros(2, dtype=np.int64)
+    budget_applied = np.zeros(2, dtype=bool)
+    budget_survivors = np.zeros(2, dtype=np.int64)
+    trimmed_flags = np.zeros(2, dtype=bool)
+    saturated = np.zeros(2, dtype=bool)
+    saturated_flags = np.zeros(2, dtype=np.uint8)
+    dedupe_hits = np.zeros(2, dtype=np.int64)
+    observed_radii = np.zeros(2, dtype=np.float64)
+    telemetry = ResidualDistanceTelemetry()
+    workspace = ResidualWorkspace(max_queries=2, max_chunk=backend.chunk_size)
+
+    prefetch, hits = residual_strategy._process_level_cache_hits(
+        cache_jobs={0: [0, 1]},
+        level_scope_cache={0: np.array([0, 1], dtype=np.int64)},
+        total_points=tree_indices.size,
+        tree_indices_np=tree_indices,
+        query_indices=query_indices,
+        radii=radii,
+        host_backend=backend,
+        distance_telemetry=telemetry,
+        limit_value=0,
+        force_whitened=False,
+        use_masked_append=False,
+        bitset_enabled=False,
+        scope_buffers=None,
+        scope_counts=scope_counts,
+        scope_bitsets=None,
+        flags_matrix=flags_matrix,
+        budget_applied=budget_applied,
+        budget_survivors=budget_survivors,
+        trimmed_flags=trimmed_flags,
+        saturated=saturated,
+        saturated_flags=saturated_flags,
+        dedupe_hits=dedupe_hits,
+        observed_radii=observed_radii,
+        shared_workspace=workspace,
+    )
+
+    assert prefetch == 4
+    assert hits >= 0
+    assert counter["calls"] == 1
+
+
+def test_residual_collect_next_chain_tracks_sequence() -> None:
+    next_cache = np.array([1, 2, -1], dtype=np.int64)
+    visited = np.zeros(next_cache.size, dtype=np.uint8)
+    buffer = np.zeros(next_cache.size, dtype=np.int64)
+
+    count = residual_strategy.residual_collect_next_chain(next_cache, 0, visited, buffer)
+    assert count == 3
+    assert np.array_equal(buffer[:count], np.array([0, 1, 2], dtype=np.int64))
+
+    count_again = residual_strategy.residual_collect_next_chain(next_cache, 0, visited, buffer)
+    assert count_again == 3
+
+
 def test_parallel_streaming_dynamic_tile_respects_budget() -> None:
     backend = _build_host_backend(chunk_size=32)
     base_kernel = backend.kernel_provider

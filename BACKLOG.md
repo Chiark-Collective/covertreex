@@ -6,26 +6,6 @@ This list is reprioritised to focus on the configurations that already deliver �
 
 ## A. Guarding the 32 k / <20 s Baseline
 
-### Scope streamer & budget fixes for dense runs
-- **Goal:** Reintroduce a dense scope streamer that scans each 512-point chunk once, honours ≤64 survivors/query, and restores `traversal_semisort_ms ≤ 50 ms`—the biggest lever left on the now-sub-20 s pipeline.
-- **Why high leverage:** Even with Hilbert+grid, traversal is still the dominant cost; capping per-batch scans is the most direct way to push below 15 s without touching the rest of the pipeline.
-- **Status:** The new single-pass dense scope streamer (`--residual-dense-scope-streamer`, enabled by default) processes each 512-point chunk once per batch and keeps the ≤64 survivor cap intact. The latest 32 k Hilbert run (`artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_bitset.jsonl`) drops dominated batches to `traversal_semisort_ms≈47 ms` (p90 ≈66 ms) with total traversal **≈16.9 s**, a ≥2× improvement over the old maskopt_v2 baseline (`≈296 ms`, 34.5 s total). The 4 k guardrail (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_dense_streamer_gold.jsonl`) stays well under the `<1 s` target (median `≈42 ms`). Bitset streaming is now **on** by default; disable the dense streamer via `--no-residual-dense-scope-streamer` / `COVERTREEX_RESIDUAL_DENSE_SCOPE_STREAMER=0` (and `--no-residual-scope-bitset`) for legacy comparisons.
-
-### Scope streamer hot path → Numba / JIT
-- **Goal:** Move the remaining Python loops in `_collect_residual_scopes_streaming_parallel` onto the existing Numba helpers so dense runs stop burning time on per-tile Python bookkeeping once tiles shrink below 64 points.
-- **Why high leverage:** The dense streamer still spends double-digit milliseconds per tile in `_append_scope_positions` and friends even when kernel work is tiny. Porting the dedupe path to `residual_scope_append`/`residual_scope_reset` and hoisting the per-query cache scan into a vectorised or Numba block keeps traversal CPU overhead in line with the ~60 ms kernel medians.
-- **Status:** **Complete (2025-11-14).** Bitset scopes now route through Numba for both direct and masked appends, so `--residual-scope-bitset` is enabled by default. New log `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_bitset.jsonl` (`pcct-20251114-141549-e500d8`) records `traversal_semisort_ms` median **≈47 ms** (p90 ≈66 ms) with total traversal ≈16.9 s.
-
-### Level-cache batching & parent chain Numba port
-- **Goal:** Batch the level-scope prefetch and parent/chain append paths so cached Hilbert windows, parent guarantees, and next-chain inserts use Numba helpers instead of per-query Python loops.
-- **Why high leverage:** Every dominated batch still spends several milliseconds walking `valid_cached` arrays, calling the kernel provider one query at a time, and appending parent/chain positions through Python. Moving those loops into a Numba helper (or vectorising the cache hits) removes the last non-JIT hot spots in the dense streamer.
-- **Status:** Not started. Targets: cache-prefetch block (`strategies/residual.py:600-671`), `_collect_next_chain` insert loop (`strategies/residual.py:799-835`), and `_collect_next_chain` itself in `strategies/common.py`.
-
-### Scope-budget + tile math JIT
-- **Goal:** JIT the pure-Python helpers `_compute_dynamic_tile_stride` and `_update_scope_budget_state` (plus the tiny budget arrays they drive) so query-block scheduling scales with smaller tiles instead of fighting the GIL every iteration.
-- **Why high leverage:** Dense tiles now fire these helpers per Hilbert chunk; turning them into cached `@njit` routines would eliminate millions of Python/NumPy transitions per 32 k run and keep traversal overhead negligible compared to kernel time.
-- **Status:** Not started. Add small Numba modules (mirroring `_residual_scope_numba.py`) that accept plain `np.ndarray` inputs, expose them via the strategy module, and backstop with unit tests covering budget escalations / early exits.
-
 ### Chunk & degree-aware heuristics
 - **Goal:** Keep conflict shard counts bounded under `scope_chunk_target` by merging shards based on pair counts, capping degrees, and reusing arenas; directly reduces scatter/queue time in the <20 s build.
 - **Why high leverage:** The current fastest runs still spike when chunked scopes or high-degree nodes appear; these heuristics target exactly those residual hotspots so the <20 s recipe holds across datasets.
@@ -53,6 +33,24 @@ This list is reprioritised to focus on the configurations that already deliver �
 - **Goal:** Publish the before/after scatter tables for Hilbert + adaptive prefix + grid at 32 k (Euclidean + residual) and document when to fall back to legacy orders; keeps the winning recipe reproducible.
 - **Why high leverage:** The sub-20 s result hinges on this combo; without public artefacts and guidance, the “winning formula” is tribal knowledge and hard to reproduce or compare against.
 - **Status:** Euclidean rerun done; residual prefix run still timing out without the chunk tweaks above.
+
+### Completed (A-tier)
+
+#### Scope streamer & budget fixes for dense runs
+- **Goal:** Reintroduce a dense scope streamer that scans each 512-point chunk once, honours ≤64 survivors/query, and restores `traversal_semisort_ms ≤ 50 ms`.
+- **Outcome:** ✅ `--residual-dense-scope-streamer`, scope bitsets, and dynamic query blocks are now default-on for residual runs. Gold artefact `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_dense_streamer_bitset.jsonl` (`pcct-20251114-141549-e500d8`) delivers **≈20.6 s wall / 16.9 s traversal**, and the 4 k guardrail log `…/residual_phase05_hilbert_4k_dense_streamer_gold.jsonl` confirms `<1 s` semisort before 32 k reruns. Disable via CLI/env toggles only for legacy comparisons.
+
+#### Scope streamer hot path → Numba / JIT
+- **Goal:** Move the remaining Python loops in `_collect_residual_scopes_streaming_parallel` onto the existing Numba helpers.
+- **Outcome:** ✅ Dense scope inserts now route through `residual_scope_append[_masked][_bitset]` by default, so cache-prefetch hits and masked tiles stay inside compiled code. Benchmark `pcct-20251114-141549-e500d8` records `traversal_semisort_ms≈47 ms` (p90 ≈66 ms) with dominated traversal ≈16.9 s, proving the gain.
+
+#### Scope-budget + tile math JIT
+- **Goal:** JIT the pure-Python helpers `_compute_dynamic_tile_stride` and `_update_scope_budget_state` (plus the tiny budget arrays they drive) so query-block scheduling scales with smaller tiles.
+- **Outcome:** ✅ Both helpers now dispatch into `_residual_scope_numba.py` (`residual_scope_dynamic_tile_stride` / `residual_scope_update_budget_state`) whenever Numba is enabled, with delegation enforced in `tests/test_residual_parents.py::test_*delegates_to_numba`. Dense batches therefore avoid repeated Python loops when tiles shrink below survivor budgets.
+
+#### Level-cache batching & parent chain Numba port
+- **Goal:** Batch the level-scope prefetch and parent/chain append paths so cached Hilbert windows, parent guarantees, and next-chain inserts use Numba helpers instead of per-query Python loops.
+- **Outcome:** ✅ `_process_level_cache_hits` now batches cached Hilbert windows per level (see `strategies/residual.py:108-220`, `820-905`), `residual_collect_next_chain` replaces the Python loop in both serial and parallel collectors, and the preset ships enabled by default via `--residual-level-cache-batching`. Fresh artefacts (`pcct-20251114-162220-9efaf0` for 32 k, `pcct-20251114-162122-761439` for 4 k) capture the new gold baseline.
 
 ## B. Next-Level Optimisations (after A is healthy)
 

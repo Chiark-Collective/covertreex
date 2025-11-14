@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import time
@@ -28,6 +28,7 @@ from ..._residual_scope_numba import (
     residual_scope_reset,
     residual_scope_dynamic_tile_stride,
     residual_scope_update_budget_state,
+    residual_collect_next_chain,
     NUMBA_RESIDUAL_SCOPE_AVAILABLE,
 )
 from ..._scope_numba import build_scope_csr_from_pairs
@@ -104,6 +105,154 @@ def _residual_find_parents(
 
     return best_idx, best_dist
 
+
+def _process_level_cache_hits(
+    *,
+    cache_jobs: Dict[int, List[int]],
+    level_scope_cache: Dict[int, np.ndarray],
+    total_points: int,
+    tree_indices_np: np.ndarray,
+    query_indices: np.ndarray,
+    radii: np.ndarray,
+    host_backend: ResidualCorrHostData,
+    distance_telemetry: ResidualDistanceTelemetry,
+    limit_value: int,
+    force_whitened: bool,
+    use_masked_append: bool,
+    bitset_enabled: bool,
+    scope_buffers: np.ndarray | None,
+    scope_counts: np.ndarray,
+    scope_bitsets: np.ndarray | None,
+    flags_matrix: np.ndarray,
+    budget_applied: np.ndarray,
+    budget_survivors: np.ndarray,
+    trimmed_flags: np.ndarray,
+    saturated: np.ndarray,
+    saturated_flags: np.ndarray,
+    dedupe_hits: np.ndarray,
+    observed_radii: np.ndarray,
+    shared_workspace: ResidualWorkspace,
+) -> tuple[int, int]:
+    """Apply cached level scopes to a set of queries, batching kernel fetches."""
+
+    if not cache_jobs:
+        return 0, 0
+
+    total_prefetch = 0
+    total_hits = 0
+
+    for parent_level, qi_list in cache_jobs.items():
+        if parent_level < 0:
+            continue
+        cached_positions = level_scope_cache.get(parent_level)
+        if cached_positions is None or cached_positions.size == 0:
+            continue
+        valid_mask = (cached_positions >= 0) & (cached_positions < total_points)
+        valid_cached = np.asarray(cached_positions[valid_mask], dtype=np.int64)
+        if valid_cached.size == 0:
+            continue
+        qi_arr = np.asarray(qi_list, dtype=np.int64)
+        if qi_arr.size == 0:
+            continue
+        cached_ids = tree_indices_np[valid_cached]
+        query_id_arr = np.asarray(query_indices[qi_arr], dtype=np.int64)
+        radii_arr = np.asarray(radii[qi_arr], dtype=np.float64)
+        total_prefetch += int(valid_cached.size) * int(qi_arr.size)
+        kernel_start = time.perf_counter()
+        kernel_block = host_backend.kernel_provider(query_id_arr, cached_ids)
+        kernel_elapsed = time.perf_counter() - kernel_start
+        distance_telemetry.record_kernel(
+            int(query_id_arr.size),
+            int(cached_ids.size),
+            kernel_elapsed,
+        )
+        if force_whitened:
+            dist_block = np.empty((query_id_arr.size, cached_ids.size), dtype=np.float64)
+            mask_block = np.empty((query_id_arr.size, cached_ids.size), dtype=np.uint8)
+            for local_idx in range(query_id_arr.size):
+                distances_row, mask_row = compute_residual_distances_with_radius(
+                    backend=host_backend,
+                    query_index=int(query_id_arr[local_idx]),
+                    chunk_indices=cached_ids,
+                    kernel_row=kernel_block[local_idx],
+                    radius=float(radii_arr[local_idx]),
+                    workspace=shared_workspace,
+                    telemetry=distance_telemetry,
+                    force_whitened=True,
+                )
+                dist_block[local_idx] = distances_row
+                mask_block[local_idx] = mask_row
+        else:
+            dist_block, mask_block = compute_residual_distances_block_no_gate(
+                backend=host_backend,
+                query_indices=query_id_arr,
+                chunk_indices=cached_ids,
+                kernel_block=kernel_block,
+                radii=radii_arr,
+            )
+        for local_idx, qi in enumerate(qi_arr):
+            if saturated[qi]:
+                continue
+            flags_row = flags_matrix[qi]
+            bitset_row = scope_bitsets[qi] if (bitset_enabled and scope_bitsets is not None) else None
+            buffer_row = scope_buffers[qi] if scope_buffers is not None else None
+            mask_row = mask_block[local_idx]
+            distances_row = dist_block[local_idx]
+            cache_included = int(np.count_nonzero(mask_row))
+            dedupe_delta = 0
+            trimmed_flag = False
+            added = 0
+            observed_val = 0.0
+            if use_masked_append:
+                (
+                    scope_counts[qi],
+                    dedupe_delta,
+                    trimmed_flag,
+                    added,
+                    observed_val,
+                ) = _append_scope_positions_masked(
+                    flags_row=flags_row,
+                    bitset_row=bitset_row,
+                    mask_row=mask_row,
+                    distances_row=distances_row,
+                    tile_positions=valid_cached,
+                    limit_value=limit_value,
+                    scope_count=int(scope_counts[qi]),
+                    buffer_row=buffer_row,
+                )
+            else:
+                include_idx = np.nonzero(mask_row)[0]
+                if include_idx.size:
+                    include_positions = valid_cached[include_idx]
+                    scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
+                        flags_row,
+                        bitset_row,
+                        include_positions,
+                        limit_value,
+                        int(scope_counts[qi]),
+                        buffer_row=buffer_row,
+                    )
+                    if added:
+                        observed_val = float(np.max(distances_row[include_idx]))
+            if cache_included:
+                total_hits += cache_included
+            dedupe_hits[qi] += dedupe_delta
+            if added:
+                if observed_val > observed_radii[qi]:
+                    observed_radii[qi] = observed_val
+                if budget_applied[qi]:
+                    budget_survivors[qi] += int(added)
+                if limit_value and scope_counts[qi] >= limit_value:
+                    trimmed_flags[qi] = True
+                    saturated[qi] = True
+                    saturated_flags[qi] = 1
+            if trimmed_flag:
+                trimmed_flags[qi] = True
+                saturated[qi] = True
+                saturated_flags[qi] = 1
+
+    return total_prefetch, total_hits
+
 def _collect_residual_scopes_streaming_serial(
     *,
     tree: PCCTree,
@@ -122,6 +271,7 @@ def _collect_residual_scopes_streaming_serial(
     telemetry: ResidualDistanceTelemetry | None = None,
     force_whitened: bool = False,
     bitset_enabled: bool = False,
+    level_cache_batching: bool = True,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -168,6 +318,9 @@ def _collect_residual_scopes_streaming_serial(
     flags_length = max(total_points, 1)
     collected_flags = np.zeros(flags_length, dtype=np.uint8)
     scope_buffer = np.empty(flags_length, dtype=np.int64)
+    chain_capacity = max(int(next_cache_np.shape[0]), 1)
+    chain_flags = np.zeros(chain_capacity, dtype=np.uint8)
+    chain_buffer = np.empty(chain_capacity, dtype=np.int64)
     scan_cap_value = scan_cap if scan_cap and scan_cap > 0 else None
     cache_limit = scope_limit if scope_limit and scope_limit > 0 else _RESIDUAL_SCOPE_DEFAULT_LIMIT
     level_scope_cache: Dict[int, np.ndarray] = {}
@@ -359,24 +512,42 @@ def _collect_residual_scopes_streaming_serial(
         # `saturated` indicates we bailed early; keep track of full scans so
         # telemetry can distinguish true caps from naturally small scopes.
 
-        ensure_positions: list[int] = []
-        if 0 <= parent_pos < total_points:
-            ensure_positions.append(int(parent_pos))
-        chain = _collect_next_chain(tree, parent_pos, next_cache=next_cache_np)
-        for node in chain:
-            pos = int(node)
-            if 0 <= pos < total_points:
-                ensure_positions.append(pos)
-        if ensure_positions:
-            ensure_arr = np.asarray(ensure_positions, dtype=np.int64)
-            scope_count, _, _ = residual_scope_append(
-                collected_flags,
-                ensure_arr,
-                scope_buffer,
-                scope_count,
-                limit_value,
-                respect_limit=False,
+        if level_cache_batching:
+            chain_len = residual_collect_next_chain(
+                next_cache_np,
+                parent_pos,
+                chain_flags,
+                chain_buffer,
             )
+            if chain_len > 0:
+                ensure_arr = chain_buffer[:chain_len]
+                scope_count, _, _ = residual_scope_append(
+                    collected_flags,
+                    ensure_arr,
+                    scope_buffer,
+                    scope_count,
+                    limit_value,
+                    respect_limit=False,
+                )
+        else:
+            ensure_positions: list[int] = []
+            if 0 <= parent_pos < total_points:
+                ensure_positions.append(int(parent_pos))
+            chain = _collect_next_chain(tree, parent_pos, next_cache=next_cache_np)
+            for node in chain:
+                pos = int(node)
+                if 0 <= pos < total_points:
+                    ensure_positions.append(pos)
+            if ensure_positions:
+                ensure_arr = np.asarray(ensure_positions, dtype=np.int64)
+                scope_count, _, _ = residual_scope_append(
+                    collected_flags,
+                    ensure_arr,
+                    scope_buffer,
+                    scope_count,
+                    limit_value,
+                    respect_limit=False,
+                )
 
         if scope_count > 0:
             scope_vec = scope_buffer[:scope_count].copy()
@@ -484,6 +655,7 @@ def _collect_residual_scopes_streaming_parallel(
     dynamic_query_block: bool = False,
     dense_scope_streamer: bool = False,
     masked_scope_append: bool = True,
+    level_cache_batching: bool = True,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -533,6 +705,9 @@ def _collect_residual_scopes_streaming_parallel(
     chunk_iterations = np.zeros(batch_size, dtype=np.int64)
     chunk_points = np.zeros(batch_size, dtype=np.int64)
     dedupe_hits = np.zeros(batch_size, dtype=np.int64)
+    chain_capacity = max(int(next_cache_np.shape[0]), 1)
+    chain_flags = np.zeros(chain_capacity, dtype=np.uint8)
+    chain_buffer = np.empty(chain_capacity, dtype=np.int64)
     cache_hits_total = 0
     cache_prefetch_total = 0
     level_scope_cache: Dict[int, np.ndarray] = {}
@@ -618,6 +793,7 @@ def _collect_residual_scopes_streaming_parallel(
     for block_start, block_end in _block_ranges():
         block_range = range(block_start, block_end)
         block_valid: list[int] = []
+        cache_jobs_block: Dict[int, List[int]] = {}
         for qi in block_range:
             if not parents_valid[qi]:
                 continue
@@ -648,82 +824,68 @@ def _collect_residual_scopes_streaming_parallel(
                     (cached_positions >= 0) & (cached_positions < total_points)
                 ]
                 if valid_cached.size:
-                    cache_prefetch_total += int(valid_cached.size)
-                    cached_ids = tree_indices_np[valid_cached]
-                    cache_kernel_start = time.perf_counter()
-                    cache_kernel_full = host_backend.kernel_provider(
-                        np.asarray([query_id], dtype=np.int64),
-                        cached_ids,
-                    )
-                    cache_kernel_elapsed = time.perf_counter() - cache_kernel_start
-                    distance_telemetry.record_kernel(1, int(cached_ids.size), cache_kernel_elapsed)
-                    cache_kernel = cache_kernel_full[0]
-                    cache_distances, cache_mask = compute_residual_distances_with_radius(
-                        backend=host_backend,
-                        query_index=query_id,
-                        chunk_indices=cached_ids,
-                        kernel_row=cache_kernel,
-                        radius=radius,
-                        workspace=shared_workspace,
-                        telemetry=distance_telemetry,
-                        force_whitened=force_whitened,
-                    )
-                    cache_included = 0
-                    if use_masked_append:
-                        cache_included = int(np.count_nonzero(cache_mask))
-                        (
-                            scope_counts[qi],
-                            dedupe_delta,
-                            trimmed_flag,
-                            added,
-                            obs_val,
-                        ) = _append_scope_positions_masked(
-                            flags_row=flags_row,
-                            bitset_row=bitset_row if bitset_enabled else None,
-                            mask_row=cache_mask,
-                            distances_row=cache_distances,
-                            tile_positions=valid_cached,
-                            limit_value=limit_value,
-                            scope_count=int(scope_counts[qi]),
-                            buffer_row=buffer_row,
-                        )
+                    if level_cache_batching:
+                        cache_jobs_block.setdefault(parent_level, []).append(qi)
                     else:
-                        cache_include = np.nonzero(cache_mask)[0]
-                        dedupe_delta = 0
-                        trimmed_flag = False
-                        added = 0
-                        obs_val = 0.0
-                        if cache_include.size:
-                            cache_hits_total += int(cache_include.size)
-                            include_positions = valid_cached[cache_include]
-                            scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
-                                flags_row,
-                                bitset_row,
-                                include_positions,
-                                limit_value,
-                                int(scope_counts[qi]),
-                                buffer_row=buffer_row,
-                            )
-                            if added:
-                                obs_val = float(np.max(cache_distances[cache_include]))
-                            cache_included = int(cache_include.size)
-                    if cache_included:
-                        cache_hits_total += cache_included
-                    if added and budget_applied[qi]:
-                        budget_survivors[qi] += int(added)
-                    dedupe_hits[qi] += dedupe_delta
-                    if added:
-                        if obs_val > observed_radii[qi]:
-                            observed_radii[qi] = obs_val
-                        if limit_value and scope_counts[qi] >= limit_value:
-                            trimmed_flags[qi] = True
-                            saturated[qi] = True
-                            saturated_flags[qi] = 1
-                    if trimmed_flag:
-                        trimmed_flags[qi] = True
-                        saturated[qi] = True
-                        saturated_flags[qi] = 1
+                        prefetch_delta, hit_delta = _process_level_cache_hits(
+                            cache_jobs={parent_level: [qi]},
+                            level_scope_cache=level_scope_cache,
+                            total_points=total_points,
+                            tree_indices_np=tree_indices_np,
+                            query_indices=query_indices,
+                            radii=radii,
+                            host_backend=host_backend,
+                            distance_telemetry=distance_telemetry,
+                            limit_value=limit_value,
+                            force_whitened=force_whitened,
+                            use_masked_append=use_masked_append,
+                            bitset_enabled=bitset_enabled,
+                            scope_buffers=scope_buffers,
+                            scope_counts=scope_counts,
+                            scope_bitsets=scope_bitsets,
+                            flags_matrix=flags_matrix,
+                            budget_applied=budget_applied,
+                            budget_survivors=budget_survivors,
+                            trimmed_flags=trimmed_flags,
+                            saturated=saturated,
+                            saturated_flags=saturated_flags,
+                            dedupe_hits=dedupe_hits,
+                            observed_radii=observed_radii,
+                            shared_workspace=shared_workspace,
+                        )
+                        cache_prefetch_total += prefetch_delta
+                        cache_hits_total += hit_delta
             block_valid.append(qi)
+
+        if level_cache_batching and cache_jobs_block:
+            prefetch_delta, hit_delta = _process_level_cache_hits(
+                cache_jobs=cache_jobs_block,
+                level_scope_cache=level_scope_cache,
+                total_points=total_points,
+                tree_indices_np=tree_indices_np,
+                query_indices=query_indices,
+                radii=radii,
+                host_backend=host_backend,
+                distance_telemetry=distance_telemetry,
+                limit_value=limit_value,
+                force_whitened=force_whitened,
+                use_masked_append=use_masked_append,
+                bitset_enabled=bitset_enabled,
+                scope_buffers=scope_buffers,
+                scope_counts=scope_counts,
+                scope_bitsets=scope_bitsets,
+                flags_matrix=flags_matrix,
+                budget_applied=budget_applied,
+                budget_survivors=budget_survivors,
+                trimmed_flags=trimmed_flags,
+                saturated=saturated,
+                saturated_flags=saturated_flags,
+                dedupe_hits=dedupe_hits,
+                observed_radii=observed_radii,
+                shared_workspace=shared_workspace,
+            )
+            cache_prefetch_total += prefetch_delta
+            cache_hits_total += hit_delta
 
         block_idx_arr = np.asarray(block_valid, dtype=np.int64)
         if block_idx_arr.size == 0:
@@ -883,28 +1045,36 @@ def _collect_residual_scopes_streaming_parallel(
                 continue
             parent_pos = int(parent_positions[qi])
             flags_row = flags_matrix[qi]
-            scope_counts[qi], dedupe_delta, trimmed_flag, _ = _append_scope_positions(
-                flags_row,
-                scope_bitsets[qi] if bitset_enabled else None,
-                np.asarray([parent_pos], dtype=np.int64),
-                limit_value,
-                int(scope_counts[qi]),
-                buffer_row=scope_buffers[qi] if scope_buffers is not None else None,
-            )
-            dedupe_hits[qi] += dedupe_delta
-            if limit_value and scope_counts[qi] >= limit_value:
-                trimmed_flags[qi] = True
-                saturated_flags[qi] = 1
-            if trimmed_flag:
-                trimmed_flags[qi] = True
-                saturated_flags[qi] = 1
-            chain = _collect_next_chain(tree, parent_pos, next_cache=next_cache_np)
-            if chain:
-                chain_positions = np.asarray([int(pos) for pos in chain], dtype=np.int64)
+            if level_cache_batching:
+                chain_len = residual_collect_next_chain(
+                    next_cache_np,
+                    parent_pos,
+                    chain_flags,
+                    chain_buffer,
+                )
+                if chain_len > 0:
+                    chain_positions = chain_buffer[:chain_len]
+                    scope_counts[qi], dedupe_delta, trimmed_flag, _ = _append_scope_positions(
+                        flags_row,
+                        scope_bitsets[qi] if bitset_enabled else None,
+                        chain_positions,
+                        limit_value,
+                        int(scope_counts[qi]),
+                        buffer_row=scope_buffers[qi] if scope_buffers is not None else None,
+                    )
+                    dedupe_hits[qi] += dedupe_delta
+                    if limit_value and scope_counts[qi] >= limit_value:
+                        trimmed_flags[qi] = True
+                        saturated_flags[qi] = 1
+                    if trimmed_flag:
+                        trimmed_flags[qi] = True
+                        saturated_flags[qi] = 1
+            else:
+                parent_arr = np.asarray([parent_pos], dtype=np.int64)
                 scope_counts[qi], dedupe_delta, trimmed_flag, _ = _append_scope_positions(
                     flags_row,
                     scope_bitsets[qi] if bitset_enabled else None,
-                    chain_positions,
+                    parent_arr,
                     limit_value,
                     int(scope_counts[qi]),
                     buffer_row=scope_buffers[qi] if scope_buffers is not None else None,
@@ -916,6 +1086,24 @@ def _collect_residual_scopes_streaming_parallel(
                 if trimmed_flag:
                     trimmed_flags[qi] = True
                     saturated_flags[qi] = 1
+                chain = _collect_next_chain(tree, parent_pos, next_cache=next_cache_np)
+                if chain:
+                    chain_positions = np.asarray([int(pos) for pos in chain], dtype=np.int64)
+                    scope_counts[qi], dedupe_delta, trimmed_flag, _ = _append_scope_positions(
+                        flags_row,
+                        scope_bitsets[qi] if bitset_enabled else None,
+                        chain_positions,
+                        limit_value,
+                        int(scope_counts[qi]),
+                        buffer_row=scope_buffers[qi] if scope_buffers is not None else None,
+                    )
+                    dedupe_hits[qi] += dedupe_delta
+                    if limit_value and scope_counts[qi] >= limit_value:
+                        trimmed_flags[qi] = True
+                        saturated_flags[qi] = 1
+                    if trimmed_flag:
+                        trimmed_flags[qi] = True
+                        saturated_flags[qi] = 1
 
             scope_vec = np.nonzero(flags_row)[0]
             if limit_value and scope_vec.size > limit_value:
@@ -1521,6 +1709,7 @@ def _collect_residual(
     dynamic_query_block = bool(getattr(runtime, "residual_dynamic_query_block", False))
     dense_scope_streamer = bool(getattr(runtime, "residual_dense_scope_streamer", False))
     masked_scope_append = bool(getattr(runtime, "residual_masked_scope_append", True))
+    level_cache_batching = bool(getattr(runtime, "residual_level_cache_batching", True))
     engine_label = "residual_serial" if gate_active else "residual_parallel"
     (
         scope_indptr_np,
@@ -1560,6 +1749,7 @@ def _collect_residual(
         dynamic_query_block=dynamic_query_block,
         dense_scope_streamer=dense_scope_streamer,
         masked_scope_append=masked_scope_append,
+        level_cache_batching=level_cache_batching,
     )
     semisort_seconds = time.perf_counter() - scope_start
     whitened_pairs_total = int(distance_telemetry.whitened_pairs)

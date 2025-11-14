@@ -161,6 +161,9 @@ def runtime_from_args(
     residual_masked_scope_append = _get_arg(args, "residual_masked_scope_append")
     if residual_masked_scope_append is not None:
         runtime_kwargs["residual_masked_scope_append"] = bool(residual_masked_scope_append)
+    residual_level_cache_batching = _get_arg(args, "residual_level_cache_batching")
+    if residual_level_cache_batching is not None:
+        runtime_kwargs["residual_level_cache_batching"] = bool(residual_level_cache_batching)
     residual_policy = _residual_policy_from_args(args)
     if residual_policy is not None:
         runtime_kwargs["residual"] = residual_policy

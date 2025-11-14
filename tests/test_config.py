@@ -83,6 +83,7 @@ def test_runtime_config_defaults(monkeypatch: pytest.MonkeyPatch):
     assert runtime.residual_gate1_lookup_path is None
     assert runtime.residual_gate1_lookup_margin == pytest.approx(0.02)
     assert runtime.residual_grid_whiten_scale == pytest.approx(1.0)
+    assert runtime.residual_level_cache_batching is True
 
 
 def test_runtime_context_uses_numpy_backend_by_default(monkeypatch: pytest.MonkeyPatch):
@@ -189,6 +190,7 @@ def test_describe_runtime_reports_expected_fields(monkeypatch: pytest.MonkeyPatc
     assert summary["residual_gate1_lookup_path"] is None
     assert summary["residual_gate1_lookup_margin"] == pytest.approx(0.02)
     assert summary["residual_grid_whiten_scale"] == pytest.approx(1.0)
+    assert summary["residual_level_cache_batching"] is True
 
 
 def test_conflict_graph_impl_override(monkeypatch: pytest.MonkeyPatch):
@@ -220,6 +222,16 @@ def test_residual_scope_cap_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
     runtime = cx_config.runtime_config()
     assert runtime.residual_scope_cap_path == str(cap_path)
     assert runtime.residual_scope_cap_default == pytest.approx(3.25)
+
+
+def test_residual_level_cache_batching_env(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("COVERTREEX_METRIC", "residual_correlation")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_LEVEL_CACHE_BATCHING", "0")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.residual_level_cache_batching is False
 
 
 def test_residual_grid_whiten_scale_env(monkeypatch: pytest.MonkeyPatch):
