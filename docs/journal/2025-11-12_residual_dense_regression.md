@@ -208,6 +208,21 @@ The `_block_ranges` iterator now advances correctly, so the dynamic-block stream
 
 **Policy:** keep `residual_dynamic_query_block` **on by default** (best for the realistic 32 k suite) and document that small-shakeout runs can disable it explicitly via `--residual-dynamic-query-block 0` / `COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK=0`.
 
+#### 2025-11-17 Higher-scale check-ins (48 k / 64 k)
+
+- **48 k run (`artifacts/benchmarks/residual_dense_49152_maskopt_v2_default.jsonl`):** median dominated `traversal_semisort_ms≈244 ms`, kernel medians ≈39 ms, total traversal across 95 dominated batches ≈53.2 s. Build wall ≈60 s, so scaling from 32 k is still close to linear in traversal time.
+- **64 k run (`artifacts/benchmarks/residual_dense_65536_maskopt_v2_default.jsonl`):** semisort medians tighten to ≈232 ms (p90 ≈251 ms) and total dominated traversal ≈76.1 s; build+query wall clocks 82 s.
+
+To make these sweeps reproducible, `tools/residual_scaling_sweep.py` now wraps `cli.queries` across a list of tree sizes (default `[4 k, 8 k, 16 k, 32 k, 48 k, 64 k]`) and records medians from each JSONL log. Example:
+
+```bash
+python tools/residual_scaling_sweep.py \
+  --tree-sizes 4096,8192,16384,32768,49152,65536 \
+  --log-prefix residual_scaling_maskopt_v2
+```
+
+All logs land under `artifacts/benchmarks/<log-prefix>_<size>.jsonl`, so we can re-run the suite with different flags (e.g., toggling the bitset) and compare scaling curves directly.
+
 ### 2025-11-14 32 k Dense Re-run (guardrails off)
 
 - Command:

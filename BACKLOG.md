@@ -31,7 +31,7 @@ This list is reprioritised to focus on the configurations that already deliver ~
 ### Instrumentation & benchmark refresh
 - **Goal:** Capture `grid_*`, `gate1_*`, `prefix_factor`, `arena_bytes`, and automate the 2 048/8 192/32 768 suites so every tweak to the 30 s config is measurable; refresh `docs/CORE_IMPLEMENTATIONS.md` + add an `AUDIT.md` response section.
 - **Why high leverage:** Without complete telemetry and scripted benchmarks, we can’t prove whether a change helps or hurts the winning build; finishing this work locks in observability for every future tweak.
-- **Status:** Partially done (batch-order telemetry exists); rest outstanding.  
+- **Status:** Partially done: batch-order telemetry exists and `tools/residual_scaling_sweep.py` now automates 4 k→64 k runs, but the full telemetry capture + CI wiring remain outstanding.  
 - **Refs:** `PARALLEL_COMPRESSED_PLAN.md §5`.
 
 ### Grid/prefix benchmark refresh & rollout guidance
