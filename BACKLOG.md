@@ -4,6 +4,12 @@ _Last updated: 2025-11-14._
 
 This list is reprioritised to focus on the configurations that already deliver ≈20 s 32 k builds (dense streamer + Hilbert batches). Items are grouped by the impact they can have on the current winning recipe; jobs that are less urgent (but still valuable) appear in the lower sections.
 
+## Stage 7 follow-ups (docs & polish)
+
+- **GPU backend re-entry plan** — Document the blockers (NumPy parity tests, telemetry deltas, CI hardware availability) and outline the steps required to re-enable the previously disabled GPU/JAX backend once the CPU preset is stable. Capture the work in `docs/CORE_IMPLEMENTATIONS.md` plus a backlog checklist so contributors know how to help.
+- **Plugin packaging & distribution** — Ship reference entry points (`covertreex.plugins.*`) as installable packages (or documented templates) so downstream projects can register traversal/conflict strategies without vendoring modules. Include publishing instructions and audit notes so the plugin ecosystem stays observable.
+- **Document automation & migration artifacts** — Wire the new migration guide + profile examples into CI (lint the Markdown, ensure sample commands keep working) and refresh the README badges to point at `pcct` usage. Track this as a recurring chore so Stage 7 polish doesn't regress.
+
 ## A. Guarding the 32 k / <20 s Baseline
 
 ### Chunk & degree-aware heuristics

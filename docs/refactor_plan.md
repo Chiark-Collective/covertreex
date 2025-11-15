@@ -108,15 +108,15 @@ This is the living work plan for the “DX/UX refactor” described in `AUDIT.md
 
 **Why:** Once the refactor lands, the new ergonomics must be obvious to contributors and users. The audit explicitly requests migration docs and contributor ergonomics.
 
-- [ ] Refresh `README.md`, `docs/CLI.md`, `docs/API.md`, and `docs/examples/*.md` with:
+- [x] Refresh `README.md`, `docs/CLI.md`, `docs/API.md`, and `docs/examples/*.md` with:
   - Profile-driven workflows.
   - `pcct` CLI examples.
-  - Guidance on `RuntimeContext` activation for library embeds.
-- [ ] Publish a migration guide (`docs/migrations/runtime_v_next.md`) covering:
+  - Guidance on `RuntimeContext` activation for library embeds. *(README/CLI/API updated; new `docs/examples/profile_workflows.md` captures CLI/API recipes.)*
+- [x] Publish a migration guide (`docs/migrations/runtime_v_next.md`) covering:
   - Replacing `python -m cli.queries` with `pcct`.
   - Mapping environment variables to profile overrides.
-  - Using the new telemetry renderers.
-- [ ] Summarise outstanding future work (e.g. GPU backend revival, plugin packaging) in `BACKLOG.md` so it’s clear what remains post-refactor.
+  - Using the new telemetry renderers. *(Guide added with env/flag mapping table + telemetry instructions.)*
+- [x] Summarise outstanding future work (e.g. GPU backend revival, plugin packaging) in `BACKLOG.md` so it’s clear what remains post-refactor. *(New “Stage 7 follow-ups” section in backlog.)*
 
 ---
 

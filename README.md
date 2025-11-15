@@ -14,15 +14,22 @@ pip install -e ".[dev]"
 
 The default backend is `numpy` (CPU). Optional acceleration hooks leverage `numba` when the `numba` extra is installed.
 
-The Typer-powered benchmark CLI surfaces every runtime knob so runs are reproducible:
+The Typer-powered benchmark CLI surfaces every runtime knob so runs are reproducible and discoverable via curated profiles:
 
 ```bash
 python -m cli.pcct --help
 
-# Example residual sweep
+# List curated profiles and inspect their payloads
+python -m cli.pcct profile list
+python -m cli.pcct profile describe residual-fast --format json
+
+# Profile-driven residual sweep with overrides
 python -m cli.pcct query \
-  --metric residual --dimension 8 --tree-points 32768 --queries 1024 \
-  --batch-size 512 --k 8 --baseline both
+  --profile residual-fast \
+  --dimension 8 --tree-points 32768 --queries 1024 \
+  --batch-size 512 --k 8 --baseline both \
+  --set diagnostics.enabled=true \
+  --set residual.scope_member_limit=32768
 
 # Build-only (no query phase)
 python -m cli.pcct build --dimension 8 --tree-points 65536 --batch-size 1024 --profile default
@@ -35,9 +42,24 @@ python -m cli.pcct doctor --profile default
 ```
 
 `python -m cli.queries` remains available for one release and issues a compatibility warning
-before dispatching to `pcct query`. If you need the full legacy flag surface, run
-`python -m cli.pcct legacy-query ...`. Every invocation writes JSONL telemetry under
-`artifacts/benchmarks/` unless `--no-log-file` is passed, making audits deterministic.
+before dispatching to `pcct query`, and `python -m cli.pcct legacy-query ...` exposes the full
+legacy flag firehose for scripts that still depend on it. For a guided checklist that maps legacy
+flags/environment variables to the new profile-driven workflow, see
+`docs/migrations/runtime_v_next.md`. Every invocation writes JSONL telemetry under
+`artifacts/benchmarks/` unless `--no-log-file` is passed, making audits deterministic, and
+`python -m cli.pcct telemetry render ...` can turn those logs into JSON/Markdown/CSV summaries.
+
+## Profile-driven workflows
+
+Profiles under `profiles/*.yaml` capture the supported runtime combinations (default dense,
+residual-fast, audit, CPU-debug, etc.). Use `Runtime.from_profile("default", overrides=[...])` or the
+CLI snippets above to load one configuration and tweak dot-path overrides in a reproducible way. The
+new examples in `docs/examples/profile_workflows.md` illustrate how to:
+
+- Build and query with the same `RuntimeContext` from Python without mutating globals.
+- Record telemetry for every batch and render summaries for audit trails.
+- Derive deterministic `SeedPack` values (global, batch order, MIS, residual grid) so multiple runs
+  can be compared by hash alone.
 
 ## Runtime Controls
 
@@ -45,7 +67,8 @@ The `covertreex.api.Runtime` façade now mirrors every CLI flag (backend, precis
 
 - `Runtime(...).activate()` installs an in-process configuration without mutating `os.environ`.
 - All residual gate/prefilter settings (lookup paths, margins, audits, membership caps, forced whitening, etc.) are addressable via CLI flags or `Runtime` keyword arguments.
-- CLI runs always emit batch-level telemetry (`BenchmarkLogWriter`) unless `--no-log-file` is passed, so reproductions include scope budgets, kernel/whitened counters, and resource snapshots.
+- CLI runs always emit batch-level telemetry (`BenchmarkLogWriter`) unless `--no-log-file` is passed, so reproductions include scope budgets, kernel/whitened counters, and resource snapshots. Render those logs with `pcct telemetry render ...` for Markdown/JSON/CSV views.
+- Seed handling is unified through `Runtime.seeds` / `SeedPack`; reuse the same values (or `--global-seed`) to regenerate runs that should match byte-for-byte.
 
 Residual metrics remain lazy: call `configure_residual_correlation(...)` after import to supply Vecchia backends; `reset_residual_metric()` clears hooks for tests. Use `covertreex.config.describe_runtime()` or the CLI JSONL headers to inspect the active runtime.
 
@@ -97,6 +120,9 @@ compatibility notice before delegating to the Typer `pcct` subcommand so scripts
 configuration layer.
 
 CLI documentation (flag reference, input/output description, telemetry schema) lives in `docs/CLI.md`.
+
+Additional profile-driven walkthroughs live in `docs/examples/profile_workflows.md`, and migration
+notes for legacy scripts are in `docs/migrations/runtime_v_next.md`.
 
 ### Agents / Contributors
 

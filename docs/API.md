@@ -65,7 +65,8 @@ with runtime.activate():
 ```
 
 Call `profiles.loader.available_profiles()` or inspect the YAML files directly to understand which
-knobs each profile sets.
+knobs each profile sets. The migration checklist in `docs/migrations/runtime_v_next.md` maps legacy
+environment variables and flags to these dot-path overrides so older scripts can upgrade incrementally.
 
 For advanced scenarios you can also inspect/clone the validated model:
 
@@ -123,3 +124,10 @@ All benchmark commands now live under `cli/` with compatibility shims in `benchm
 
 You can continue invoking `python -m benchmarks.queries` while downstream tooling migrates, but the
 `cli.*` modules are the supported entrypoints going forward.
+
+## Examples & further reading
+
+- `docs/examples/profile_workflows.md` — concrete CLI + API recipes built around Stage 2 profiles and
+  the Stage 6 seed/determinism policy.
+- `docs/migrations/runtime_v_next.md` — migration guide for legacy scripts (`cli.queries`,
+  `COVERTREEX_*` env vars) moving to the profile-first CLI plus telemetry renderers.

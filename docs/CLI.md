@@ -50,6 +50,20 @@ Need the original firehose of runtime flags? `python -m cli.pcct legacy-query ..
 legacy Typer app so existing scripts keep working while the new `pcct query` command focuses on
 profile-driven ergonomics. `python -m cli.queries ...` remains available for one release as well.
 
+### Profile-first workflow
+
+Stage 7 standardises on the curated YAML profiles under `profiles/`. For most runs:
+
+1. Inspect the available presets (`python -m cli.pcct profile list`, `... profile describe NAME`).
+2. Select a profile when invoking any subcommand (`pcct query --profile residual-fast`).
+3. Apply dot-path overrides with `--set PATH=VALUE` (strings use YAML syntax, so `true/false`, quoted
+   strings, and numbers work).
+4. Record telemetry (default; disable via `--no-log-file`) and render it later with
+   `pcct telemetry render ... --format md`.
+
+If you previously relied on environment variables, consult `docs/migrations/runtime_v_next.md` for a
+mapping between `COVERTREEX_*` settings, CLI flags, and profile override paths.
+
 ### Profile inspection
 
 Stage 2 introduced curated YAML profiles (see `profiles/*.yaml`). Use the profile subcommands to
@@ -126,6 +140,8 @@ python -m cli.pcct query --profile residual-fast --residual-grid-seed 777
 
 Overrides use dot-path syntax that mirrors the nested `RuntimeModel`. Values are parsed with YAML
 semantics, so `true/false`, numbers, and quoted strings all work as expected.
+Seed overrides feed the `SeedPack` channels directly (`seeds.global`, `seeds.mis`, `seeds.batch_order`,
+`seeds.residual_grid`), making deterministic reruns straightforward.
 
 ## Flag groups
 
@@ -143,7 +159,14 @@ Every flag can also be driven via `covertreex.api.Runtime` for programmatic scen
 
 - By default, runs emit JSONL telemetry containing traversal/conflict timings, scope budgets, kernel vs. whitened counters, MIS iterations, and RSS deltas. Set `--log-file` to control the destination or `--no-log-file` to disable.
 - Residual runs can additionally emit per-level scope caps (`--residual-scope-cap-output`) and gate lookup profiles (`--residual-gate-profile-log`).
-- The helper `cli.queries.telemetry.initialise_cli_telemetry()` centralises log writer initialisation so the CLI and any future tools share the same behaviour.
+- The helper `cli.queries.telemetry.initialise_cli_telemetry()` centralises log writer initialisation so the CLI and any future tools share the same behaviour. The Typer subcommand `pcct telemetry render LOG.jsonl --format md|csv|json --show fields` renders the resulting JSONL in human-friendly formats.
 - `python -m cli.pcct telemetry render ...` turns the JSONL stream into JSON/Markdown/CSV summaries (see `docs/telemetry.md` for schema details and sample output).
 
 Refer to the JSONL schema in `covertreex/telemetry/schemas.py` for column definitions. For a tour of the knobs and when to enable them, see `docs/RESIDUAL_REGRESSION_20251112.md`.
+
+### Legacy compatibility & migration
+
+`python -m cli.pcct legacy-query` exists for one release and simply re-exports the old Typer app so
+existing scripts can bridge to the profile-first workflow. It emits a warning describing how to
+switch to `pcct query`. See `docs/migrations/runtime_v_next.md` for a step-by-step migration checklist
+covering flag/ENV replacements, profile selection, override syntax, and telemetry rendering.

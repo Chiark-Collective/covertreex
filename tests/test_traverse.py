@@ -346,6 +346,8 @@ def test_residual_scope_cache_hits(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("COVERTREEX_METRIC", "residual_correlation")
     monkeypatch.setenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", "1")
     monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_DENSE_SCOPE_STREAMER", "0")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK", "0")
     cx_config.reset_runtime_config_cache()
 
     result = traverse_collect_scopes(tree, batch_points)
@@ -356,6 +358,8 @@ def test_residual_scope_cache_hits(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("COVERTREEX_METRIC", raising=False)
     monkeypatch.delenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", raising=False)
     monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
+    monkeypatch.delenv("COVERTREEX_RESIDUAL_DENSE_SCOPE_STREAMER", raising=False)
+    monkeypatch.delenv("COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK", raising=False)
     cx_config.reset_runtime_config_cache()
     reset_residual_metric()
     set_residual_backend(None)
