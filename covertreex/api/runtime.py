@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, Mapping, Sequence, Tuple
 
 from covertreex import config as cx_config
 from covertreex.metrics.residual.policy import ResidualPolicy
+from covertreex.runtime.model import RuntimeModel
 
 
 def _maybe_tuple(value: Iterable[str] | Tuple[str, ...] | None) -> Tuple[str, ...] | None:
@@ -18,6 +19,13 @@ def _maybe_tuple(value: Iterable[str] | Tuple[str, ...] | None) -> Tuple[str, ..
 def _apply_if_present(target: Dict[str, Any], key: str, value: Any) -> None:
     if value is not None:
         target[key] = value
+
+
+def _active_runtime_config() -> cx_config.RuntimeConfig:
+    active = cx_config.current_runtime_context()
+    if active is not None:
+        return active.config
+    return cx_config.RuntimeConfig.from_env()
 
 
 def _policy_to_overrides(policy: ResidualPolicy) -> Dict[str, Any]:
@@ -44,6 +52,74 @@ def _policy_to_overrides(policy: ResidualPolicy) -> Dict[str, Any]:
         "residual_prefilter_radius_cap": policy.prefilter_radius_cap,
         "residual_prefilter_audit": policy.prefilter_audit,
     }
+
+
+_ATTR_TO_FIELD = {
+    "backend": "backend",
+    "precision": "precision",
+    "metric": "metric",
+    "devices": "devices",
+    "enable_numba": "enable_numba",
+    "enable_sparse_traversal": "enable_sparse_traversal",
+    "diagnostics": "enable_diagnostics",
+    "log_level": "log_level",
+    "mis_seed": "mis_seed",
+    "conflict_graph": "conflict_graph_impl",
+    "scope_segment_dedupe": "scope_segment_dedupe",
+    "scope_chunk_target": "scope_chunk_target",
+    "scope_chunk_max_segments": "scope_chunk_max_segments",
+    "degree_cap": "conflict_degree_cap",
+    "batch_order": "batch_order_strategy",
+    "batch_order_seed": "batch_order_seed",
+    "prefix_schedule": "prefix_schedule",
+    "prefix_density_low": "prefix_density_low",
+    "prefix_density_high": "prefix_density_high",
+    "prefix_growth_small": "prefix_growth_small",
+    "prefix_growth_mid": "prefix_growth_mid",
+    "prefix_growth_large": "prefix_growth_large",
+    "residual_force_whitened": "residual_force_whitened",
+    "residual_scope_member_limit": "residual_scope_member_limit",
+    "residual_stream_tile": "residual_stream_tile",
+    "residual_scope_bitset": "residual_scope_bitset",
+    "residual_masked_scope_append": "residual_masked_scope_append",
+    "residual_dynamic_query_block": "residual_dynamic_query_block",
+    "residual_dense_scope_streamer": "residual_dense_scope_streamer",
+    "residual_level_cache_batching": "residual_level_cache_batching",
+}
+
+
+_FIELD_PATH_OVERRIDES: Dict[str, Tuple[str, ...]] = {
+    "enable_diagnostics": ("diagnostics", "enabled"),
+    "log_level": ("diagnostics", "log_level"),
+    "mis_seed": ("seeds", "mis"),
+    "batch_order_seed": ("seeds", "batch_order"),
+}
+
+
+def _resolve_field_path(field: str) -> Tuple[str, ...]:
+    if "." in field:
+        parts = tuple(part for part in field.split(".") if part)
+        if parts:
+            return parts
+    override = _FIELD_PATH_OVERRIDES.get(field)
+    if override is not None:
+        return override
+    if field.startswith("residual_"):
+        return ("residual", field.removeprefix("residual_"))
+    return (field,)
+
+
+def _set_nested(payload: Dict[str, Any], path: Sequence[str], value: Any) -> None:
+    if not path:
+        raise ValueError("Field path cannot be empty")
+    target: Dict[str, Any] = payload
+    for key in path[:-1]:
+        next_value = target.get(key)
+        if not isinstance(next_value, dict):
+            next_value = {}
+            target[key] = next_value
+        target = next_value
+    target[path[-1]] = value
 
 
 @dataclass(frozen=True)
@@ -135,7 +211,7 @@ class Residual:
     def to_policy(self, base: ResidualPolicy | None = None) -> ResidualPolicy:
         policy = self.policy or base
         if policy is None:
-            policy = ResidualPolicy.from_runtime(cx_config.runtime_config())
+            policy = ResidualPolicy.from_runtime(_active_runtime_config())
         updates: Dict[str, Any] = {}
         _apply_if_present(updates, "gate1_enabled", self.gate1_enabled)
         _apply_if_present(updates, "gate1_alpha", self.gate1_alpha)
@@ -200,76 +276,42 @@ class Runtime:
     residual_level_cache_batching: bool | None = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
-    def to_config(self, base: cx_config.RuntimeConfig | None = None) -> cx_config.RuntimeConfig:
-        base_config = base or cx_config.RuntimeConfig.from_env()
-        overrides: Dict[str, Any] = {}
-        _apply_if_present(overrides, "backend", self.backend)
-        _apply_if_present(overrides, "precision", self.precision)
-        devices = _maybe_tuple(self.devices)
-        if devices is not None:
-            overrides["devices"] = devices
-        _apply_if_present(overrides, "metric", self.metric)
-        _apply_if_present(overrides, "enable_numba", self.enable_numba)
-        _apply_if_present(overrides, "enable_sparse_traversal", self.enable_sparse_traversal)
-        _apply_if_present(overrides, "enable_diagnostics", self.diagnostics)
-        _apply_if_present(overrides, "log_level", self.log_level)
-        _apply_if_present(overrides, "mis_seed", self.mis_seed)
-        _apply_if_present(overrides, "conflict_graph_impl", self.conflict_graph)
-        _apply_if_present(overrides, "scope_segment_dedupe", self.scope_segment_dedupe)
-        _apply_if_present(overrides, "scope_chunk_target", self.scope_chunk_target)
-        _apply_if_present(overrides, "scope_chunk_max_segments", self.scope_chunk_max_segments)
-        _apply_if_present(overrides, "conflict_degree_cap", self.degree_cap)
-        _apply_if_present(overrides, "batch_order_strategy", self.batch_order)
-        _apply_if_present(overrides, "batch_order_seed", self.batch_order_seed)
-        _apply_if_present(overrides, "prefix_schedule", self.prefix_schedule)
-        _apply_if_present(overrides, "prefix_density_low", self.prefix_density_low)
-        _apply_if_present(overrides, "prefix_density_high", self.prefix_density_high)
-        _apply_if_present(overrides, "prefix_growth_small", self.prefix_growth_small)
-        _apply_if_present(overrides, "prefix_growth_mid", self.prefix_growth_mid)
-        _apply_if_present(overrides, "prefix_growth_large", self.prefix_growth_large)
+    def _apply_field(self, payload: Dict[str, Any], field: str, value: Any) -> None:
+        path = _resolve_field_path(field)
+        _set_nested(payload, path, value)
+
+    def to_model(self, base: RuntimeModel | None = None) -> RuntimeModel:
+        base_model = base or RuntimeModel.from_env()
+        payload = base_model.model_dump()
+        base_config = base_model.to_runtime_config()
+
+        for attr, field_name in _ATTR_TO_FIELD.items():
+            value = getattr(self, attr)
+            if attr == "devices":
+                value = _maybe_tuple(value)
+            if value is None:
+                continue
+            self._apply_field(payload, field_name, value)
+
         if self.residual is not None:
             base_policy = ResidualPolicy.from_runtime(base_config)
-            overrides.update(self.residual.as_overrides(base_policy=base_policy))
-        _apply_if_present(overrides, "residual_force_whitened", self.residual_force_whitened)
-        _apply_if_present(
-            overrides,
-            "residual_scope_member_limit",
-            self.residual_scope_member_limit,
+            overrides = self.residual.as_overrides(base_policy=base_policy)
+            for key, value in overrides.items():
+                self._apply_field(payload, key, value)
+
+        for key, value in self.extra.items():
+            self._apply_field(payload, key, value)
+
+        return RuntimeModel(**payload)
+
+    def to_config(self, base: cx_config.RuntimeConfig | None = None) -> cx_config.RuntimeConfig:
+        base_model = (
+            RuntimeModel.from_env()
+            if base is None
+            else RuntimeModel.from_legacy_config(base)
         )
-        _apply_if_present(
-            overrides,
-            "residual_stream_tile",
-            self.residual_stream_tile,
-        )
-        _apply_if_present(
-            overrides,
-            "residual_scope_bitset",
-            self.residual_scope_bitset,
-        )
-        _apply_if_present(
-            overrides,
-            "residual_masked_scope_append",
-            self.residual_masked_scope_append,
-        )
-        _apply_if_present(
-            overrides,
-            "residual_dynamic_query_block",
-            self.residual_dynamic_query_block,
-        )
-        _apply_if_present(
-            overrides,
-            "residual_dense_scope_streamer",
-            self.residual_dense_scope_streamer,
-        )
-        _apply_if_present(
-            overrides,
-            "residual_level_cache_batching",
-            self.residual_level_cache_batching,
-        )
-        overrides.update(self.extra)
-        if not overrides:
-            return base_config
-        return replace(base_config, **overrides)
+        model = self.to_model(base=base_model)
+        return model.to_runtime_config()
 
     def activate(self) -> cx_config.RuntimeContext:
         """Install this runtime as the active global context and return it."""
@@ -303,8 +345,33 @@ class Runtime:
         return replace(self, **kwargs)
 
     @classmethod
+    def from_profile(
+        cls,
+        name: str,
+        *,
+        overrides: Sequence[str] | Mapping[str, Any] | None = None,
+    ) -> "Runtime":
+        """Construct a runtime from a named profile plus optional overrides."""
+
+        from profiles.loader import load_profile
+        from profiles.overrides import apply_overrides_to_model, parse_override_expressions
+
+        model = load_profile(name)
+        override_mapping: Mapping[str, Any] | None
+        if overrides and isinstance(overrides, Mapping):
+            override_mapping = overrides
+        else:
+            override_mapping = parse_override_expressions(overrides) if overrides else None
+        if override_mapping:
+            model = apply_overrides_to_model(model, override_mapping)
+        return cls.from_config(model.to_runtime_config())
+
+    @classmethod
     def from_active(cls) -> "Runtime":
-        return cls.from_config(cx_config.runtime_config())
+        active = cx_config.current_runtime_context()
+        if active is not None:
+            return cls.from_config(active.config)
+        return cls.from_config(cx_config.RuntimeConfig.from_env())
 
     @classmethod
     def from_config(cls, config: cx_config.RuntimeConfig) -> "Runtime":
@@ -339,4 +406,6 @@ class Runtime:
             residual_scope_bitset=config.residual_scope_bitset,
             residual_masked_scope_append=config.residual_masked_scope_append,
             residual_dense_scope_streamer=config.residual_dense_scope_streamer,
+            residual_dynamic_query_block=config.residual_dynamic_query_block,
+            residual_level_cache_batching=config.residual_level_cache_batching,
         )

@@ -1,0 +1,29 @@
+metadata:
+  name: residual-audit
+  description: |
+    Residual metric with diagnostics, gate lookup auditing, and conservative
+    resource settings for reproducible investigations.
+  workload: residual
+  tags:
+    - residual
+    - diagnostics
+
+runtime:
+  metric: residual_correlation
+  backend: numpy
+  enable_numba: true
+  enable_sparse_traversal: true
+  conflict_graph_impl: segmented
+  diagnostics:
+    enabled: true
+    log_level: DEBUG
+  scope_conflict_buffer_reuse: true
+  residual:
+    gate1_enabled: true
+    gate1_audit: true
+    gate1_radius_cap: 1.0
+    gate1_keep_pct: 99.0
+    stream_tile: 64
+    scope_member_limit: 8192
+    prefilter_enabled: true
+    prefilter_audit: true

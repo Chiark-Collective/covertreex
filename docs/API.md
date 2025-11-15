@@ -47,6 +47,26 @@ with residual_runtime.activate() as context:
     ...
 ```
 
+### Profiles & overrides
+
+Profiles in `profiles/*.yaml` provide curated baselines for common workloads. Build a runtime straight
+from those definitions and layer overrides using dot-path syntax:
+
+```python
+runtime = Runtime.from_profile(
+    "residual-fast",
+    overrides=[
+        "diagnostics.enabled=true",
+        "residual.scope_member_limit=32768",
+    ],
+)
+with runtime.activate():
+    ...
+```
+
+Call `profiles.loader.available_profiles()` or inspect the YAML files directly to understand which
+knobs each profile sets.
+
 For advanced scenarios you can also inspect/clone the validated model:
 
 ```python

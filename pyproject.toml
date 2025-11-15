@@ -16,6 +16,8 @@ dependencies = [
   "numpy>=2.0.0",
   "typing-extensions>=4.9.0",
   "typer>=0.12.5",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -50,10 +52,11 @@ package-dir = {"" = "."}
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["covertreex*"]
+include = ["covertreex*", "profiles*"]
 
 [tool.setuptools.package-data]
 "covertreex" = ["py.typed"]
+"profiles" = ["*.yaml"]
 
 [tool.ruff]
 line-length = 100

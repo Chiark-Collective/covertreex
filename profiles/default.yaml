@@ -1,0 +1,22 @@
+metadata:
+  name: default
+  description: |
+    Baseline Euclidean profile for CPU hosts. Enables NumPy backends with
+    NumPy/Numba insert paths and leaves traversal sparse heuristics disabled.
+  workload: general
+  tags:
+    - cpu
+    - euclidean
+
+runtime:
+  backend: numpy
+  precision: float64
+  enable_numba: true
+  enable_sparse_traversal: false
+  conflict_graph_impl: dense
+  diagnostics:
+    enabled: false
+    log_level: INFO
+  batch_order_strategy: hilbert
+  residual:
+    gate1_enabled: false

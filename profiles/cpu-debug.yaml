@@ -1,0 +1,22 @@
+metadata:
+  name: cpu-debug
+  description: |
+    Verbose CPU profile that favours deterministic ordering and INFO/DEBUG logs
+    for smoke tests and CLI repro runs.
+  workload: diagnostics
+  tags:
+    - cpu
+    - diagnostics
+
+runtime:
+  backend: numpy
+  precision: float64
+  enable_numba: false
+  enable_sparse_traversal: false
+  conflict_graph_impl: dense
+  batch_order_strategy: natural
+  diagnostics:
+    enabled: true
+    log_level: DEBUG
+  residual:
+    gate1_enabled: false

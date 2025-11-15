@@ -38,12 +38,27 @@ Helper modules (`cli.queries.telemetry`, `cli.queries.benchmark`, tools under `t
 `context` keyword for every operation so tests and scripts can opt in to explicit, isolated runtime
 configuration rather than relying on globals.
 
+### Profiles & overrides
+
+Use `--profile` to start from curated presets (see `profiles/*.yaml`) and `--set PATH=VALUE` to tweak
+individual fields without juggling dozens of flags:
+
+```bash
+python -m cli.queries \
+  --profile residual-fast \
+  --set diagnostics.enabled=true \
+  --set residual.scope_member_limit=32768
+```
+
+Overrides use dot-path syntax that mirrors the nested `RuntimeModel`. Values are parsed with YAML
+semantics, so `true/false`, numbers, and quoted strings all work as expected.
+
 ## Flag groups
 
 | Panel | Purpose | Highlights |
 | --- | --- | --- |
 | **Benchmark shape** | Controls dataset geometry and build style. | `--dimension`, `--tree-points`, `--batch-size`, `--queries`, `--k`, `--seed`, `--build-mode`. |
-| **Runtime controls** | Mirrors `covertreex.api.Runtime` knobs. | `--backend`, `--precision`, `--device/-d`, `--enable-numba/--disable-numba`, `--conflict-graph`, `--scope-chunk-target`, `--batch-order`, `--prefix-*`, `--mis-seed`. |
+| **Runtime controls** | Mirrors `covertreex.api.Runtime` knobs. | `--profile`, `--set PATH=VALUE`, `--backend`, `--precision`, `--device/-d`, `--enable-numba/--disable-numba`, `--conflict-graph`, `--scope-chunk-target`, `--batch-order`, `--prefix-*`, `--mis-seed`. |
 | **Residual metric** | Synthetic backend + traversal caps. | `--residual-lengthscale`, `--residual-variance`, `--residual-inducing`, `--residual-stream-tile`, `--residual-scope-member-limit`, `--residual-scope-caps`, `--residual-scope-cap-output`, `--residual-force-whitened`. |
 | **Gate & prefilter** | Gate-1/prefilter lookup management. | `--residual-gate` (off/lookup), `--residual-gate-lookup-path`, `--residual-gate-margin/cap`, `--residual-gate-alpha/eps/band-eps`, `--residual-gate-profile-*`, `--residual-prefilter*`. |
 | **Telemetry & baselines** | Output paths + comparisons. | `--log-file`, `--no-log-file`, `--baseline` (none/sequential/gpboost/external/both/all). |

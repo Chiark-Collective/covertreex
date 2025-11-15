@@ -1,0 +1,28 @@
+metadata:
+  name: residual-fast
+  description: |
+    Residual metric tuned for throughput. Enables sparse traversal, residual
+    caches, and fast scope chunking with gate lookup disabled.
+  workload: residual
+  tags:
+    - residual
+    - throughput
+
+runtime:
+  metric: residual_correlation
+  backend: numpy
+  enable_numba: true
+  enable_sparse_traversal: true
+  scope_chunk_target: 0
+  scope_chunk_max_segments: 256
+  conflict_graph_impl: segmented
+  diagnostics:
+    enabled: false
+    log_level: INFO
+  residual:
+    gate1_enabled: true
+    gate1_audit: false
+    stream_tile: 128
+    scope_member_limit: 16384
+    masked_scope_append: true
+    dense_scope_streamer: true

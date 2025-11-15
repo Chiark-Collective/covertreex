@@ -41,6 +41,8 @@ class QueryCLIOptions:
     k: int = 8
     seed: int = 0
     run_id: str | None = None
+    profile: str | None = None
+    set_override: list[str] | None = None
     metric: str = "euclidean"
     backend: str | None = None
     precision: str | None = None
@@ -185,6 +187,23 @@ def cli(
             "--run-id",
             help="Optional run identifier propagated to telemetry artifacts.",
             rich_help_panel=_TELEMETRY_PANEL,
+        ),
+    ] = None,
+    profile: Annotated[
+        Optional[str],
+        typer.Option(
+            "--profile",
+            help="Load a runtime profile from `profiles/` instead of manual flag overrides.",
+            rich_help_panel=_RUNTIME_PANEL,
+        ),
+    ] = None,
+    set_override: Annotated[
+        Optional[List[str]],
+        typer.Option(
+            "--set",
+            metavar="PATH=VALUE",
+            help="Apply dot-path overrides (repeatable) when using --profile.",
+            rich_help_panel=_RUNTIME_PANEL,
         ),
     ] = None,
     metric: Annotated[
@@ -830,7 +849,7 @@ def run_queries(options: QueryCLIOptions) -> None:
     runtime_snapshot = dict(cli_runtime.describe())
     if args.metric == "residual":
         _validate_residual_runtime(runtime_snapshot)
-    cli_runtime.activate()
+    context = cli_runtime.activate()
     thread_snapshot = _thread_env_snapshot()
     runtime_snapshot["runtime_blas_threads"] = thread_snapshot["blas_threads"]
     runtime_snapshot["runtime_numba_threads"] = thread_snapshot["numba_threads"]
@@ -863,6 +882,7 @@ def run_queries(options: QueryCLIOptions) -> None:
             run_id=run_id,
             runtime_snapshot=runtime_snapshot,
             log_metadata=log_metadata,
+            context=context,
         )
         log_writer = telemetry_handles.log_writer
         log_path = telemetry_handles.log_path
@@ -883,7 +903,7 @@ def run_queries(options: QueryCLIOptions) -> None:
                 lengthscale=args.residual_lengthscale,
                 chunk_size=args.residual_chunk_size,
             )
-            configure_residual_correlation(residual_backend)
+            configure_residual_correlation(residual_backend, context=context)
             gate_flag = _gate_active_for_backend(residual_backend)
             engine_label = "residual_serial" if gate_flag else "residual_parallel"
             runtime_snapshot["runtime_traversal_engine"] = engine_label
@@ -906,6 +926,7 @@ def run_queries(options: QueryCLIOptions) -> None:
             scope_cap_recorder=scope_cap_recorder,
             build_mode=args.build_mode,
             plan_callback=telemetry_view.observe_plan if telemetry_view is not None else None,
+            context=context,
         )
 
         print(

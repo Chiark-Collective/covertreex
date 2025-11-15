@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from covertreex.api import Runtime as ApiRuntime, Residual as ApiResidual
+from profiles.loader import ProfileError
+from profiles.overrides import OverrideError
 
 
 def _get_arg(source: Any, name: str, default: Any = None) -> Any:
@@ -68,6 +70,13 @@ def runtime_from_args(
     default_metric: str = "euclidean",
     extra_overrides: Mapping[str, Any] | None = None,
 ) -> ApiRuntime:
+    profile_name = _get_arg(args, "profile")
+    profile_overrides = _get_arg(args, "set_override")
+    if profile_name:
+        return _runtime_from_profile(profile_name, profile_overrides)
+    if profile_overrides:
+        raise ValueError("--set overrides require --profile.")
+
     metric = _get_arg(args, "metric", default_metric) or default_metric
     runtime_kwargs: dict[str, Any] = {
         "metric": "residual_correlation" if metric == "residual" else metric,
@@ -179,6 +188,13 @@ def runtime_from_args(
     if extra_overrides:
         runtime_kwargs.update(extra_overrides)
     return ApiRuntime(**runtime_kwargs)
+
+
+def _runtime_from_profile(profile: str, overrides: Sequence[str] | None) -> ApiRuntime:
+    try:
+        return ApiRuntime.from_profile(profile, overrides=overrides)
+    except (ProfileError, OverrideError) as exc:
+        raise ValueError(f"Invalid profile configuration: {exc}") from exc
 
 
 __all__ = ["runtime_from_args"]

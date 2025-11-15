@@ -41,11 +41,11 @@ This is the living work plan for the “DX/UX refactor” described in `AUDIT.md
 
 **Why (AUDIT §2 “Discoverable configuration” + §Quick PRs #3):** Users currently face 70+ CLI flags with no presets. Profiles provide a single source of truth for supported knobs and feed both CLI and API ergonomics.
 
-- [ ] Create `profiles/` with curated YAML: `default`, `residual-fast`, `residual-audit`, `cpu-debug`, etc. Include metadata (description, intended workload) per file.
-- [ ] Implement `profiles.loader.load_profile(name: str) -> RuntimeModel` with caching and validation errors that cite the offending field.
-- [ ] Add dot-path overrides utility (based on AUDIT helper) to support `--set residual.lengthscale=0.8` semantics across CLI/API.
-- [ ] Extend `Runtime` (or add `Runtime.from_profile()`) so scripts can use profiles without touching CLI internals.
-- [ ] Update docs to list available profiles and show how overrides merge.
+- [x] Create `profiles/` with curated YAML: `default`, `residual-fast`, `residual-audit`, `cpu-debug`, etc. Include metadata (description, intended workload) per file.
+- [x] Implement `profiles.loader.load_profile(name: str) -> RuntimeModel` with caching and validation errors that cite the offending field.
+- [x] Add dot-path overrides utility (based on AUDIT helper) to support `--set residual.lengthscale=0.8` semantics across CLI/API.
+- [x] Extend `Runtime` (or add `Runtime.from_profile()`) so scripts can use profiles without touching CLI internals.
+- [x] Update docs to list available profiles and show how overrides merge; CLI now exposes `--profile` + `--set` to drive the new flow.
 
 ## Stage 3 – CLI Restructure (`pcct` Typer app)
 
