@@ -9,7 +9,8 @@ This list is reprioritised to focus on the configurations that already deliver �
 ### Chunk & degree-aware heuristics
 - **Goal:** Keep conflict shard counts bounded under `scope_chunk_target` by merging shards based on pair counts, capping degrees, and reusing arenas; directly reduces scatter/queue time in the <20 s build.
 - **Why high leverage:** The current fastest runs still spike when chunked scopes or high-degree nodes appear; these heuristics target exactly those residual hotspots so the <20 s recipe holds across datasets.
-- **Status:** **In progress.** Dense + residual conflict graphs now honour `COVERTREEX_DEGREE_CAP` / `--degree-cap`, enforcing per-node limits inside both the chunked (`_expand_pairs_chunked_to_csr`) and unchunked (`_expand_pairs_directed`) Numba builders with telemetry (`degree_cap`, `degree_pruned_pairs`). The fallback Python builder reuses a scratch arena for `sources` / `targets`, reports `arena_bytes`, and the CLI/runtime expose the flag. Remaining work: smarter shard-merging heuristics for pathological pair-count distributions and per-node buffer reuse on the Numba path (`PARALLEL_COMPRESSED_PLAN.md §4`).
+- **Status:** ✅ **Completed (2025-11-14).** Pair-count-aware chunk merging (`COVERTREEX_SCOPE_CHUNK_PAIR_MERGE`) and the Numba conflict buffer arena (`COVERTREEX_SCOPE_CONFLICT_BUFFER_REUSE`) now default to **on**, emitting `conflict_scope_chunk_pair_merges` + `conflict_arena_bytes` telemetry so regressions are obvious. Best-of-five dense runs with the new defaults land at **≈17.8 s** wall (`pcct-20251114-214845-7df1be`, log `artifacts/benchmarks/residual_dense_32768_pairmerge_best5_run5.jsonl`), beating the previous gold by ~0.9 s without touching the CLI recipe. Disable via `--no-scope-chunk-pair-merge` / `--no-scope-conflict-buffer-reuse` for ablations.
+- **Latest:** `COVERTREEX_SCOPE_CHUNK_PAIR_MERGE` / `--scope-chunk-pair-merge` reuses the pair-count estimates to merge under-filled shards (see `conflict_scope_chunk_pair_merges` in telemetry), and `COVERTREEX_SCOPE_CONFLICT_BUFFER_REUSE` / `--scope-conflict-buffer-reuse` now pools the Numba builder's per-node buffers; disable either flag for ablations.
 
 ### Dense residual regression verification
 - **Goal:** Now that the dense residual preset hits ≈21 s build / 0.026 s query again, confirm which commits fixed the >2 h regression and tag that SHA so future bisects have a known good point (or repeat the bisect if the fix was accidental).
@@ -20,13 +21,13 @@ This list is reprioritised to focus on the configurations that already deliver �
 ### Residual guardrails before 32 k
 - **Goal:** Enforce the 4 k Hilbert criteria (≥0.95 whitened coverage, `<1 s` semisort, non-zero gate prunes) before any 32 k reruns so we don’t regress the <20 s preset.
 - **Why high leverage:** A single bad run can silently degrade the fast config; automated guardrails ensure every 32 k benchmark still represents the tuned recipe before we publish new numbers.
-- **Status:** Criteria documented but not automated.  
+- **Status:** `tools/residual_guardrail_check.py` now runs the 4 k preset (or validates an existing log) and fails fast when the coverage/semisort/pairwise reuse checks slip; gate-prune enforcement is opt-in via `--require-gate1-prunes` until the lookup path lands. Wire this into CI before the next round of 32 k sweeps.  
 - **Refs:** `docs/journal/2025-11.md` (“Phase‑5 Shakedown Guardrails”).
 
 ### Instrumentation & benchmark refresh
 - **Goal:** Capture `grid_*`, `gate1_*`, `prefix_factor`, `arena_bytes`, and automate the 2 048/8 192/32 768 suites so every tweak to the <20 s config is measurable; refresh `docs/CORE_IMPLEMENTATIONS.md` + add an `AUDIT.md` response section.
 - **Why high leverage:** Without complete telemetry and scripted benchmarks, we can’t prove whether a change helps or hurts the winning build; finishing this work locks in observability for every future tweak.
-- **Status:** Partially done: batch-order telemetry exists and `tools/residual_scaling_sweep.py` now automates 4 k→64 k runs, but the full telemetry capture + CI wiring remain outstanding.  
+- **Status:** `tools/run_reference_benchmarks.py` now drives the guardrail + 2 048/8 192/32 768 suites (writing JSONL/CSV manifests) and `tools/residual_guardrail_check.py` blocks unhealthy 4 k runs. Next step is to wire the harness into CI + refresh `docs/AUDIT.md` with the new artefacts.  
 - **Refs:** `PARALLEL_COMPRESSED_PLAN.md §5`.
 
 ### Grid/prefix benchmark refresh & rollout guidance
@@ -51,6 +52,7 @@ This list is reprioritised to focus on the configurations that already deliver �
 #### Level-cache batching & parent chain Numba port
 - **Goal:** Batch the level-scope prefetch and parent/chain append paths so cached Hilbert windows, parent guarantees, and next-chain inserts use Numba helpers instead of per-query Python loops.
 - **Outcome:** ✅ `_process_level_cache_hits` now batches cached Hilbert windows per level (see `strategies/residual.py:108-220`, `820-905`), `residual_collect_next_chain` replaces the Python loop in both serial and parallel collectors, and the preset ships enabled by default via `--residual-level-cache-batching`. Fresh artefacts (`pcct-20251114-162220-9efaf0` for 32 k, `pcct-20251114-162122-761439` for 4 k) capture the new gold baseline.
+- **Outcome:** ✅ `_process_level_cache_hits` now batches cached Hilbert windows per level (see `strategies/residual.py:108-220`, `820-905`), `residual_collect_next_chain` replaces the Python loop in both serial and parallel collectors, and the preset ships enabled by default via `--residual-level-cache-batching`. Fresh artefacts (`pcct-20251114-162220-9efaf0` for 32 k, `pcct-20251114-105559-b7f965` for 4 k) capture the new gold baseline.
 
 ## B. Next-Level Optimisations (after A is healthy)
 

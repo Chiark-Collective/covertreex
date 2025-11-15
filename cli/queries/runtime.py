@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Dict
 
 from covertreex import config as cx_config
 from covertreex.core.tree import TreeBackend
-from covertreex.telemetry import resolve_artifact_path
+from covertreex.telemetry import artifact_root, resolve_artifact_path
 
 
 def _gate_active_for_backend(host_backend: Any | None) -> bool:
@@ -76,7 +77,21 @@ def _resolve_backend() -> TreeBackend:
 def _resolve_artifact_arg(path: str | None, *, category: str = "benchmarks") -> str | None:
     if not path:
         return None
-    resolved = resolve_artifact_path(path, category=category)
+    raw = Path(path).expanduser()
+    if raw.is_absolute():
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        return str(raw)
+
+    root = artifact_root()
+    parts = raw.parts
+    root_aliases = {root.name, "artifacts"}
+    if parts and parts[0] in root_aliases:
+        remainder = Path(*parts[1:]) if len(parts) > 1 else Path()
+        resolved = root if remainder == Path() else root / remainder
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        return str(resolved)
+
+    resolved = resolve_artifact_path(raw, category=category)
     return str(resolved)
 
 

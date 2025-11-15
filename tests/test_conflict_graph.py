@@ -90,6 +90,29 @@ def test_chunk_range_builder_skips_zero_volume_segments_with_keep_mask():
     assert ranges_kept == [(0, 1), (1, 2)]
 
 
+def test_chunk_range_builder_pair_merge_merges_segments():
+    indptr = np.array([0, 1, 2, 3, 4, 9], dtype=np.int64)
+    pair_counts = np.array([1, 1, 1, 1, 8], dtype=np.int64)
+
+    ranges_plain, stats_plain = _chunk_ranges_from_indptr(
+        indptr,
+        chunk_target=1,
+        max_segments=0,
+        pair_counts=pair_counts,
+    )
+    ranges_pair, stats_pair = _chunk_ranges_from_indptr(
+        indptr,
+        chunk_target=1,
+        max_segments=0,
+        pair_counts=pair_counts,
+        pair_merge=True,
+    )
+
+    assert len(ranges_pair) < len(ranges_plain)
+    assert stats_pair.pair_merges > 0
+    assert stats_plain.pair_merges == 0
+
+
 def test_conflict_graph_builds_edges_from_shared_scopes():
     cx_config.reset_runtime_config_cache()
     backend = get_runtime_backend()
@@ -214,6 +237,30 @@ def test_degree_cap_limits_conflict_edges(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("COVERTREEX_SCOPE_CHUNK_TARGET", raising=False)
     monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
     monkeypatch.delenv("COVERTREEX_DEGREE_CAP", raising=False)
+    cx_config.reset_runtime_config_cache()
+
+
+def test_conflict_builder_buffer_reuse_reports_arena_bytes(monkeypatch: pytest.MonkeyPatch):
+    if not NUMBA_SCOPE_AVAILABLE:
+        pytest.skip("Numba conflict builder unavailable.")
+
+    backend = get_runtime_backend()
+    tree = _sample_tree()
+    batch_points = [[0.5, 0.5], [1.2, 1.3], [2.1, 2.2]]
+
+    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
+    monkeypatch.setenv("COVERTREEX_SCOPE_CHUNK_TARGET", "0")
+    monkeypatch.setenv("COVERTREEX_SCOPE_CONFLICT_BUFFER_REUSE", "1")
+    cx_config.reset_runtime_config_cache()
+
+    traversal = traverse_collect_scopes(tree, batch_points)
+    graph = build_conflict_graph(tree, traversal, batch_points)
+
+    assert graph.timings.arena_bytes > 0
+
+    monkeypatch.delenv("COVERTREEX_SCOPE_CONFLICT_BUFFER_REUSE", raising=False)
+    monkeypatch.delenv("COVERTREEX_SCOPE_CHUNK_TARGET", raising=False)
+    monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
     cx_config.reset_runtime_config_cache()
 
 

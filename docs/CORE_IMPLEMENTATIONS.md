@@ -6,6 +6,8 @@ _This file is a to-be-maintained reference. Keep the benchmark table and the cod
 
 > GPU/JAX execution is currently disabled. All timings below use the NumPy backend with `COVERTREEX_BACKEND=numpy` and `COVERTREEX_ENABLE_NUMBA=1`.
 
+> Use `python tools/run_reference_benchmarks.py` to regenerate the 2 048 / 8 192 / 32 768 artefacts below. The harness writes JSONL logs and CSV summaries under `artifacts/benchmarks/reference/<timestamp>/` (manifest included).
+
 ### Quick Benchmark — 2 048 tree pts / 512 queries / k=8
 
 | Implementation               | Build Time (s) | Query Time (s) | Throughput (q/s) | Notes |
@@ -45,19 +47,19 @@ These files include the runtime configuration snapshot (`runtime_*` keys) so you
 |-----------------------------------|----------------|----------------|----------|----------------------|----------------|-------------------|-------------|--------------------|---------------|
 | 8 192 / 1 024 / 16                | 4.15           | 0.018          | 57 660   | 33.65               | 5 327         | 0.75              | 285         | 14.14              | 122           |
 | 32 768 / 1 024 / 8 (Euclidean)    | 16.75          | 0.039          | 25 973   | —                   | —             | 3.10              | 65.1        | —                  | —             |
-| 32 768 / 1 024 / 8 (Residual, dense)** | 18.4          | 0.026          | 39 000   | —                   | —             | 2.51              | 91.6        | —                  | —             |
+| 32 768 / 1 024 / 8 (Residual, dense)** | 17.8          | 0.026          | 39 000   | —                   | —             | 2.51              | 91.6        | —                  | —             |
 | 32 768 / 1 024 / 8 (Residual, sparse streamer)** | 493          | 0.027          | 37 600   | —                   | —             | 2.51              | 91.6        | —                  | —             |
 
 _*GPBoost remains Euclidean-only; the baseline numbers in the residual row are provided for throughput context only._
 
-_**Hilbert batches, diagnostics on, `COVERTREEX_SCOPE_CHUNK_TARGET=0` (dense) or 8 192 (sparse), Numba scope streamer + bitset scopes enabled. Logs: `pcct-20251114-162220-9efaf0` (dense w/ level-cache batching) and `pcct-20251110-105526-68dddf` (sparse streamer)._
+_**Hilbert batches, diagnostics on, `COVERTREEX_SCOPE_CHUNK_TARGET=0` (dense) or 8 192 (sparse); dense path adds pair-count shard merging + buffer reuse. Logs: `pcct-20251114-214845-7df1be` (`residual_dense_32768_dense_streamer_pairmerge_gold.jsonl`) and `pcct-20251110-105526-68dddf` (sparse streamer)._ 
 
 **Residual build status (2025-11-17).**
-- Dense residual (gate off, dense scope streamer + masked append + level-cache batching + bitsets) is the current gold baseline: `pcct-20251114-162220-9efaf0` reports **≈18.4 s build**, dominated `traversal_semisort_ms≈37 ms` (p90 ≈54 ms), and `pcct | throughput≈39.0 k q/s`. Log: `artifacts/benchmarks/residual_dense_32768_dense_streamer_levelcache_rerun.jsonl`.
-- The 4 k guardrail (`pcct-20251114-162122-761439`, log `artifacts/benchmarks/artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_dense_streamer_levelcache.jsonl`) clocks `traversal_semisort_ms≈19.8 ms`, keeping the `<1 s` criterion intact before any 32 k reruns.
+- Dense residual (gate off, dense scope streamer + masked append + level-cache batching + bitsets + pair-count shard merging + buffer reuse) is the current gold baseline: `pcct-20251114-214845-7df1be` reports **≈17.8 s build**, `traversal_semisort_ms≈36 ms` (p90 ≈59 ms), and `pcct | throughput≈39 k q/s`. Log: `artifacts/benchmarks/residual_dense_32768_dense_streamer_pairmerge_gold.jsonl`.
+- The 4 k guardrail (`pcct-20251114-105559-b7f965`, log `artifacts/benchmarks/residual_phase05_hilbert_4k_dense_streamer_gold.jsonl`) clocks `traversal_semisort_ms≈41.7 ms` (still `<1 s`) but currently logs zero whitened coverage / gate prunes, so rerun the preset once Gate‑1 is re-enabled.
 - Sparse residual + streamer + cap remains scan-cap dominated (historical `pcct-20251110-105526-68dddf` sits at ≈493 s); rerunning it with the dense scope streamer enabled is on the backlog.
 
-**Recommended CLI defaults (dense streamer + batching, 2025-11-17).** Use the command below for the fastest audited residual numbers; it mirrors the log above and explicitly keeps the dense scope streamer, bitsets, and level-cache batching enabled. Pass `--no-residual-*` if you need to reproduce the legacy behaviour.
+**Recommended CLI defaults (dense streamer + batching, 2025-11-17).** Use the command below for the fastest audited residual numbers; it mirrors the log above and explicitly keeps the dense scope streamer, bitsets, level-cache batching, pair-count shard merging, and buffer reuse enabled. Pass `--no-residual-*`, `--no-scope-chunk-pair-merge`, or `--no-scope-conflict-buffer-reuse` if you need to reproduce the legacy behaviour.
 
 ```
 COVERTREEX_BACKEND=numpy \
@@ -72,10 +74,10 @@ python -m cli.queries \
   --residual-dense-scope-streamer \
   --residual-scope-bitset \
   --residual-level-cache-batching \
-  --log-file artifacts/benchmarks/residual_dense_32768_dense_streamer_levelcache_rerun.jsonl
+  --log-file artifacts/benchmarks/residual_dense_32768_dense_streamer_pairmerge_gold.jsonl
 ```
 
-**Gold-standard residual benchmark (dense streamer + batching).** When publishing new numbers or triaging regressions, start from `pcct-20251114-162220-9efaf0` (`artifacts/benchmarks/residual_dense_32768_dense_streamer_levelcache_rerun.jsonl`). Diagnostics remain on by default so telemetry stays comparable; disable them explicitly if you need apples-to-apples with the historical diag0 logs (best-of-three diag-off build: 19.09 s).
+**Gold-standard residual benchmark (dense streamer + batching + pair merge).** When publishing new numbers or triaging regressions, start from `pcct-20251114-214845-7df1be` (`artifacts/benchmarks/residual_dense_32768_dense_streamer_pairmerge_gold.jsonl`). Diagnostics remain on by default so telemetry stays comparable; disable them explicitly if you need apples-to-apples with the historical diag0 logs.
 
 **Historical residual build status (2025-11-10).**
 - Dense residual (gate off) remains the wall-clock leader: `pcct-20251110-105043-101bb9` reports ≈257 s build, `traversal_ms≈1.23 s`.
@@ -85,7 +87,7 @@ python -m cli.queries \
 - Every residual run can now emit a reusable Gate‑1 profile without reruns: `--residual-gate-profile-log profiles/residual_gate_runs.jsonl` appends a JSONL line per run (auto-generating the underlying profile JSON if needed), and `tools/ingest_residual_gate_profile.py` merges those lines into lookup files under `docs/data/`.
 - Residual traversal caches, conflict inputs, and telemetry now default to float32 staging (with opt-in float64 views for audits), cutting traversal/cache residency roughly in half. `ResidualTraversalCache.pairwise.dtype == np.float32` is enforced in tests, so any drift back to float64 will fail CI.
 - Phase 5 deterministic selection (2025‑11‑12) swapped all residual/Euclidean scope builders to `select_topk_by_level` (argpartition + stable ties) and moved the limit logic into the Numba CSR path, so `traversal_semisort_ms` is expected to approach zero once the telemetry sweep is re-run. Because the latest Hilbert 32 k replay still exceeded an hour wall-clock, every residual audit now starts with a 4 k-point dry run (same flags, smaller `--tree-points`) and only scales to 32 k after the small run reports ≥95 % whitened coverage, `<1 s` median semisort, and `conflict_pairwise_reused=1` across batches.
-- Per-run telemetry is summarised with `python tools/export_benchmark_diagnostics.py --output artifacts/benchmarks/residual_budget_diagnostics.csv artifacts/benchmarks/artifacts/benchmarks/residual_{dense,sparse}_budget_4096.jsonl`: the dense control (no chunk target) records a **76.49 s** build while the budgeted sparse streamer (chunk target 4 096, schedule `1 024/2 048/4 096`) lands at **103.37 s** with budget amplification `3.73×` and ≥93.7 % pairwise reuse after the warm-up batch. Point perf reviews at that CSV instead of console output.
+- Per-run telemetry is summarised with `python tools/export_benchmark_diagnostics.py --output artifacts/benchmarks/residual_budget_diagnostics.csv artifacts/benchmarks/residual_{dense,sparse}_budget_4096.jsonl`: the dense control (no chunk target) records a **76.49 s** build while the budgeted sparse streamer (chunk target 4 096, schedule `1 024/2 048/4 096`) lands at **103.37 s** with budget amplification `3.73×` and ≥93.7 % pairwise reuse after the warm-up batch. Point perf reviews at that CSV instead of console output.
 
 **Historical CLI defaults (pre-dense-streamer, 2025-11-10).** Use the dense traversal recipe from `pcct-20251110-105043-101bb9` whenever you need the fastest audited numbers from the maskopt_v2 era. The command below leaves the gate off, keeps scopes unclamped, and mirrors every setting from the 257 s / 0.027 s build:
 
@@ -101,7 +103,7 @@ python -m cli.queries \
   --dimension 8 --tree-points 32768 \
   --batch-size 512 --queries 1024 --k 8 \
   --seed 42 --baseline gpboost \
-  --log-file artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_best.jsonl
+  --log-file artifacts/benchmarks/residual_dense_32768_best.jsonl
 ```
 
 Treat this command as the default when publishing numbers or triaging regressions; any change that enables the sparse streamer, gate, or scope caps should be considered experimental. The CLI still defaults to Euclidean + Hilbert when no flags are provided, so pass the exact arguments above whenever you need the historically best residual timings.
@@ -139,8 +141,8 @@ The JSONL log now lands in `artifacts/benchmarks/queries_<run_id>.jsonl` automat
 
 ### Phase 5 Regression Warning (2025-11-12)
 
-- The 4 k-point Hilbert shakedown (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k.jsonl`) now takes **114 s wall-clock** across eight dominated batches. Median `traversal_ms` sits at **13.3 s**, `traversal_semisort_ms` hits **7.53 s (p50)** / **11.0 s (p90)** / **17.5 s (max)**, and whitened coverage collapses to **0.875×** because `compute_residual_pairwise_matrix` still streams the dense 512×512 kernel for every batch. Gate telemetry recorded **7.34 M candidates / 0 pruned**, so enabling the lookup with the current cap/margin buys us nothing other than extra bookkeeping.
-- The so-called “Phase 5 validation” on the full Hilbert 32 k preset (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert.jsonl`) is even worse: **123 batches**, **median traversal_ms≈59.4 s**, **median semisort_ms≈28.0 s**, and **total traversal time 7 277 s (~2.0 h)**. Coverage looks fine on paper (0.979×) purely because the streamer dwarfs the per-batch pairwise cache, not because the gate/selection changes helped.
+- The 4 k-point Hilbert shakedown (`artifacts/benchmarks/residual_phase05_hilbert_4k.jsonl`) now takes **114 s wall-clock** across eight dominated batches. Median `traversal_ms` sits at **13.3 s**, `traversal_semisort_ms` hits **7.53 s (p50)** / **11.0 s (p90)** / **17.5 s (max)**, and whitened coverage collapses to **0.875×** because `compute_residual_pairwise_matrix` still streams the dense 512×512 kernel for every batch. Gate telemetry recorded **7.34 M candidates / 0 pruned**, so enabling the lookup with the current cap/margin buys us nothing other than extra bookkeeping.
+- The so-called “Phase 5 validation” on the full Hilbert 32 k preset (`artifacts/benchmarks/residual_phase05_hilbert.jsonl`) is even worse: **123 batches**, **median traversal_ms≈59.4 s**, **median semisort_ms≈28.0 s**, and **total traversal time 7 277 s (~2.0 h)**. Coverage looks fine on paper (0.979×) purely because the streamer dwarfs the per-batch pairwise cache, not because the gate/selection changes helped.
 - Conclusion: the current deterministic-selection release is a regression factory. Until the gate actually prunes and semisort collapses to the promised “near-zero”, stick to the dense defaults above. Any sparse/gate experiment must include a 4 k-point dry run (same CLI flags, smaller `--tree-points`) and a CSV dump via `tools/export_benchmark_diagnostics.py` so we can reject regressions before burning another hour on the 32 k suite.
 
 _Command (8 192 row):_

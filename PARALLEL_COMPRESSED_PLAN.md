@@ -138,7 +138,7 @@ Targets after this sprint:
 
 **Tasks / Status**
 1. Extend JSONL writer with new counters (`grid_*`, `gate1_*`, `prefix_factor`, `arena_bytes`). *(partially done — `batch_order_*` + domination ratios already flowing; remaining counters pending their respective features.)*
-2. Automate benchmark suite:
+2. Automate benchmark suite: *(baseline harness exists — `tools/run_reference_benchmarks.py` runs guardrail + 2 048/8 192/32 768 presets and emits CSV + manifest output; wire it into CI and keep presets synced with the latest gold config.)*
    - 2 048 quick check (diagnostics on/off).
    - 8 192 Euclidean/residual.
    - 32 768 Euclidean/residual (clamped + chunked variants).

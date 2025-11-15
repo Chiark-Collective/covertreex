@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from covertreex.algo.conflict.arena import ScopeBuilderArena
+
 try:  # pragma: no cover - optional dependency
     import numba as nb
 
@@ -37,6 +39,7 @@ class ScopeAdjacencyResult:
     chunk_pairs_cap: int = 0
     chunk_pairs_before: int = 0
     chunk_pairs_after: int = 0
+    chunk_pair_merges: int = 0
     degree_cap: int = 0
     degree_pruned_pairs: int = 0
 
@@ -47,6 +50,7 @@ class ChunkRangeStats:
     pair_tail_threshold: int = 0
     pair_max_before: int = 0
     pair_max_after: int = 0
+    pair_merges: int = 0
 
 
 _TAIL_MERGE_DIVISOR = 4
@@ -58,6 +62,7 @@ def _chunk_ranges_from_indptr(
     max_segments: int = 0,
     keep_mask: np.ndarray | None = None,
     pair_counts: np.ndarray | None = None,
+    pair_merge: bool = False,
 ) -> tuple[list[tuple[int, int]], ChunkRangeStats]:
     """Return (start, end) node ranges bounded by the configured chunk target."""
 
@@ -126,6 +131,7 @@ def _chunk_ranges_from_indptr(
     pair_tail_threshold = 0
     pair_max_before = 0
     pair_max_after = 0
+    pair_merge_count = 0
     if pair_counts is not None and pair_counts.size == num_nodes:
         pair_prefix = np.empty(num_nodes + 1, dtype=np.int64)
         pair_prefix[0] = 0
@@ -148,13 +154,18 @@ def _chunk_ranges_from_indptr(
         )
 
     if pair_prefix is not None and pair_prefix[-1] > 0:
+        if pair_merge and pair_cap > 0 and len(ranges) > 1:
+            ranges, pair_merge_count = _merge_ranges_by_pair_volume(ranges, pair_prefix, pair_cap)
         pair_max_after = _max_range_pairs(ranges, pair_prefix)
         pair_stats = ChunkRangeStats(
             pair_cap=int(pair_cap),
             pair_tail_threshold=int(pair_tail_threshold),
             pair_max_before=int(pair_max_before),
             pair_max_after=int(pair_max_after),
+            pair_merges=int(pair_merge_count),
         )
+    elif pair_merge_count:
+        pair_stats = ChunkRangeStats(pair_merges=int(pair_merge_count))
 
     return ranges, pair_stats
 
@@ -209,6 +220,39 @@ def _merge_tail_ranges(
         merged.pop(idx)
         idx -= 1
     return merged
+
+
+def _merge_ranges_by_pair_volume(
+    ranges: list[tuple[int, int]],
+    pair_prefix: np.ndarray,
+    pair_cap: int,
+) -> tuple[list[tuple[int, int]], int]:
+    if pair_cap <= 0 or not ranges or pair_prefix.size == 0:
+        return ranges, 0
+    merged: list[tuple[int, int]] = []
+    merges = 0
+    current_start, current_end = ranges[0]
+    current_pairs = int(pair_prefix[current_end] - pair_prefix[current_start])
+    slack = max(pair_cap // 4, 1)
+    cap_with_slack = pair_cap + slack
+    for start, end in ranges[1:]:
+        next_pairs = int(pair_prefix[end] - pair_prefix[start])
+        if current_pairs == 0 and next_pairs == 0:
+            current_end = end
+            current_pairs = 0
+            merges += 1
+            continue
+        if current_pairs + next_pairs <= cap_with_slack:
+            current_end = end
+            current_pairs += next_pairs
+            merges += 1
+            continue
+        merged.append((current_start, current_end))
+        current_start = start
+        current_end = end
+        current_pairs = next_pairs
+    merged.append((current_start, current_end))
+    return merged, merges
 
 
 def _max_range_pairs(ranges: list[tuple[int, int]], pair_prefix: np.ndarray | None) -> int:
@@ -615,11 +659,20 @@ if NUMBA_SCOPE_AVAILABLE:
         offsets: np.ndarray,
         pairwise: np.ndarray,
         radii: np.ndarray,
+        reuse_sources: np.ndarray,
+        reuse_targets: np.ndarray,
+        reuse_enabled: int,
     ):
         k = kept_nodes.size
         capacity = offsets[-1]
-        sources = np.empty(capacity, dtype=I32)
-        targets = np.empty(capacity, dtype=I32)
+        if reuse_enabled and reuse_sources.size >= capacity:
+            sources = reuse_sources[:capacity]
+        else:
+            sources = np.empty(capacity, dtype=I32)
+        if reuse_enabled and reuse_targets.size >= capacity:
+            targets = reuse_targets[:capacity]
+        else:
+            targets = np.empty(capacity, dtype=I32)
         used = np.zeros(k, dtype=I64)
 
         for idx in nb.prange(k):
@@ -658,11 +711,20 @@ if NUMBA_SCOPE_AVAILABLE:
         pairwise: np.ndarray,
         radii: np.ndarray,
         degree_cap: int,
+        reuse_sources: np.ndarray,
+        reuse_targets: np.ndarray,
+        reuse_enabled: int,
     ):
         k = kept_nodes.size
         capacity = offsets[-1]
-        sources = np.empty(capacity, dtype=I32)
-        targets = np.empty(capacity, dtype=I32)
+        if reuse_enabled and reuse_sources.size >= capacity:
+            sources = reuse_sources[:capacity]
+        else:
+            sources = np.empty(capacity, dtype=I32)
+        if reuse_enabled and reuse_targets.size >= capacity:
+            targets = reuse_targets[:capacity]
+        else:
+            targets = np.empty(capacity, dtype=I32)
         used = np.zeros(k, dtype=I64)
         max_nodes = pairwise.shape[0]
         degree_usage = np.zeros(max_nodes, dtype=I64)
@@ -712,6 +774,9 @@ if NUMBA_SCOPE_AVAILABLE:
         pairwise: np.ndarray,
         radii: np.ndarray,
         degree_cap: int,
+        reuse_sources: np.ndarray,
+        reuse_targets: np.ndarray,
+        reuse_enabled: int,
     ):
         if degree_cap <= 0:
             sources, targets, used = _expand_pairs_directed_impl(
@@ -721,6 +786,9 @@ if NUMBA_SCOPE_AVAILABLE:
                 offsets,
                 pairwise,
                 radii,
+                reuse_sources,
+                reuse_targets,
+                reuse_enabled,
             )
             return sources, targets, used, 0
         return _expand_pairs_directed_capped_impl(
@@ -731,6 +799,9 @@ if NUMBA_SCOPE_AVAILABLE:
             pairwise,
             radii,
             int(degree_cap),
+            reuse_sources,
+            reuse_targets,
+            reuse_enabled,
         )
 
     @nb.njit(cache=True)
@@ -743,15 +814,27 @@ if NUMBA_SCOPE_AVAILABLE:
         radii: np.ndarray,
         batch_size: int,
         degree_cap: int,
+        counts_buffer: np.ndarray,
+        degree_buffer: np.ndarray,
+        reuse_enabled: int,
+        indices_buffer: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, int, int, int, int]:
-        counts = np.zeros(batch_size, dtype=I64)
+        if reuse_enabled and counts_buffer.size >= batch_size:
+            counts = counts_buffer[:batch_size]
+            counts[:] = 0
+        else:
+            counts = np.zeros(batch_size, dtype=I64)
         chunk_emitted = 0
         chunk_max_members = 0
         total_pairs = I64(0)
         degree_pruned = I64(0)
         use_degree_cap = degree_cap > 0
         if use_degree_cap:
-            degree_usage = np.zeros(batch_size, dtype=I64)
+            if reuse_enabled and degree_buffer.size >= batch_size:
+                degree_usage = degree_buffer[:batch_size]
+                degree_usage[:] = 0
+            else:
+                degree_usage = np.zeros(batch_size, dtype=I64)
         else:
             degree_usage = np.empty(0, dtype=I64)
 
@@ -814,7 +897,10 @@ if NUMBA_SCOPE_AVAILABLE:
             acc += counts[i]
             indptr_out[i + 1] = acc
 
-        indices_out = np.empty(total_pairs_int, dtype=I32)
+        if reuse_enabled and indices_buffer.size >= total_pairs_int:
+            indices_out = indices_buffer[:total_pairs_int]
+        else:
+            indices_out = np.empty(total_pairs_int, dtype=I32)
         heads = indptr_out[:-1].copy()
 
         for chunk_idx in range(chunk_count):
@@ -969,6 +1055,8 @@ if NUMBA_SCOPE_AVAILABLE:
         pairwise: np.ndarray | None = None,
         radii: np.ndarray | None = None,
         degree_cap: int = 0,
+        scratch_pool: ScopeBuilderArena | None = None,
+        pair_merge: bool = False,
     ) -> ScopeAdjacencyResult:
         if scope_indices.size == 0:
             return ScopeAdjacencyResult(
@@ -995,6 +1083,7 @@ if NUMBA_SCOPE_AVAILABLE:
         pairwise_arr = np.ascontiguousarray(np.asarray(pairwise, dtype=np.float64))
         radii_arr = np.asarray(radii, dtype=np.float64)
         degree_cap_value = int(degree_cap) if int(degree_cap) > 0 else 0
+        reuse_enabled = 1 if scratch_pool is not None else 0
 
         total = scope_indices.size
         point_ids = _membership_point_ids_from_indptr(scope_indptr.astype(I64), total)
@@ -1069,10 +1158,12 @@ if NUMBA_SCOPE_AVAILABLE:
             chunk_max_segments,
             keep_mask,
             pair_counts=pair_counts,
+            pair_merge=pair_merge,
         )
         chunk_pairs_cap = int(chunk_stats.pair_cap)
         chunk_pairs_before = int(chunk_stats.pair_max_before)
         chunk_pairs_after = int(chunk_stats.pair_max_after)
+        chunk_pair_merges = int(chunk_stats.pair_merges)
         chunk_count = len(chunk_ranges_list)
         if chunk_count:
             chunk_ranges_arr = np.asarray(chunk_ranges_list, dtype=np.int64).reshape(chunk_count, 2)
@@ -1106,7 +1197,12 @@ if NUMBA_SCOPE_AVAILABLE:
                 degree_cap=int(degree_cap_value),
                 degree_pruned_pairs=0,
             )
-
+            if scratch_pool is not None and capacity > 0:
+                reuse_sources = scratch_pool.borrow_sources(capacity)
+                reuse_targets = scratch_pool.borrow_targets(capacity)
+            else:
+                reuse_sources = np.empty(0, dtype=I32)
+                reuse_targets = np.empty(0, dtype=I32)
             sources, targets, used_counts, degree_pruned = _expand_pairs_directed(
                 node_members,
                 indptr_nodes,
@@ -1115,6 +1211,9 @@ if NUMBA_SCOPE_AVAILABLE:
                 pairwise_arr,
                 radii_arr,
                 degree_cap_value,
+                reuse_sources,
+                reuse_targets,
+                reuse_enabled,
             )
             csr_indptr, csr_indices, actual_pairs = _pairs_to_csr(
                 sources,
@@ -1140,6 +1239,7 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_pairs_cap=chunk_pairs_cap,
                 chunk_pairs_before=chunk_pairs_before,
                 chunk_pairs_after=chunk_pairs_after,
+                chunk_pair_merges=chunk_pair_merges,
                 degree_cap=int(degree_cap_value),
                 degree_pruned_pairs=0,
             )
@@ -1159,9 +1259,19 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_pairs_cap=chunk_pairs_cap,
                 chunk_pairs_before=chunk_pairs_before,
                 chunk_pairs_after=chunk_pairs_after,
+                chunk_pair_merges=chunk_pair_merges,
                 degree_cap=int(degree_cap_value),
                 degree_pruned_pairs=int(degree_pruned),
             )
+
+        if scratch_pool is not None:
+            counts_buffer = scratch_pool.borrow_counts(batch_size)
+            degree_buffer = scratch_pool.borrow_degree_usage(batch_size)
+            indices_buffer = scratch_pool.borrow_indices(max(1, directed_total_pairs))
+        else:
+            counts_buffer = np.empty(0, dtype=I64)
+            degree_buffer = np.empty(0, dtype=I64)
+            indices_buffer = np.empty(0, dtype=I32)
 
         (
             global_indptr,
@@ -1179,6 +1289,10 @@ if NUMBA_SCOPE_AVAILABLE:
             radii_arr,
             batch_size,
             degree_cap_value,
+            counts_buffer,
+            degree_buffer,
+            reuse_enabled,
+            indices_buffer,
         )
 
         if total_pairs_accum == 0:
@@ -1198,6 +1312,7 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_pairs_cap=chunk_pairs_cap,
                 chunk_pairs_before=chunk_pairs_before,
                 chunk_pairs_after=chunk_pairs_after,
+                chunk_pair_merges=chunk_pair_merges,
                 degree_cap=int(degree_cap_value),
                 degree_pruned_pairs=int(degree_pruned_pairs),
             )
@@ -1218,6 +1333,7 @@ if NUMBA_SCOPE_AVAILABLE:
             chunk_pairs_cap=chunk_pairs_cap,
             chunk_pairs_before=chunk_pairs_before,
             chunk_pairs_after=chunk_pairs_after,
+            chunk_pair_merges=chunk_pair_merges,
             degree_cap=int(degree_cap_value),
             degree_pruned_pairs=int(degree_pruned_pairs),
         )

@@ -293,6 +293,22 @@ def cli(
             rich_help_panel=_RUNTIME_PANEL,
         ),
     ] = None,
+    scope_chunk_pair_merge: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--scope-chunk-pair-merge/--no-scope-chunk-pair-merge",
+            help="Merge scope chunks based on pair-count heuristics.",
+            rich_help_panel=_RUNTIME_PANEL,
+        ),
+    ] = None,
+    scope_conflict_buffer_reuse: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--scope-conflict-buffer-reuse/--no-scope-conflict-buffer-reuse",
+            help="Reuse conflict-builder buffers when using Numba scopes.",
+            rich_help_panel=_RUNTIME_PANEL,
+        ),
+    ] = None,
     degree_cap: Annotated[
         Optional[int],
         typer.Option(
@@ -783,7 +799,7 @@ def _validate_residual_runtime(snapshot: Mapping[str, Any]) -> None:
 def run_queries(options: QueryCLIOptions) -> None:
     args = options
     run_id = args.run_id or generate_run_id()
-    if args.residual_gate and args.metric != "residual":
+    if args.residual_gate not in (None, "off") and args.metric != "residual":
         raise ValueError("--residual-gate presets are only supported when --metric residual is selected.")
 
     if args.metric == "residual":

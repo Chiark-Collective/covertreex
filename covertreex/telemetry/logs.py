@@ -203,6 +203,7 @@ class BenchmarkLogWriter:
             "conflict_scope_chunk_pair_cap": int(conflict_timings.scope_chunk_pair_cap),
             "conflict_scope_chunk_pairs_before": int(conflict_timings.scope_chunk_pairs_before),
             "conflict_scope_chunk_pairs_after": int(conflict_timings.scope_chunk_pairs_after),
+            "conflict_scope_chunk_pair_merges": int(conflict_timings.scope_chunk_pair_merges),
             "conflict_scope_domination_ratio": float(conflict_timings.scope_domination_ratio),
             "conflict_pairwise_reused": int(conflict_timings.pairwise_reused),
             "conflict_arena_bytes": int(conflict_timings.arena_bytes),

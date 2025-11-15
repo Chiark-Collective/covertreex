@@ -22,6 +22,8 @@ _BATCH_ORDER_STRATEGIES = {"natural", "random", "hilbert"}
 _PREFIX_SCHEDULES = {"doubling", "adaptive"}
 _DEFAULT_SCOPE_CHUNK_TARGET = 0
 _DEFAULT_SCOPE_CHUNK_MAX_SEGMENTS = 512
+_DEFAULT_SCOPE_CHUNK_PAIR_MERGE = True
+_DEFAULT_SCOPE_CONFLICT_BUFFER_REUSE = True
 _DEFAULT_CONFLICT_DEGREE_CAP = 0
 _DEFAULT_SCOPE_BUDGET_SCHEDULE: Tuple[int, ...] = ()
 _DEFAULT_RESIDUAL_SCOPE_BUDGET_SCHEDULE: Tuple[int, ...] = (32, 64, 96)
@@ -231,6 +233,8 @@ class RuntimeConfig:
     scope_segment_dedupe: bool
     scope_chunk_target: int
     scope_chunk_max_segments: int
+    scope_chunk_pair_merge: bool
+    scope_conflict_buffer_reuse: bool
     conflict_degree_cap: int
     scope_budget_schedule: Tuple[int, ...]
     scope_budget_up_thresh: float
@@ -324,6 +328,14 @@ class RuntimeConfig:
             scope_chunk_max_segments = 0
         else:
             scope_chunk_max_segments = raw_chunk_segments
+        scope_chunk_pair_merge = _bool_from_env(
+            os.getenv("COVERTREEX_SCOPE_CHUNK_PAIR_MERGE"),
+            default=_DEFAULT_SCOPE_CHUNK_PAIR_MERGE,
+        )
+        scope_conflict_buffer_reuse = _bool_from_env(
+            os.getenv("COVERTREEX_SCOPE_CONFLICT_BUFFER_REUSE"),
+            default=_DEFAULT_SCOPE_CONFLICT_BUFFER_REUSE,
+        )
         raw_degree_cap = _parse_optional_int(os.getenv("COVERTREEX_DEGREE_CAP"))
         if raw_degree_cap is None or raw_degree_cap <= 0:
             conflict_degree_cap = _DEFAULT_CONFLICT_DEGREE_CAP
@@ -531,6 +543,8 @@ class RuntimeConfig:
             scope_segment_dedupe=scope_segment_dedupe,
             scope_chunk_target=scope_chunk_target,
             scope_chunk_max_segments=scope_chunk_max_segments,
+            scope_chunk_pair_merge=scope_chunk_pair_merge,
+            scope_conflict_buffer_reuse=scope_conflict_buffer_reuse,
             conflict_degree_cap=conflict_degree_cap,
             scope_budget_schedule=scope_budget_schedule,
             scope_budget_up_thresh=scope_budget_up_thresh,

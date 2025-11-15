@@ -276,6 +276,7 @@ def build_conflict_graph(
     scope_chunk_pair_cap = adjacency_build.scope_chunk_pair_cap
     scope_chunk_pairs_before = adjacency_build.scope_chunk_pairs_before
     scope_chunk_pairs_after = adjacency_build.scope_chunk_pairs_after
+    scope_chunk_pair_merges = adjacency_build.scope_chunk_pair_merges
     forced_selected = adjacency_build.forced_selected
     forced_dominated = adjacency_build.forced_dominated
     grid_cells = adjacency_build.grid_cells
@@ -494,6 +495,7 @@ def build_conflict_graph(
             scope_chunk_pair_cap=scope_chunk_pair_cap,
             scope_chunk_pairs_before=scope_chunk_pairs_before,
             scope_chunk_pairs_after=scope_chunk_pairs_after,
+            scope_chunk_pair_merges=scope_chunk_pair_merges,
             pairwise_reused=int(pairwise_reused_flag),
             grid_cells=grid_cells,
             grid_leaders_raw=grid_leaders_raw,

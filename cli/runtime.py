@@ -111,6 +111,12 @@ def runtime_from_args(
     scope_chunk_max_segments = _get_arg(args, "scope_chunk_max_segments")
     if scope_chunk_max_segments is not None:
         runtime_kwargs["scope_chunk_max_segments"] = int(scope_chunk_max_segments)
+    scope_chunk_pair_merge = _get_arg(args, "scope_chunk_pair_merge")
+    if scope_chunk_pair_merge is not None:
+        runtime_kwargs["scope_chunk_pair_merge"] = bool(scope_chunk_pair_merge)
+    scope_buffer_reuse = _get_arg(args, "scope_conflict_buffer_reuse")
+    if scope_buffer_reuse is not None:
+        runtime_kwargs["scope_conflict_buffer_reuse"] = bool(scope_buffer_reuse)
     degree_cap = _get_arg(args, "degree_cap")
     if degree_cap is not None:
         runtime_kwargs["degree_cap"] = int(degree_cap)

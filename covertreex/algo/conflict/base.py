@@ -75,6 +75,7 @@ class ConflictGraphTimings:
     scope_chunk_pair_cap: int = 0
     scope_chunk_pairs_before: int = 0
     scope_chunk_pairs_after: int = 0
+    scope_chunk_pair_merges: int = 0
     mis_seconds: float = 0.0
     pairwise_reused: int = 0
     grid_cells: int = 0
