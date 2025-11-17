@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reproduce the “gold standard” residual benchmark (32 768 points / 1 024 queries / k=8)
-# that yielded the 56.09 s build / 0.229 s query result on 2025‑11‑06.
+# Reproduce the “gold standard” residual benchmark (32 768 points / d=3 / 1 024 queries / k=50)
+# that yielded the 24.20 s build / 0.046 s query result on 2025‑11‑17.
 #
 # Usage: ./benchmarks/run_residual_gold_standard.sh [output_log]
 
@@ -25,11 +25,11 @@ if [[ -n "$GRID_WHITEN_SCALE" ]]; then
 fi
 
 python "$ROOT_DIR/benchmarks/queries.py" \
-  --dimension 8 \
+  --dimension 3 \
   --tree-points 32768 \
   --batch-size 512 \
   --queries 1024 \
-  --k 8 \
+  --k 50 \
   --metric residual \
   --baseline gpboost \
   --seed 42 | tee "$LOG_PATH"
