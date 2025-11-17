@@ -25,8 +25,10 @@ from .baseline import (
     BaselineNode,
     ExternalCoverTreeBaseline,
     GPBoostCoverTreeBaseline,
+    MlpackCoverTreeBaseline,
     has_external_cover_tree,
     has_gpboost_cover_tree,
+    has_mlpack_cover_tree,
 )
 
 __all__ = [
@@ -44,6 +46,8 @@ __all__ = [
     "BaselineNode",
     "ExternalCoverTreeBaseline",
     "GPBoostCoverTreeBaseline",
+    "MlpackCoverTreeBaseline",
     "has_external_cover_tree",
     "has_gpboost_cover_tree",
+    "has_mlpack_cover_tree",
 ]

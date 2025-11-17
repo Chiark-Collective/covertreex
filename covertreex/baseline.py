@@ -27,6 +27,13 @@ except Exception:  # pragma: no cover - numba is not installed
     njit = prange = None  # type: ignore
     _HAS_NUMBA = False
 
+try:  # pragma: no cover - optional dependency gate for mlpack baseline
+    import mlpack  # type: ignore[import]
+
+    _HAS_MLPACK = True
+except Exception:  # pragma: no cover - mlpack is not installed
+    mlpack = Any  # type: ignore[assignment]
+    _HAS_MLPACK = False
 
 if _HAS_NUMBA:
 
@@ -429,7 +436,9 @@ class ExternalCoverTreeBaseline:
 
     def nearest(self, query: Sequence[float]) -> Tuple[int, float]:
         indices, distances = self.knn(query, k=1, return_distances=True)
-        return int(indices), float(distances)
+        idx = int(np.asarray(indices).reshape(-1)[0])
+        dist = float(np.asarray(distances).reshape(-1)[0])
+        return idx, dist
 
     def knn(
         self,
@@ -461,6 +470,106 @@ class ExternalCoverTreeBaseline:
         if not return_distances:
             return indices
         return indices, distances
+
+
+class MlpackCoverTreeBaseline:
+    """Adapter around mlpack's cover-tree powered k-NN bindings."""
+
+    def __init__(self, *, points: np.ndarray, model: Any, leaf_size: int = 20) -> None:
+        if not _HAS_MLPACK:
+            raise ImportError("mlpack python bindings are not available.")
+        self.points = points
+        self.leaf_size = int(max(1, leaf_size))
+        self._model = model
+
+    @classmethod
+    def from_points(
+        cls,
+        points: Sequence[Sequence[float]],
+        *,
+        leaf_size: int = 20,
+    ) -> "MlpackCoverTreeBaseline":
+        if not _HAS_MLPACK:
+            raise ImportError("mlpack python bindings are not available.")
+        arr = np.asarray(points, dtype=np.float64)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        if arr.shape[0] == 0:
+            raise ValueError("mlpack cover tree baseline requires at least one point.")
+        arr = np.ascontiguousarray(arr)
+        result = mlpack.knn(
+            reference=arr,
+            k=1,
+            tree_type="cover",
+            leaf_size=int(leaf_size),
+            copy_all_inputs=True,
+        )
+        model = result.get("output_model")
+        if model is None:
+            raise RuntimeError("mlpack.knn did not return an output model.")
+        return cls(points=arr, model=model, leaf_size=int(leaf_size))
+
+    @property
+    def num_points(self) -> int:
+        return int(self.points.shape[0])
+
+    def nearest(self, query: Sequence[float]) -> Tuple[int, float]:
+        indices, distances = self.knn(query, k=1, return_distances=True)
+        idx_arr = np.asarray(indices).reshape(-1)
+        dist_arr = np.asarray(distances).reshape(-1)
+        return int(idx_arr[0]), float(dist_arr[0])
+
+    def knn(
+        self,
+        queries: Sequence[Sequence[float]] | Sequence[float],
+        *,
+        k: int,
+        return_distances: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray] | np.ndarray:
+        if not _HAS_MLPACK:
+            raise ImportError("mlpack python bindings are not available.")
+        if k <= 0:
+            raise ValueError("k must be positive.")
+        if k > self.num_points:
+            raise ValueError("k cannot exceed the number of reference points.")
+
+        query_arr = np.asarray(queries, dtype=np.float64)
+        squeeze = False
+        if query_arr.ndim == 1:
+            query_arr = query_arr.reshape(1, -1)
+            squeeze = True
+        query_arr = np.ascontiguousarray(query_arr)
+        single_query = query_arr.shape[0] == 1
+        if single_query:
+            query_arr = np.vstack([query_arr, query_arr])
+
+        result = mlpack.knn(
+            input_model=self._model,
+            query=query_arr,
+            k=int(k),
+            tree_type="cover",
+            copy_all_inputs=True,
+        )
+        neighbors = np.asarray(result["neighbors"], dtype=np.int64).copy()
+        distances = np.asarray(result["distances"], dtype=np.float64).copy()
+        model = result.get("output_model")
+        if model is None:
+            raise RuntimeError("mlpack.knn did not return an updated model.")
+        self._model = model
+        if single_query:
+            neighbors = neighbors[:1]
+            distances = distances[:1]
+
+        if squeeze:
+            neighbors = neighbors[0]
+            distances = distances[0]
+            if not return_distances:
+                return neighbors
+            return neighbors, distances
+
+        if not return_distances:
+            return neighbors
+        return neighbors, distances
 
 
 def has_external_cover_tree() -> bool:
@@ -571,11 +680,17 @@ def has_gpboost_cover_tree() -> bool:
     return _HAS_NUMBA
 
 
+def has_mlpack_cover_tree() -> bool:
+    return _HAS_MLPACK
+
+
 __all__ = [
     "BaselineCoverTree",
     "BaselineNode",
     "ExternalCoverTreeBaseline",
     "GPBoostCoverTreeBaseline",
+    "MlpackCoverTreeBaseline",
     "has_external_cover_tree",
     "has_gpboost_cover_tree",
+    "has_mlpack_cover_tree",
 ]

@@ -103,14 +103,14 @@ Smoke benchmarks live under `benchmarks/` and the Typer CLI (`python -m cli.pcct
 UV_CACHE_DIR=$PWD/.uv-cache uv run python -m benchmarks.batch_ops insert --dimension 8 --batch-size 64 --batches 4
 ```
 
-The k-NN benchmark supports baseline comparisons against both the in-repo sequential tree and the optional external CoverTree implementation:
+The k-NN benchmark supports baseline comparisons against the in-repo sequential tree, PyPI's `covertree`, and the mlpack cover-tree implementation:
 
 ```bash
-# Optional extras for the external baseline
+# Optional extras for the external baselines
 pip install -e '.[baseline]'
 
 UV_CACHE_DIR=$PWD/.uv-cache uv run python -m cli.pcct query \
-  --dimension 8 --tree-points 2048 --queries 512 --k 8 --baseline both
+  --dimension 8 --tree-points 2048 --queries 512 --k 8 --baseline cover
 ```
 
 Baseline outputs list build/query timings, throughput, and slowdown ratios alongside the PCCT
@@ -123,6 +123,35 @@ CLI documentation (flag reference, input/output description, telemetry schema) l
 
 Additional profile-driven walkthroughs live in `docs/examples/profile_workflows.md`, and migration
 notes for legacy scripts are in `docs/migrations/runtime_v_next.md`.
+
+For larger sweeps (or to exercise mlpack on a toy problem) use the automated runner in `tools/baseline_matrix.py`.
+It shells out to `cli.pcct query`, samples CPU/RAM via `psutil`, and appends JSONL rows under `artifacts/`.
+
+```bash
+# Toy Euclidean comparison against PyPI + mlpack cover trees
+python tools/baseline_matrix.py \
+  --profile default \
+  --metric euclidean \
+  --dimension 3 \
+  --tree-points 512 \
+  --queries 64 \
+  --k 4 \
+  --baseline-mode cover \
+  --output artifacts/benchmarks/baseline_toy.jsonl
+
+# Residual-only sweeps reuse the same CLI plumbing
+python tools/baseline_matrix.py \
+  --profile residual-fast \
+  --metric residual \
+  --dimension 6 \
+  --tree-points 2048 \
+  --queries 256 \
+  --k 8 \
+  --baseline-mode none
+```
+
+Each JSONL entry includes the CLI command, PCCT timings, external baseline timings (PyPI + mlpack when
+`--baseline-mode cover` is used), and resource telemetry (wall, CPU seconds, and RSS watermark).
 
 ### Agents / Contributors
 

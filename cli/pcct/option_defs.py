@@ -44,7 +44,7 @@ RunIdOption = Annotated[
     typer.Option("--run-id", help="Optional run identifier propagated to telemetry artifacts.", rich_help_panel=TELEMETRY_PANEL),
 ]
 BaselineOption = Annotated[
-    Literal["none", "sequential", "gpboost", "external", "both", "all"],
+    Literal["none", "sequential", "gpboost", "external", "mlpack", "cover", "both", "all"],
     typer.Option("--baseline", help="Optional baseline comparison to run alongside PCCT.", rich_help_panel=TELEMETRY_PANEL),
 ]
 LogFileOption = Annotated[

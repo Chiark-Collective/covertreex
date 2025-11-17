@@ -10,8 +10,10 @@ from covertreex.baseline import (
     BaselineCoverTree,
     ExternalCoverTreeBaseline,
     GPBoostCoverTreeBaseline,
+    MlpackCoverTreeBaseline,
     has_external_cover_tree,
     has_gpboost_cover_tree,
+    has_mlpack_cover_tree,
 )
 
 
@@ -84,6 +86,28 @@ def _run_gpboost_baseline(points: np.ndarray, queries: np.ndarray, *, k: int) ->
     )
 
 
+def _run_mlpack_baseline(points: np.ndarray, queries: np.ndarray, *, k: int) -> BaselineComparison:
+    if not has_mlpack_cover_tree():
+        raise RuntimeError(
+            "mlpack cover tree baseline requested but mlpack bindings are not installed."
+        )
+    start_build = time.perf_counter()
+    tree = MlpackCoverTreeBaseline.from_points(points)
+    build_seconds = time.perf_counter() - start_build
+    start = time.perf_counter()
+    tree.knn(queries, k=k, return_distances=False)
+    elapsed = time.perf_counter() - start
+    qps = queries.shape[0] / elapsed if elapsed > 0 else float("inf")
+    latency = (elapsed / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+    return BaselineComparison(
+        name="mlpack",
+        build_seconds=build_seconds,
+        elapsed_seconds=elapsed,
+        latency_ms=latency,
+        queries_per_second=qps,
+    )
+
+
 def run_baseline_comparisons(
     points: np.ndarray,
     queries: np.ndarray,
@@ -99,7 +123,9 @@ def run_baseline_comparisons(
         results.append(_run_sequential_baseline(points, queries, k=k))
     if mode in ("gpboost", "all"):
         results.append(_run_gpboost_baseline(points, queries, k=k))
-    if mode in ("external", "both", "all"):
+    if mode in ("mlpack", "cover", "all"):
+        results.append(_run_mlpack_baseline(points, queries, k=k))
+    if mode in ("external", "both", "cover", "all"):
         results.append(_run_external_baseline(points, queries, k=k))
     return results
 
