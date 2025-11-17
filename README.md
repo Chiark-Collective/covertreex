@@ -128,7 +128,10 @@ and omit `--profile`, the CLI automatically loads the dense `residual-gold` pres
 only when you explicitly need the throughput/sparse variants.
 
 For larger sweeps (or to exercise mlpack on a toy problem) use the automated runner in `tools/baseline_matrix.py`.
-It shells out to `cli.pcct query`, samples CPU/RAM via `psutil`, and appends JSONL rows under `artifacts/`.
+It shells out to `cli.pcct query`, samples CPU/RAM via `psutil`, and appends JSONL rows under `artifacts/`. To compare
+the gold residual run against external cover trees, invoke the helper twice: first with `--baseline-mode none` to
+capture the pure PCCT numbers, and again with `--baseline-mode cover` (PyPI + mlpack). Because the script defaults to
+`residual-gold` whenever `--metric residual` is supplied, both runs match `benchmarks/run_residual_gold_standard.sh`.
 
 ```bash
 # Toy Euclidean comparison against PyPI + mlpack cover trees
@@ -142,7 +145,7 @@ python tools/baseline_matrix.py \
   --baseline-mode cover \
   --output artifacts/benchmarks/baseline_toy.jsonl
 
-# Residual-only sweeps reuse the same CLI plumbing
+# Residual-only sweeps reuse the same CLI plumbing (PCCT-only gold reference)
 python tools/baseline_matrix.py \
   --profile residual-gold \
   --metric residual \
@@ -151,6 +154,16 @@ python tools/baseline_matrix.py \
   --queries 256 \
   --k 8 \
   --baseline-mode none
+
+# …and to capture the matching mlpack/PyPI baselines for the same shape:
+python tools/baseline_matrix.py \
+  --profile residual-gold \
+  --metric residual \
+  --dimension 6 \
+  --tree-points 2048 \
+  --queries 256 \
+  --k 8 \
+  --baseline-mode cover
 ```
 
 Each JSONL entry includes the CLI command, PCCT timings, external baseline timings (PyPI + mlpack when
