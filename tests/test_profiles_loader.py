@@ -13,7 +13,7 @@ from profiles import (
 
 def test_available_profiles_exposes_expected_entries() -> None:
     names = set(available_profiles())
-    assert {"default", "cpu-debug", "residual-fast"}.issubset(names)
+    assert {"default", "cpu-debug", "residual-fast", "residual-gold"}.issubset(names)
 
 
 def test_load_profile_returns_runtime_model() -> None:

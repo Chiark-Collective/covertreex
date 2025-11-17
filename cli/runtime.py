@@ -100,6 +100,8 @@ def runtime_from_args(
     diagnostics = _get_arg(args, "diagnostics")
     if diagnostics is not None:
         runtime_kwargs["diagnostics"] = bool(diagnostics)
+    elif metric == "residual":
+        runtime_kwargs["diagnostics"] = False
     log_level = _get_arg(args, "log_level")
     if log_level:
         runtime_kwargs["log_level"] = log_level
@@ -110,16 +112,20 @@ def runtime_from_args(
     if enable_sparse is not None:
         runtime_kwargs["enable_sparse_traversal"] = bool(enable_sparse)
     elif metric == "residual":
-        runtime_kwargs["enable_sparse_traversal"] = True
+        runtime_kwargs["enable_sparse_traversal"] = False
     conflict_graph = _get_arg(args, "conflict_graph")
     if conflict_graph:
         runtime_kwargs["conflict_graph"] = conflict_graph
+    elif metric == "residual":
+        runtime_kwargs["conflict_graph"] = "dense"
     scope_segment_dedupe = _get_arg(args, "scope_segment_dedupe")
     if scope_segment_dedupe is not None:
         runtime_kwargs["scope_segment_dedupe"] = bool(scope_segment_dedupe)
     scope_chunk_target = _get_arg(args, "scope_chunk_target")
     if scope_chunk_target is not None:
         runtime_kwargs["scope_chunk_target"] = int(scope_chunk_target)
+    elif metric == "residual":
+        runtime_kwargs["scope_chunk_target"] = 0
     scope_chunk_max_segments = _get_arg(args, "scope_chunk_max_segments")
     if scope_chunk_max_segments is not None:
         runtime_kwargs["scope_chunk_max_segments"] = int(scope_chunk_max_segments)
@@ -135,6 +141,8 @@ def runtime_from_args(
     batch_order = _get_arg(args, "batch_order")
     if batch_order:
         runtime_kwargs["batch_order"] = batch_order
+    elif metric == "residual":
+        runtime_kwargs["batch_order"] = "natural"
     batch_seed = _get_arg(args, "batch_order_seed")
     if batch_seed is not None:
         runtime_kwargs["batch_order_seed"] = batch_seed
@@ -164,6 +172,8 @@ def runtime_from_args(
     residual_stream_tile = _get_arg(args, "residual_stream_tile")
     if residual_stream_tile is not None:
         runtime_kwargs["residual_stream_tile"] = residual_stream_tile
+    elif metric == "residual":
+        runtime_kwargs["residual_stream_tile"] = 64
     mis_seed = _get_arg(args, "mis_seed")
     if mis_seed is not None:
         runtime_kwargs["mis_seed"] = mis_seed
@@ -182,6 +192,8 @@ def runtime_from_args(
     residual_dense_scope_streamer = _get_arg(args, "residual_dense_scope_streamer")
     if residual_dense_scope_streamer is not None:
         runtime_kwargs["residual_dense_scope_streamer"] = bool(residual_dense_scope_streamer)
+    elif metric == "residual":
+        runtime_kwargs["residual_dense_scope_streamer"] = True
     residual_masked_scope_append = _get_arg(args, "residual_masked_scope_append")
     if residual_masked_scope_append is not None:
         runtime_kwargs["residual_masked_scope_append"] = bool(residual_masked_scope_append)

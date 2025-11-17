@@ -21,11 +21,11 @@ python -m cli.pcct --help
 
 # List curated profiles and inspect their payloads
 python -m cli.pcct profile list
-python -m cli.pcct profile describe residual-fast --format json
+python -m cli.pcct profile describe residual-gold --format json
 
 # Profile-driven residual sweep with overrides
 python -m cli.pcct query \
-  --profile residual-fast \
+  --profile residual-gold \
   --dimension 8 --tree-points 32768 --queries 1024 \
   --batch-size 512 --k 8 --baseline both \
   --set diagnostics.enabled=true \
@@ -122,7 +122,10 @@ configuration layer.
 CLI documentation (flag reference, input/output description, telemetry schema) lives in `docs/CLI.md`.
 
 Additional profile-driven walkthroughs live in `docs/examples/profile_workflows.md`, and migration
-notes for legacy scripts are in `docs/migrations/runtime_v_next.md`.
+notes for legacy scripts are in `docs/migrations/runtime_v_next.md`. When you run with `--metric residual`
+and omit `--profile`, the CLI automatically loads the dense `residual-gold` preset that matches
+`benchmarks/run_residual_gold_standard.sh`. Pass `--profile residual-fast` (or another residual profile)
+only when you explicitly need the throughput/sparse variants.
 
 For larger sweeps (or to exercise mlpack on a toy problem) use the automated runner in `tools/baseline_matrix.py`.
 It shells out to `cli.pcct query`, samples CPU/RAM via `psutil`, and appends JSONL rows under `artifacts/`.
@@ -141,7 +144,7 @@ python tools/baseline_matrix.py \
 
 # Residual-only sweeps reuse the same CLI plumbing
 python tools/baseline_matrix.py \
-  --profile residual-fast \
+  --profile residual-gold \
   --metric residual \
   --dimension 6 \
   --tree-points 2048 \

@@ -74,7 +74,11 @@ discover them without reading files manually:
 python -m cli.pcct profile list
 
 # show the runtime payload for a specific profile
-python -m cli.pcct profile describe residual-fast --format json
+python -m cli.pcct profile describe residual-gold --format json
+
+Note: when `--metric residual` is passed without an explicit `--profile`, the CLI automatically
+loads the `residual-gold` profile (dense traversal) so runs match the audited gold benchmark.
+Opt into `residual-fast` or other presets only when you explicitly need the alternate configuration.
 ```
 
 ### Doctor command

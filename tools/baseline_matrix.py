@@ -65,7 +65,9 @@ def _measure(func):
 
 def _activate_runtime(profile: str, metric: str) -> cx_config.RuntimeContext:
     runtime = Runtime.from_profile(profile)
-    runtime = runtime.with_updates(metric=metric)
+    resolved_metric = "residual_correlation" if metric == "residual" else metric
+    if resolved_metric:
+        runtime = runtime.with_updates(metric=resolved_metric)
     return runtime.activate()
 
 
@@ -128,7 +130,7 @@ def _run_pcct(
         "queries_per_second": bench_result.queries_per_second,
     }
     baselines: Dict[str, Dict[str, float]] = {}
-    if metric == "euclidean" and baseline_mode != "none":
+    if baseline_mode != "none":
         for baseline in run_baseline_comparisons(points, queries, k=k, mode=baseline_mode):
             baselines[baseline.name] = {
                 "build_seconds": baseline.build_seconds,
@@ -141,7 +143,11 @@ def _run_pcct(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", default="default", help="PCCT profile slug to load.")
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="PCCT profile slug to load (defaults to 'default' for Euclidean and 'residual-gold' for residual).",
+    )
     parser.add_argument(
         "--metric",
         dest="metrics",
@@ -207,10 +213,11 @@ def main() -> None:
 
     with output_path.open("a", encoding="utf-8") as handle:
         for metric, dimension, tree_points, k_value, repeat_id in scenarios:
-            baseline_mode = args.baseline_mode if metric == "euclidean" else "none"
+            baseline_mode = args.baseline_mode
+            profile = args.profile or ("residual-gold" if metric == "residual" else "default")
             print(
                 f"[baseline-matrix] metric={metric} dim={dimension} points={tree_points} "
-                f"k={k_value} repeat={repeat_id} baseline={baseline_mode}"
+                f"k={k_value} repeat={repeat_id} baseline={baseline_mode} profile={profile}"
             )
             summary = _run_pcct(
                 dimension=dimension,
@@ -219,7 +226,7 @@ def main() -> None:
                 k=k_value,
                 batch_size=args.batch_size,
                 seed=args.seed + repeat_id,
-                profile=args.profile,
+                profile=profile,
                 metric=metric,
                 residual_inducing=args.residual_inducing,
                 residual_variance=args.residual_variance,
@@ -228,7 +235,7 @@ def main() -> None:
                 baseline_mode=baseline_mode,
             )
             payload = {
-                "profile": args.profile,
+                "profile": profile,
                 "metric": metric,
                 "dimension": dimension,
                 "tree_points": tree_points,

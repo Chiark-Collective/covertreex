@@ -1,0 +1,28 @@
+metadata:
+  name: residual-gold
+  description: |
+    Residual metric “gold standard” preset that matches benchmarks/run_residual_gold_standard.sh.
+    Uses dense traversal, natural batch order, doubling prefixes, and disables gate lookups so
+    results are comparable to the audited residual sweep.
+  workload: residual
+  tags:
+    - residual
+    - gold
+    - dense
+
+runtime:
+  metric: residual_correlation
+  backend: numpy
+  enable_numba: true
+  enable_sparse_traversal: false
+  conflict_graph_impl: dense
+  diagnostics:
+    enabled: false
+    log_level: INFO
+  batch_order_strategy: natural
+  prefix_schedule: doubling
+  scope_chunk_target: 0
+  residual:
+    gate1_enabled: false
+    dense_scope_streamer: true
+    stream_tile: 64
