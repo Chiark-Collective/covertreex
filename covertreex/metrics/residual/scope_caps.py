@@ -110,7 +110,22 @@ class ResidualScopeCaps:
 def get_scope_cap_table(path: str | None) -> ResidualScopeCaps | None:
     if not path:
         return None
-    return ResidualScopeCaps.load(path)
+    
+    key = str(Path(path).expanduser().absolute())
+    with _CACHE_LOCK:
+        if key in _SCOPE_CAP_CACHE:
+            return _SCOPE_CAP_CACHE[key]
+            
+    caps = ResidualScopeCaps.load(path)
+    if caps is not None:
+        with _CACHE_LOCK:
+            _SCOPE_CAP_CACHE[key] = caps
+    return caps
+
+
+def reset_scope_cap_cache() -> None:
+    with _CACHE_LOCK:
+        _SCOPE_CAP_CACHE.clear()
 
 
 @dataclass
@@ -166,4 +181,5 @@ __all__ = [
     "ResidualScopeCaps",
     "ResidualScopeCapRecorder",
     "get_scope_cap_table",
+    "reset_scope_cap_cache",
 ]

@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 
 from covertreex.metrics.residual.scope_caps import (
-    ResidualScopeCapTable,
+    ResidualScopeCaps as ResidualScopeCapTable,
+    ResidualScopeCapRecorder,
     get_scope_cap_table,
     reset_scope_cap_cache,
 )
@@ -30,12 +31,9 @@ def test_scope_cap_table_lookup_applies_levels(tmp_path):
     caps = table.lookup(levels)
     assert caps.shape == levels.shape
     assert caps[0] == pytest.approx(0.5)
-    assert np.isnan(caps[1])
+    assert caps[1] == pytest.approx(2.5) # Default value
     assert caps[2] == pytest.approx(1.25)
-    assert np.isnan(caps[3])
-
-    defaults = np.where(np.isfinite(caps), caps, payload["default"])
-    assert defaults[1] == pytest.approx(2.5)
+    assert caps[3] == pytest.approx(2.5) # Default value
 
 
 def test_scope_cap_cache_returns_same_instance(tmp_path):
