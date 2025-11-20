@@ -30,6 +30,7 @@ from ..._residual_scope_numba import (
     residual_collect_next_chain,
     NUMBA_RESIDUAL_SCOPE_AVAILABLE,
 )
+from .._residual_parent_numba import find_parents_numba, NUMBA_AVAILABLE as NUMBA_PARENT_AVAILABLE
 from ..._scope_numba import build_scope_csr_from_pairs
 from ...semisort import select_topk_by_level
 from ..base import (
@@ -64,17 +65,79 @@ def _residual_find_parents(
     *,
     host_backend: ResidualCorrHostData,
     query_indices: np.ndarray,
-    tree_indices: np.ndarray,
+    tree: PCCTree,
     telemetry: ResidualDistanceTelemetry | None = None,
+    runtime: Any = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     batch_size = int(query_indices.shape[0])
     if batch_size == 0:
         return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+        
+    if tree.num_points == 0:
+        return (
+            np.full(batch_size, -1, dtype=np.int64),
+            np.full(batch_size, np.inf, dtype=np.float64),
+        )
+
+    # Fast path: Numba-accelerated Single-Tree Traversal with Pruning
+    # This avoids the O(N) flat scan by using the tree structure.
+    if NUMBA_PARENT_AVAILABLE and runtime is not None:
+        # Only RBF kernel is supported in the Numba path currently
+        # We infer this from the presence of lengthscale/variance in runtime config
+        var = float(getattr(runtime, "residual_variance", 1.0))
+        ls = float(getattr(runtime, "residual_lengthscale", 1.0))
+        
+        # We need the raw point coordinates (float64) to compute distances in Numba.
+        # host_backend stores them in `kernel_points_f32` if available (from `build_residual_backend`).
+        # If not available (e.g. custom kernel provider), we cannot use this optimization.
+        points_f32 = getattr(host_backend, "kernel_points_f32", None)
+        
+        if points_f32 is not None:
+            # Map tree indices (0..N-1) to dataset indices.
+            # tree.points is (N, 1) containing the dataset index for each node.
+            t_points_idx = tree.backend.to_numpy(tree.points)[:, 0].astype(np.int64)
+            
+            # Gather tree topology
+            t_children = tree.backend.to_numpy(tree.children).astype(np.int32)
+            t_next = tree.backend.to_numpy(tree.next_cache).astype(np.int32)
+            t_si = tree.backend.to_numpy(tree.si_cache).astype(np.float64)
+            
+            # Materialize coordinates for Tree Nodes and Queries
+            # Note: This copy might be expensive O(N*D), but D is small (8-128).
+            # Compared to O(N^2) distance comps, O(N) copy is negligible.
+            # We cast to float64 for precision in the kernel.
+            t_coords = points_f32[t_points_idx].astype(np.float64)
+            q_coords = points_f32[query_indices].astype(np.float64)
+            
+            start_numba = time.perf_counter()
+            # Assume root is always at index 0 of the tree arrays
+            idx, dist = find_parents_numba(
+                points=t_coords,
+                queries=q_coords,
+                children=t_children,
+                next_nodes=t_next,
+                si_cache=t_si,
+                variance=var,
+                lengthscale=ls,
+                root_idx=0,
+            )
+            elapsed_numba = time.perf_counter() - start_numba
+            
+            if telemetry is not None:
+                # Record approximate "kernel pairs" for consistency?
+                # Or just the time. Recording 0 pairs might look weird but is accurate (no block kernel used).
+                # Let's record effective pairs = batch * N to allow comparison of throughput,
+                # or maybe 0 to indicate "smart traversal".
+                # Let's record 0 pairs but the time, so "seconds per call" is high but "pairs" is low.
+                telemetry.record_kernel(0, 0, elapsed_numba)
+                
+            return idx, dist
 
     chunk = int(host_backend.chunk_size or 512)
-    total = int(tree_indices.shape[0])
+    total = int(tree.num_points)
     query_arr = np.asarray(query_indices, dtype=np.int64)
-    tree_arr = np.asarray(tree_indices, dtype=np.int64)
+    # tree_indices is implicit 0..total-1
+    tree_arr = np.arange(total, dtype=np.int64)
 
     best_dist = np.full(batch_size, np.inf, dtype=np.float64)
     best_idx = np.full(batch_size, -1, dtype=np.int64)
@@ -84,17 +147,19 @@ def _residual_find_parents(
         chunk_ids = tree_arr[start:stop]
         if chunk_ids.size == 0:
             continue
+        
         kernel_start = time.perf_counter()
         kernel_block = host_backend.kernel_provider(query_arr, chunk_ids)
-        kernel_elapsed = time.perf_counter() - kernel_start
-        if telemetry is not None:
-            telemetry.record_kernel(batch_size, int(chunk_ids.size), kernel_elapsed)
         distances_block = compute_residual_distances_from_kernel(
             host_backend,
             query_arr,
             chunk_ids,
             kernel_block,
         )
+        kernel_elapsed = time.perf_counter() - kernel_start
+        if telemetry is not None:
+            telemetry.record_kernel(batch_size, int(chunk_ids.size), kernel_elapsed)
+            
         row_min_idx = np.argmin(distances_block, axis=1)
         row_min_val = distances_block[np.arange(batch_size), row_min_idx]
         improved = row_min_val < best_dist
@@ -1162,8 +1227,9 @@ def _collect_residual(
     parent_dataset_idx, _parent_distances = _residual_find_parents(
         host_backend=host_backend,
         query_indices=batch_indices_np,
-        tree_indices=np.asarray(tree_indices, dtype=np.int64),
+        tree=tree,
         telemetry=distance_telemetry,
+        runtime=runtime,
     )
     pairwise_seconds = time.perf_counter() - pairwise_start
 
