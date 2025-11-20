@@ -31,7 +31,6 @@ DEFAULT_ENV = {
     "COVERTREEX_ENABLE_SPARSE_TRAVERSAL": "0",
     "COVERTREEX_BATCH_ORDER": "hilbert",
     "COVERTREEX_PREFIX_SCHEDULE": "doubling",
-    "COVERTREEX_RESIDUAL_GATE1": "0",
     "COVERTREEX_RESIDUAL_FORCE_WHITENED": "0",
 }
 
@@ -85,11 +84,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--min-whitened-coverage", type=float, default=0.95)
     parser.add_argument("--max-median-semisort-ms", type=float, default=1000.0)
     parser.add_argument("--min-dominated-batches", type=int, default=5)
-    parser.add_argument(
-        "--require-gate1-prunes",
-        action="store_true",
-        help="Fail if traversal_gate1_pruned stays zero.",
-    )
     parser.add_argument(
         "--allow-missing-pairwise-reuse",
         action="store_true",
@@ -154,8 +148,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--min-dominated-batches",
         str(args.min_dominated_batches),
     ]
-    if args.require_gate1_prunes:
-        cmd.append("--require-gate1-prunes")
     if args.allow_missing_pairwise_reuse:
         cmd.append("--no-require-pairwise-reuse")
     if args.skip_run:
@@ -194,7 +186,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             "min_whitened_coverage": args.min_whitened_coverage,
             "max_median_semisort_ms": args.max_median_semisort_ms,
             "min_dominated_batches": args.min_dominated_batches,
-            "require_gate1_prunes": args.require_gate1_prunes,
             "allow_missing_pairwise_reuse": args.allow_missing_pairwise_reuse,
             "skip_run": args.skip_run,
             "forward_cli_args": cli_args,

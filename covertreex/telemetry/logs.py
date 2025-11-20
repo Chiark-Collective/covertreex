@@ -119,7 +119,7 @@ def _augment_residual_scope_metrics(record: Dict[str, Any], residual_cache: Any)
 
 
 def _hash_payload(payload: Mapping[str, Any]) -> str:
-    normalised = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    normalised = json.dumps(payload, sort_keys=True, separators=( "," , ":" )).encode("utf-8")
     return hashlib.sha256(normalised).hexdigest()
 
 
@@ -227,10 +227,6 @@ class BenchmarkLogWriter:
             "conflict_arena_bytes": int(conflict_timings.arena_bytes),
             "conflict_degree_cap": int(conflict_timings.degree_cap),
             "conflict_degree_pruned_pairs": int(conflict_timings.degree_pruned_pairs),
-            "traversal_gate1_candidates": int(traversal_timings.gate1_candidates),
-            "traversal_gate1_kept": int(traversal_timings.gate1_kept),
-            "traversal_gate1_pruned": int(traversal_timings.gate1_pruned),
-            "traversal_gate1_ms": _ms(traversal_timings.gate1_seconds),
             "traversal_whitened_block_pairs": int(traversal_timings.whitened_block_pairs),
             "traversal_whitened_block_ms": _ms(traversal_timings.whitened_block_seconds),
             "traversal_whitened_block_calls": int(traversal_timings.whitened_block_calls),
@@ -251,9 +247,6 @@ class BenchmarkLogWriter:
             record["batch_order_permutation_size"] = int(len(plan.batch_permutation))
         for key, value in plan.batch_order_metrics.items():
             record[f"batch_order_{key}"] = float(value)
-        if traversal_timings.gate1_candidates:
-            ratio = traversal_timings.gate1_pruned / traversal_timings.gate1_candidates
-            record["traversal_gate1_pruned_ratio"] = float(ratio)
         residual_cache = getattr(plan.traversal, "residual_cache", None)
         if residual_cache is not None:
             _augment_residual_scope_metrics(record, residual_cache)

@@ -1,0 +1,20 @@
+{
+  "tools": {
+    "autoAccept": true,
+    "shell": {
+      "showColor": true
+    }
+  },
+  "general": {
+    "vimMode": true,
+    "previewFeatures": true
+  },
+  "security": {
+    "folderTrust": {
+      "enabled": true
+    }
+  },
+  "experimental": {
+    "useModelRouter": true
+  }
+}

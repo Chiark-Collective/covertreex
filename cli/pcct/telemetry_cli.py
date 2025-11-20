@@ -132,10 +132,6 @@ def _build_summary(records: List[BenchmarkBatchRecord]) -> dict:
     if residual:
         summary["residual"] = residual
 
-    gate = _gate_summary(records)
-    if gate:
-        summary["gate"] = gate
-
     pairwise = _pairwise_reuse(records)
     if pairwise is not None:
         summary["conflict_pairwise_reuse_pct"] = pairwise
@@ -162,21 +158,6 @@ def _residual_summary(records: List[BenchmarkBatchRecord]) -> dict:
     if time_total > 0:
         summary["whitened_time_share"] = whitened_ms / time_total
     return summary
-
-
-def _gate_summary(records: List[BenchmarkBatchRecord]) -> dict:
-    candidates = float(_numeric_series(records, "traversal_gate1_candidates").sum())
-    pruned = float(_numeric_series(records, "traversal_gate1_pruned").sum())
-    kept = float(_numeric_series(records, "traversal_gate1_kept").sum())
-    if not candidates:
-        return {}
-    payload = {
-        "candidates": candidates,
-        "kept": kept,
-        "pruned": pruned,
-        "pruned_ratio": pruned / candidates if candidates else 0.0,
-    }
-    return payload
 
 
 def _pairwise_reuse(records: List[BenchmarkBatchRecord]) -> float | None:
@@ -246,18 +227,6 @@ def _render_markdown(summary: Mapping[str, object]) -> str:
             )
         )
 
-    gate = summary.get("gate") or {}
-    if gate:
-        lines.append("\n### Gate metrics")
-        lines.append(
-            "- candidates={candidates:.0f} kept={kept:.0f} pruned={pruned:.0f} ({ratio:.1f}% pruned)".format(
-                candidates=gate.get("candidates", 0.0),
-                kept=gate.get("kept", 0.0),
-                pruned=gate.get("pruned", 0.0),
-                ratio=100.0 * gate.get("pruned_ratio", 0.0),
-            )
-        )
-
     if summary.get("conflict_pairwise_reuse_pct") is not None:
         lines.append(
             "\n- conflict pairwise reuse: {:.1f}% of batches".format(summary["conflict_pairwise_reuse_pct"])
@@ -288,10 +257,6 @@ def _render_csv(summary: Mapping[str, object]) -> str:
     residual = summary.get("residual") or {}
     for key, value in residual.items():
         rows.append((f"residual.{key}", value))
-
-    gate = summary.get("gate") or {}
-    for key, value in gate.items():
-        rows.append((f"gate.{key}", value))
 
     if summary.get("conflict_pairwise_reuse_pct") is not None:
         rows.append(("conflict_pairwise_reuse_pct", summary["conflict_pairwise_reuse_pct"]))

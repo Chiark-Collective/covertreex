@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from covertreex.api import Runtime as ApiRuntime, Residual as ApiResidual
+from covertreex.api import Runtime as ApiRuntime
 from profiles.loader import ProfileError
 from profiles.overrides import OverrideError
 
@@ -11,57 +11,6 @@ def _get_arg(source: Any, name: str, default: Any = None) -> Any:
     if isinstance(source, Mapping):
         return source.get(name, default)
     return getattr(source, name, default)
-
-
-def _residual_policy_from_args(args: Any) -> ApiResidual | None:
-    metric = _get_arg(args, "metric", "euclidean")
-    if metric != "residual":
-        return None
-    overrides: dict[str, Any] = {}
-    scope_caps = _get_arg(args, "residual_scope_caps")
-    if scope_caps:
-        overrides["scope_cap_path"] = scope_caps
-    default_cap = _get_arg(args, "residual_scope_cap_default")
-    if default_cap is not None:
-        overrides["scope_cap_default"] = default_cap
-    gate_mode = _get_arg(args, "residual_gate")
-    if gate_mode == "off":
-        overrides["gate1_enabled"] = False
-    elif gate_mode == "lookup":
-        overrides["gate1_enabled"] = True
-        overrides["lookup_path"] = _get_arg(args, "residual_gate_lookup_path")
-        overrides["lookup_margin"] = _get_arg(args, "residual_gate_margin")
-        overrides["gate1_audit"] = True
-        cap_value = _get_arg(args, "residual_gate_cap")
-        if cap_value and cap_value > 0:
-            overrides["gate1_radius_cap"] = cap_value
-    profile_path = _get_arg(args, "residual_gate_profile_path")
-    if profile_path:
-        overrides["profile_path"] = profile_path
-    profile_bins = _get_arg(args, "residual_gate_profile_bins")
-    if profile_bins:
-        overrides["profile_bins"] = profile_bins
-    simple_map = {
-        "residual_gate_alpha": "gate1_alpha",
-        "residual_gate_eps": "gate1_eps",
-        "residual_gate_band_eps": "gate1_band_eps",
-        "residual_gate_keep_pct": "gate1_keep_pct",
-        "residual_gate_prune_pct": "gate1_prune_pct",
-        "residual_gate_audit": "gate1_audit",
-        "residual_radius_floor": "radius_floor",
-        "residual_prefilter": "prefilter_enabled",
-        "residual_prefilter_lookup_path": "prefilter_lookup_path",
-        "residual_prefilter_margin": "prefilter_margin",
-        "residual_prefilter_radius_cap": "prefilter_radius_cap",
-        "residual_prefilter_audit": "prefilter_audit",
-    }
-    for attr_name, field_name in simple_map.items():
-        value = _get_arg(args, attr_name)
-        if value is not None:
-            overrides[field_name] = value
-    if not overrides:
-        return None
-    return ApiResidual(**overrides)
 
 
 def runtime_from_args(
@@ -204,9 +153,6 @@ def runtime_from_args(
     residual_level_cache_batching = _get_arg(args, "residual_level_cache_batching")
     if residual_level_cache_batching is not None:
         runtime_kwargs["residual_level_cache_batching"] = bool(residual_level_cache_batching)
-    residual_policy = _residual_policy_from_args(args)
-    if residual_policy is not None:
-        runtime_kwargs["residual"] = residual_policy
     if extra_overrides:
         runtime_kwargs.update(extra_overrides)
     return ApiRuntime(**runtime_kwargs)

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import logging
-import os
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Protocol, Sequence, Tuple
+from typing import Optional, Protocol, Sequence, Tuple
 
 import numpy as np
 
@@ -13,28 +11,10 @@ from .._residual_numba import (
     compute_distance_chunk,
     distance_block_no_gate,
 )
-from .policy import (
-    RESIDUAL_EPS,
-    ResidualGateLookup,
-    ResidualGateProfile,
-    ResidualGateTelemetry,
-    ResidualPolicy,
-    get_residual_policy,
-)
+from .scope_caps import ResidualScopeCapRecorder, ResidualScopeCaps
 
 ArrayLike = np.ndarray | Sequence[float] | Sequence[int]
-_EPS = RESIDUAL_EPS
-
-
-def _env_flag(name: str) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return False
-    return value.strip().lower() not in {"0", "false", "off", ""}
-
-
-_GATE_TRACE_ENABLED = _env_flag("COVERTREEX_RESIDUAL_GATE1_TRACE")
-_GATE_TRACE_LOGGER = logging.getLogger("covertreex.metrics.residual.gate")
+_EPS = 1e-9
 
 
 class KernelProvider(Protocol):
@@ -96,28 +76,12 @@ class ResidualCorrHostData:
     v_norm_sq: np.ndarray | None = None
     kernel_points_f32: np.ndarray | None = None
     kernel_row_norms_f32: np.ndarray | None = None
-    gate1_enabled: bool | None = None
-    gate1_alpha: float | None = None
-    gate1_margin: float | None = None
-    gate1_eps: float | None = None
-    gate1_audit: bool | None = None
-    gate1_radius_cap: float | None = None
-    gate1_band_eps: float | None = None
-    gate1_keep_pct: float | None = None
-    gate1_prune_pct: float | None = None
-    gate_v32: np.ndarray | None = None
-    gate_norm32: np.ndarray | None = None
-    gate_stats: ResidualGateTelemetry = field(default_factory=ResidualGateTelemetry)
-    gate_profile_path: str | None = None
-    gate_profile_bins: int | None = None
-    gate_profile: "ResidualGateProfile | None" = None
-    gate_lookup_path: str | None = None
-    gate_lookup_margin: float | None = None
-    gate_lookup: "ResidualGateLookup | None" = None
-    grid_whiten_scale: float | None = None
     v_matrix_f64: np.ndarray | None = None
     p_diag_f64: np.ndarray | None = None
     kernel_diag_f64: np.ndarray | None = None
+    scope_caps: ResidualScopeCaps | None = None
+    scope_cap_recorder: ResidualScopeCapRecorder | None = None
+    scope_cap_output_path: str | None = None
 
     def __post_init__(self) -> None:
         if self.v_matrix.ndim != 2:
@@ -192,7 +156,7 @@ class ResidualCorrHostData:
 
 @dataclass
 class ResidualWorkspace:
-    """Reusable buffers for whitened block computations and gate masks."""
+    """Reusable buffers for computations."""
 
     max_queries: int = 1
     max_chunk: int = 1
@@ -232,21 +196,11 @@ class ResidualWorkspace:
 
 @dataclass
 class ResidualDistanceTelemetry:
-    """Counters describing whitened-block vs kernel-provider work."""
+    """Counters describing residual metric work."""
 
-    whitened_pairs: int = 0
-    whitened_seconds: float = 0.0
-    whitened_calls: int = 0
     kernel_pairs: int = 0
     kernel_seconds: float = 0.0
     kernel_calls: int = 0
-
-    def record_whitened(self, rows: int, cols: int, seconds: float) -> None:
-        r = max(0, int(rows))
-        c = max(0, int(cols))
-        self.whitened_calls += 1
-        self.whitened_pairs += r * c
-        self.whitened_seconds += float(seconds)
 
     def record_kernel(self, rows: int, cols: int, seconds: float) -> None:
         r = max(0, int(rows))
@@ -259,18 +213,8 @@ class ResidualDistanceTelemetry:
 _ACTIVE_BACKEND: Optional[ResidualCorrHostData] = None
 
 
-def _finalize_gate_profile(backend: ResidualCorrHostData | None) -> None:
-    if backend is None:
-        return
-    profile = getattr(backend, "gate_profile", None)
-    if isinstance(profile, ResidualGateProfile):
-        profile.dump(getattr(backend, "gate_profile_path", None), force=True)
-
-
 def set_residual_backend(backend: ResidualCorrHostData | None) -> None:
     global _ACTIVE_BACKEND
-    if _ACTIVE_BACKEND is not None and _ACTIVE_BACKEND is not backend:
-        _finalize_gate_profile(_ACTIVE_BACKEND)
     _ACTIVE_BACKEND = backend
 
 
@@ -312,228 +256,26 @@ def _compute_distances_from_kernel_block(
             f"expected {(lhs_indices.size, rhs_indices.size)}, got {kernel_block.shape}."
         )
 
-    v_lhs = np.asarray(backend.v_matrix[lhs_indices], dtype=np.float32)
-    v_rhs = np.asarray(backend.v_matrix[rhs_indices], dtype=np.float32)
-    p_lhs = np.asarray(backend.p_diag[lhs_indices], dtype=np.float32)
-    p_rhs = np.asarray(backend.p_diag[rhs_indices], dtype=np.float32)
-    kernel_vals = np.asarray(kernel_block, dtype=np.float32)
+    lhs = np.asarray(lhs_indices, dtype=np.int64)
+    rhs = np.asarray(rhs_indices, dtype=np.int64)
+    
+    v_lhs = backend.v_matrix[lhs]
+    v_rhs = backend.v_matrix[rhs]
+    dot_products = v_lhs @ v_rhs.T  # float32 SGEMM
 
-    dot_products = v_lhs @ v_rhs.T  # float32
-    dot_products = dot_products.astype(np.float64, copy=False)
-    denom = np.sqrt(
-        np.maximum(
-            p_lhs.astype(np.float64, copy=False)[:, None]
-            * p_rhs.astype(np.float64, copy=False)[None, :],
-            float(_EPS) * float(_EPS),
-        )
+    # Use Numba kernel with a large radius to compute all distances without pruning
+    radii = np.full(lhs.size, 2.0, dtype=np.float64)
+    
+    distances, _ = distance_block_no_gate(
+        backend.p_diag,
+        lhs,
+        rhs,
+        kernel_block.astype(np.float32, copy=False),
+        dot_products,
+        radii,
+        _EPS,
     )
-    residual_corr = (kernel_vals.astype(np.float64, copy=False) - dot_products) / denom
-    residual_corr = np.clip(residual_corr, -1.0, 1.0)
-    distances = np.sqrt(np.maximum(1.0 - np.abs(residual_corr), 0.0))
     return distances
-
-
-def _compute_gate1_whitened(matrix: np.ndarray, *, regularisation: float = 1e-6) -> tuple[np.ndarray, np.ndarray]:
-    if matrix.size == 0:
-        return (
-            np.zeros_like(matrix, dtype=np.float32),
-            np.zeros(matrix.shape[0], dtype=np.float32),
-        )
-
-    centered = matrix - np.mean(matrix, axis=0, keepdims=True)
-    rank = centered.shape[1]
-    if rank == 0:
-        return (
-            np.zeros((matrix.shape[0], 0), dtype=np.float32),
-            np.zeros(matrix.shape[0], dtype=np.float32),
-        )
-
-    cov = centered.T @ centered
-    denom = max(centered.shape[0] - 1, 1)
-    cov = cov / float(denom)
-    cov += np.eye(rank, dtype=np.float64) * regularisation
-    try:
-        chol = np.linalg.cholesky(cov)
-    except np.linalg.LinAlgError:
-        jitter = regularisation
-        for _ in range(5):
-            cov += np.eye(rank, dtype=np.float64) * jitter
-            try:
-                chol = np.linalg.cholesky(cov)
-                break
-            except np.linalg.LinAlgError:
-                jitter *= 10.0
-        else:
-            raise
-    inv_chol = np.linalg.solve(chol, np.eye(rank, dtype=np.float64))
-    whitened = centered @ inv_chol.T
-    v32 = whitened.astype(np.float32, copy=False)
-    norms32 = np.sqrt(np.sum(v32 * v32, axis=1, dtype=np.float64)).astype(np.float32)
-    return v32, norms32
-
-
-def _ensure_whitened_cache(backend: ResidualCorrHostData) -> tuple[np.ndarray, np.ndarray]:
-    v32 = getattr(backend, "gate_v32", None)
-    n32 = getattr(backend, "gate_norm32", None)
-    if v32 is None or n32 is None:
-        v32, n32 = _compute_gate1_whitened(backend.v_matrix_view(np.float64))
-        object.__setattr__(backend, "gate_v32", v32)
-        object.__setattr__(backend, "gate_norm32", n32)
-    return v32, n32
-
-
-def _compute_gate1_distances(
-    backend: ResidualCorrHostData,
-    query_index: int,
-    candidate_idx: np.ndarray,
-) -> np.ndarray | None:
-    if backend.gate_v32 is None or candidate_idx.size == 0:
-        return None
-    v_query = backend.gate_v32[query_index]
-    v_chunk = backend.gate_v32[candidate_idx]
-    diff = v_chunk - v_query
-    dist_sq = np.sum(diff * diff, axis=1, dtype=np.float64)
-    dist_sq = np.maximum(dist_sq, 0.0)
-    return np.sqrt(dist_sq, dtype=np.float64)
-
-
-def compute_whitened_block(
-    backend: ResidualCorrHostData,
-    query_indices: np.ndarray,
-    chunk_indices: np.ndarray,
-    *,
-    workspace: ResidualWorkspace | None = None,
-) -> np.ndarray:
-    query_arr = np.asarray(query_indices, dtype=np.int64)
-    chunk_arr = np.asarray(chunk_indices, dtype=np.int64)
-    rows = int(query_arr.size)
-    cols = int(chunk_arr.size)
-    if rows == 0 or cols == 0:
-        return np.zeros((rows, cols), dtype=np.float32)
-
-    gate_vectors, gate_norms = _ensure_whitened_cache(backend)
-    q_vec = np.asarray(gate_vectors[query_arr], dtype=np.float32)
-    c_vec = np.asarray(gate_vectors[chunk_arr], dtype=np.float32)
-    q_norm_sq = np.square(np.asarray(gate_norms[query_arr], dtype=np.float32), dtype=np.float32)
-    c_norm_sq = np.square(np.asarray(gate_norms[chunk_arr], dtype=np.float32), dtype=np.float32)
-
-    if workspace is None:
-        gram = np.empty((rows, cols), dtype=np.float32)
-        dist2 = np.empty((rows, cols), dtype=np.float32)
-    else:
-        gram = workspace.gram_view(rows, cols)
-        dist2 = workspace.dist2_view(rows, cols)
-
-    np.dot(q_vec, c_vec.T, out=gram)
-    dist2[:] = q_norm_sq[:, None] + c_norm_sq[None, :]
-    dist2 -= 2.0 * gram
-    np.maximum(dist2, 0.0, out=dist2)
-    np.sqrt(dist2, out=dist2, dtype=np.float32)
-    return dist2[:rows, :cols]
-
-
-def _resolve_gate1_config(
-    backend: ResidualCorrHostData,
-    *,
-    policy: ResidualPolicy,
-) -> tuple[bool, float, float, float, bool, float, float, float, float]:
-    runtime_policy = policy
-
-    enabled = runtime_policy.gate1_enabled if backend.gate1_enabled is None else backend.gate1_enabled
-    alpha = backend.gate1_alpha if backend.gate1_alpha is not None else runtime_policy.gate1_alpha
-    margin = backend.gate1_margin if backend.gate1_margin is not None else runtime_policy.gate1_margin
-    eps = backend.gate1_eps if backend.gate1_eps is not None else runtime_policy.gate1_eps
-    audit = backend.gate1_audit if backend.gate1_audit is not None else runtime_policy.gate1_audit
-    cap = backend.gate1_radius_cap if backend.gate1_radius_cap is not None else runtime_policy.gate1_radius_cap
-    band_eps = backend.gate1_band_eps if backend.gate1_band_eps is not None else runtime_policy.gate1_band_eps
-    keep_pct = backend.gate1_keep_pct if backend.gate1_keep_pct is not None else runtime_policy.gate1_keep_pct
-    prune_pct = backend.gate1_prune_pct if backend.gate1_prune_pct is not None else runtime_policy.gate1_prune_pct
-
-    keep_pct = float(max(min(keep_pct, 100.0), 0.0))
-    prune_pct = float(max(min(prune_pct, 100.0), 0.0))
-    if prune_pct < keep_pct:
-        prune_pct = keep_pct
-
-    return (
-        bool(enabled),
-        float(alpha),
-        float(margin),
-        float(eps),
-        bool(audit),
-        float(cap),
-        max(float(band_eps), 0.0),
-        keep_pct,
-        prune_pct,
-    )
-
-
-def _trace_gate_thresholds(
-    *,
-    reason: str,
-    radius: float,
-    keep_threshold: float,
-    prune_threshold: float,
-    band_eps: float,
-    margin: float,
-    radius_cap: float,
-) -> None:
-    if not _GATE_TRACE_ENABLED:
-        return
-    _GATE_TRACE_LOGGER.info(
-        "gate trace: %s radius=%.6f keep=%.6f prune=%.6f band_eps=%.6f margin=%.6f radius_cap=%.6f",
-        reason,
-        radius,
-        keep_threshold,
-        prune_threshold,
-        band_eps,
-        margin,
-        radius_cap,
-    )
-
-
-def _audit_gate1_pruned(
-    *,
-    backend: ResidualCorrHostData,
-    query_index: int,
-    candidate_idx: np.ndarray,
-    kernel_vals: np.ndarray,
-    keep_mask: np.ndarray,
-    radius: float,
-    whitened_distances: np.ndarray | None,
-) -> None:
-    if keep_mask.size == 0 or np.all(keep_mask):
-        return
-    pruned_idx = np.nonzero(~keep_mask)[0]
-    if pruned_idx.size == 0:
-        return
-    v_query = backend.v_matrix[query_index]
-    v_pruned = backend.v_matrix[candidate_idx[pruned_idx]]
-    p_i = float(backend.p_diag[query_index])
-    p_pruned = backend.p_diag[candidate_idx[pruned_idx]]
-    norm_query = float(backend.v_norm_sq[query_index])
-    norm_pruned = backend.v_norm_sq[candidate_idx[pruned_idx]]
-    distances, mask = compute_distance_chunk(
-        v_query=v_query,
-        v_chunk=v_pruned,
-        kernel_chunk=kernel_vals[pruned_idx],
-        p_i=p_i,
-        p_chunk=p_pruned,
-        norm_query=norm_query,
-        norm_chunk=norm_pruned,
-        radius=float(radius),
-        eps=_EPS,
-    )
-    profile = getattr(backend, "gate_profile", None)
-    if isinstance(profile, ResidualGateProfile) and whitened_distances is not None and pruned_idx.size:
-        profile.record_false_negatives(
-            residual_distances=distances,
-            whitened_distances=whitened_distances,
-            inclusion_mask=mask,
-        )
-    if np.any(mask):
-        raise RuntimeError(
-            "Residual gate pruned a candidate that lies within the requested radius."
-        )
 
 
 def compute_residual_distances_with_kernel(
@@ -654,8 +396,8 @@ def compute_residual_distances_with_radius(
     *,
     workspace: ResidualWorkspace | None = None,
     telemetry: ResidualDistanceTelemetry | None = None,
-    force_whitened: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute residual distances with radius check (dense fallback)."""
     candidate_idx = np.asarray(chunk_indices, dtype=np.int64)
     if candidate_idx.size == 0:
         empty = np.zeros((0,), dtype=np.float64)
@@ -666,32 +408,13 @@ def compute_residual_distances_with_radius(
     row_count = int(row_indices.size)
     col_total = int(candidate_idx.size)
     if kernel_row is not None:
-        kernel_vals_full = np.asarray(kernel_row, dtype=np.float32)
+        kernel_vals = np.asarray(kernel_row, dtype=np.float32)
     else:
-        kernel_vals_full = None
-
-    def _fetch_full_kernel() -> np.ndarray:
-        nonlocal kernel_vals_full
-        if kernel_vals_full is None:
-            kernel_start = time.perf_counter()
-            kernel_vals_full = backend.kernel_provider(row_indices, candidate_idx)[0]
-            kernel_elapsed = time.perf_counter() - kernel_start
-            if telemetry is not None:
-                telemetry.record_kernel(row_count, col_total, kernel_elapsed)
-        return kernel_vals_full
-
-    def _fetch_kernel_subset(indices: np.ndarray) -> np.ndarray:
-        if indices.size == 0:
-            return np.zeros((0,), dtype=np.float32)
-        if kernel_vals_full is not None:
-            return kernel_vals_full[indices]
-        cols = candidate_idx[indices]
         kernel_start = time.perf_counter()
-        subset = backend.kernel_provider(row_indices, cols)[0]
+        kernel_vals = backend.kernel_provider(row_indices, candidate_idx)[0]
         kernel_elapsed = time.perf_counter() - kernel_start
         if telemetry is not None:
-            telemetry.record_kernel(row_count, int(indices.size), kernel_elapsed)
-        return subset
+            telemetry.record_kernel(row_count, col_total, kernel_elapsed)
 
     v_query = backend.v_matrix[query_index]
     v_chunk_full = backend.v_matrix[candidate_idx]
@@ -700,179 +423,17 @@ def compute_residual_distances_with_radius(
     norm_query = float(backend.v_norm_sq[query_index])
     norm_chunk_full = backend.v_norm_sq[candidate_idx]
 
-    profile: ResidualGateProfile | None = (
-        backend.gate_profile if isinstance(getattr(backend, "gate_profile", None), ResidualGateProfile) else None
-    )
-    lookup: ResidualGateLookup | None = (
-        backend.gate_lookup if isinstance(getattr(backend, "gate_lookup", None), ResidualGateLookup) else None
-    )
-    runtime_policy = get_residual_policy()
-    (
-        gate_enabled,
-        gate_alpha,
-        gate_margin,
-        gate_eps,
-        gate_audit,
-        gate_radius_cap,
-        gate_band_eps,
-        gate_keep_pct,
-        gate_prune_pct,
-    ) = _resolve_gate1_config(backend, policy=runtime_policy)
-    radius_value = float(radius)
-    radius_cap = max(float(gate_radius_cap), 0.0)
-    effective_radius = min(radius_value, radius_cap) if radius_cap > 0.0 else radius_value
-    effective_radius = max(effective_radius, 0.0)
-
-    gate_keep_mask: np.ndarray | None = None
-    gate_can_run = gate_enabled and radius_cap > 0.0
-    need_whitened = force_whitened or gate_can_run or profile is not None or gate_audit
-    whitened_distances: np.ndarray | None = None
-    if need_whitened:
-        whitened_start = time.perf_counter()
-        whitened_block = compute_whitened_block(
-            backend,
-            query_indices=row_indices,
-            chunk_indices=candidate_idx,
-            workspace=workspace,
-        )
-        whitened_elapsed = time.perf_counter() - whitened_start
-        whitened_distances = np.asarray(whitened_block[0], dtype=np.float64)
-        if telemetry is not None:
-            telemetry.record_whitened(row_count, col_total, whitened_elapsed)
-
-    if gate_can_run and whitened_distances is not None:
-        gate_start = time.perf_counter()
-        if lookup is not None:
-            base_keep, base_prune = lookup.thresholds(effective_radius)
-            keep_threshold = max(base_keep * max(1.0 - gate_margin, 0.0), 0.0)
-            prune_threshold = max(base_prune * (1.0 + gate_margin), keep_threshold)
-        else:
-            base = gate_alpha * effective_radius + gate_margin
-            keep_threshold = 0.0
-            prune_threshold = max(base, keep_threshold)
-        band_eps = max(float(gate_band_eps), 0.0)
-        prune_cutoff = prune_threshold + band_eps
-        if prune_cutoff <= 0.0:
-            _trace_gate_thresholds(
-                reason="prune_cutoff<=0",
-                radius=effective_radius,
-                keep_threshold=keep_threshold,
-                prune_threshold=prune_threshold,
-                band_eps=band_eps,
-                margin=gate_margin,
-                radius_cap=float(gate_radius_cap),
-            )
-            gate_elapsed = time.perf_counter() - gate_start
-            total = int(candidate_idx.size)
-            backend.gate_stats.candidates += total
-            backend.gate_stats.kept += total
-            backend.gate_stats.seconds += gate_elapsed
-        else:
-            prune_mask = whitened_distances >= prune_cutoff
-            gate_elapsed = time.perf_counter() - gate_start
-            survivors_mask = ~prune_mask
-            total = int(candidate_idx.size)
-            kept = int(np.count_nonzero(survivors_mask))
-            pruned = total - kept
-            backend.gate_stats.candidates += total
-            backend.gate_stats.kept += kept
-            backend.gate_stats.pruned += pruned
-            backend.gate_stats.seconds += gate_elapsed
-            if kept == total:
-                gate_keep_mask = None
-            elif kept == 0:
-                if gate_audit and pruned > 0:
-                    audit_whitened = np.asarray(whitened_distances, dtype=np.float64)
-                    audit_kernel = _fetch_full_kernel()
-                    _audit_gate1_pruned(
-                        backend=backend,
-                        query_index=query_index,
-                        candidate_idx=candidate_idx,
-                        kernel_vals=audit_kernel,
-                        keep_mask=np.zeros_like(prune_mask, dtype=bool),
-                        radius=radius,
-                        whitened_distances=audit_whitened,
-                    )
-                distances = np.full(total, float(radius) + gate_eps, dtype=np.float64)
-                mask = np.zeros(total, dtype=np.uint8)
-                if profile is not None and whitened_distances is not None:
-                    profile.record_chunk(
-                        residual_distances=distances,
-                        whitened_distances=whitened_distances,
-                        inclusion_mask=mask,
-                    )
-                return distances, mask
-            else:
-                gate_keep_mask = survivors_mask
-                if gate_audit and pruned > 0:
-                    audit_subset = np.asarray(whitened_distances[prune_mask], dtype=np.float64)
-                    audit_kernel = _fetch_full_kernel()
-                    _audit_gate1_pruned(
-                        backend=backend,
-                        query_index=query_index,
-                        candidate_idx=candidate_idx,
-                        kernel_vals=audit_kernel,
-                        keep_mask=gate_keep_mask,
-                        radius=radius,
-                        whitened_distances=audit_subset,
-                    )
-
-    if gate_keep_mask is None:
-        kernel_vals = _fetch_full_kernel()
-        distances, mask = compute_distance_chunk(
-            v_query=v_query,
-            v_chunk=v_chunk_full,
-            kernel_chunk=kernel_vals,
-            p_i=p_i,
-            p_chunk=p_chunk_full,
-            norm_query=norm_query,
-            norm_chunk=norm_chunk_full,
-            radius=float(radius),
-            eps=_EPS,
-        )
-        if profile is not None and whitened_distances is not None:
-            profile.record_chunk(
-                residual_distances=distances,
-                whitened_distances=whitened_distances,
-                inclusion_mask=mask,
-            )
-        return distances, mask
-
-    survivors_idx = np.nonzero(gate_keep_mask)[0]
-    if survivors_idx.size == 0:
-        distances = np.full(candidate_idx.size, float(radius) + gate_eps, dtype=np.float64)
-        mask = np.zeros(candidate_idx.size, dtype=np.uint8)
-        if profile is not None and whitened_distances is not None:
-            profile.record_chunk(
-                residual_distances=distances,
-                whitened_distances=whitened_distances,
-                inclusion_mask=mask,
-            )
-        return distances, mask
-
-    kernel_survivors = _fetch_kernel_subset(survivors_idx)
-    distances_surv, mask_surv = compute_distance_chunk(
+    distances, mask = compute_distance_chunk(
         v_query=v_query,
-        v_chunk=v_chunk_full[survivors_idx],
-        kernel_chunk=kernel_survivors,
+        v_chunk=v_chunk_full,
+        kernel_chunk=kernel_vals,
         p_i=p_i,
-        p_chunk=p_chunk_full[survivors_idx],
+        p_chunk=p_chunk_full,
         norm_query=norm_query,
-        norm_chunk=norm_chunk_full[survivors_idx],
+        norm_chunk=norm_chunk_full,
         radius=float(radius),
         eps=_EPS,
     )
-
-    distances = np.full(candidate_idx.size, float(radius) + gate_eps, dtype=np.float64)
-    mask = np.zeros(candidate_idx.size, dtype=np.uint8)
-    distances[survivors_idx] = distances_surv
-    mask[survivors_idx] = mask_surv
-    if profile is not None and whitened_distances is not None:
-        profile.record_chunk(
-            residual_distances=distances,
-            whitened_distances=whitened_distances,
-            inclusion_mask=mask,
-        )
     return distances, mask
 
 
@@ -901,13 +462,16 @@ def compute_residual_distances_block_no_gate(
     if radii_arr.shape[0] != query_arr.shape[0]:
         raise ValueError("Radius array must align with query count for block streaming.")
 
+    v_query = backend.v_matrix[query_arr]
+    v_chunk = backend.v_matrix[chunk_arr]
+    dot_block = v_query @ v_chunk.T  # float32 SGEMM via BLAS
+
     distances, mask = distance_block_no_gate(
-        backend.v_matrix,
         backend.p_diag,
-        backend.v_norm_sq,
         query_arr,
         chunk_arr,
         kernel_block,
+        dot_block,
         radii_arr,
         _EPS,
     )
@@ -931,7 +495,6 @@ def compute_residual_distance_single(
 def configure_residual_correlation(
     backend: ResidualCorrHostData,
     *,
-    policy: ResidualPolicy | None = None,
     runtime: cx_config.RuntimeConfig | None = None,
     context: cx_config.RuntimeContext | None = None,
 ) -> None:
@@ -954,92 +517,26 @@ def configure_residual_correlation(
         v_matrix = backend.v_matrix_view(np.float64)
         object.__setattr__(backend, "v_norm_sq", np.sum(v_matrix * v_matrix, axis=1))
 
-    runtime_policy = policy or get_residual_policy(resolved_runtime)
-    (
-        enabled,
-        alpha,
-        margin,
-        eps,
-        audit,
-        radius_cap,
-        band_eps,
-        keep_pct,
-        prune_pct,
-    ) = _resolve_gate1_config(backend, policy=runtime_policy)
-    profile_path = backend.gate_profile_path or runtime_policy.gate1_profile_path
-    profile_bins = backend.gate_profile_bins or runtime_policy.gate1_profile_bins
-    lookup_path = backend.gate_lookup_path or runtime_policy.gate1_lookup_path
-    lookup_margin = (
-        backend.gate_lookup_margin
-        if backend.gate_lookup_margin is not None
-        else runtime_policy.gate1_lookup_margin
-    )
-    grid_mode_requested = (
-        resolved_runtime.metric == "residual_correlation" and resolved_runtime.conflict_graph_impl == "grid"
-    )
-    grid_whiten_scale = float(getattr(resolved_runtime, "residual_grid_whiten_scale", 1.0))
-    if grid_whiten_scale <= 0.0:
-        grid_whiten_scale = 1.0
-
-    radius_max_for_profile = max(1.0, radius_cap if radius_cap > 0.0 else 1.0)
-    profile_obj = None
-    profile_quantiles: list[float] = []
-    if keep_pct > 0.0:
-        profile_quantiles.append(keep_pct)
-    if prune_pct > 0.0:
-        profile_quantiles.append(prune_pct)
-    profile_quantiles.extend([95.0, 99.0, 99.9])
-    profile_quantiles = sorted({round(val, 6) for val in profile_quantiles})
-    if profile_path:
-        profile_obj = ResidualGateProfile.create(
-            bins=int(profile_bins),
-            radius_max=float(radius_max_for_profile),
-            path=profile_path,
-            radius_eps=runtime_policy.radius_floor,
-            quantile_percentiles=profile_quantiles,
+    # Configure scope caps
+    cap_path = resolved_runtime.residual_scope_cap_path
+    cap_default = resolved_runtime.residual_scope_cap_default
+    cap_output = resolved_runtime.residual_scope_cap_output
+    
+    recorder = None
+    caps = None
+    
+    if cap_path or cap_default is not None:
+        caps = ResidualScopeCaps.load(cap_path, default=cap_default)
+        
+    if cap_output:
+        recorder = ResidualScopeCapRecorder(
+            percentile=resolved_runtime.residual_scope_cap_percentile,
+            margin=resolved_runtime.residual_scope_cap_margin,
         )
-
-    lookup_obj = None
-    if lookup_path:
-        lookup_obj = ResidualGateLookup.load(
-            lookup_path,
-            margin=float(lookup_margin),
-            keep_pct=keep_pct,
-            prune_pct=prune_pct,
-            fallback_alpha=float(alpha),
-        )
-
-    need_whitened = (
-        enabled
-        or profile_obj is not None
-        or lookup_obj is not None
-        or grid_mode_requested
-        or grid_whiten_scale != 1.0
-    )
-    if need_whitened:
-        v32, n32 = _compute_gate1_whitened(backend.v_matrix_view(np.float64))
-    else:
-        v32 = None
-        n32 = None
-    object.__setattr__(backend, "gate1_enabled", enabled)
-    object.__setattr__(backend, "gate1_alpha", alpha)
-    object.__setattr__(backend, "gate1_margin", margin)
-    object.__setattr__(backend, "gate1_eps", eps)
-    object.__setattr__(backend, "gate1_audit", audit)
-    object.__setattr__(backend, "gate1_radius_cap", radius_cap)
-    object.__setattr__(backend, "gate1_band_eps", band_eps)
-    object.__setattr__(backend, "gate1_keep_pct", keep_pct)
-    object.__setattr__(backend, "gate1_prune_pct", prune_pct)
-    object.__setattr__(backend, "gate_v32", v32)
-    object.__setattr__(backend, "gate_norm32", n32)
-    object.__setattr__(backend, "gate_stats", ResidualGateTelemetry())
-    object.__setattr__(backend, "gate_profile_path", profile_path)
-    object.__setattr__(backend, "gate_profile_bins", profile_bins if profile_obj else None)
-    object.__setattr__(backend, "gate_profile", profile_obj)
-    object.__setattr__(backend, "gate_lookup_path", lookup_path)
-    object.__setattr__(backend, "gate_lookup_margin", lookup_margin)
-    object.__setattr__(backend, "gate_lookup", lookup_obj)
-    object.__setattr__(backend, "grid_whiten_scale", grid_whiten_scale)
+        
+    object.__setattr__(backend, "scope_caps", caps)
+    object.__setattr__(backend, "scope_cap_recorder", recorder)
+    object.__setattr__(backend, "scope_cap_output_path", cap_output)
 
     set_residual_backend(backend)
 
@@ -1074,13 +571,9 @@ __all__ = [
     "ResidualCorrHostData",
     "ResidualWorkspace",
     "ResidualDistanceTelemetry",
-    "ResidualGateTelemetry",
-    "ResidualGateProfile",
-    "ResidualGateLookup",
     "configure_residual_correlation",
     "get_residual_backend",
     "set_residual_backend",
-    "compute_whitened_block",
     "compute_residual_distances_with_kernel",
     "compute_residual_distances",
     "compute_residual_distance_single",

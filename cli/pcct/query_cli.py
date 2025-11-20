@@ -16,10 +16,6 @@ query_app = typer.Typer(
     help="Run PCCT benchmarks driven by profiles and overrides.",
 )
 
-_DEFAULT_GATE_LOOKUP = QueryCLIOptions.__dataclass_fields__[  # type: ignore[attr-defined]
-    "residual_gate_lookup_path"
-].default
-
 @query_app.callback()
 def query(
     ctx: typer.Context,
@@ -76,19 +72,6 @@ def query(
     residual_scope_cap_percentile: opts.ResidualScopeCapPercentileOption = 0.5,
     residual_scope_cap_margin: opts.ResidualScopeCapMarginOption = 0.05,
     residual_radius_floor: opts.ResidualRadiusFloorOption = None,
-    residual_gate: opts.ResidualGateOption = "off",
-    residual_gate_lookup_path: opts.ResidualGateLookupPathOption = _DEFAULT_GATE_LOOKUP,
-    residual_gate_margin: opts.ResidualGateMarginOption = 0.02,
-    residual_gate_cap: opts.ResidualGateCapOption = 0.0,
-    residual_gate_alpha: opts.ResidualGateAlphaOption = None,
-    residual_gate_eps: opts.ResidualGateEpsOption = None,
-    residual_gate_band_eps: opts.ResidualGateBandEpsOption = None,
-    residual_gate_keep_pct: opts.ResidualGateKeepPctOption = None,
-    residual_gate_prune_pct: opts.ResidualGatePrunePctOption = None,
-    residual_gate_audit: opts.ResidualGateAuditOption = None,
-    residual_gate_profile_path: opts.ResidualGateProfilePathOption = None,
-    residual_gate_profile_bins: opts.ResidualGateProfileBinsOption = 512,
-    residual_gate_profile_log: opts.ResidualGateProfileLogOption = None,
     residual_prefilter: opts.ResidualPrefilterOption = None,
     residual_prefilter_lookup_path: opts.ResidualPrefilterLookupPathOption = None,
     residual_prefilter_margin: opts.ResidualPrefilterMarginOption = None,

@@ -2,9 +2,6 @@
 
 from .residual import (
     ResidualCorrHostData,
-    ResidualGateLookup,
-    ResidualGateProfile,
-    ResidualGateTelemetry,
     build_residual_backend,
     compute_residual_distance_single,
     compute_residual_distances,
@@ -20,9 +17,6 @@ from .residual import (
 
 __all__ = [
     "ResidualCorrHostData",
-    "ResidualGateLookup",
-    "ResidualGateProfile",
-    "ResidualGateTelemetry",
     "build_residual_backend",
     "compute_residual_distance_single",
     "compute_residual_distances",

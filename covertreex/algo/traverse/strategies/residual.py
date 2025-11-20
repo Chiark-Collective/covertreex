@@ -9,7 +9,6 @@ from covertreex.core.tree import PCCTree, TreeBackend
 from covertreex.metrics import residual as residual_metrics
 from covertreex.metrics.residual import (
     ResidualCorrHostData,
-    ResidualGateTelemetry,
     ResidualDistanceTelemetry,
     ResidualWorkspace,
     compute_residual_distances_block_no_gate,
@@ -117,7 +116,6 @@ def _process_level_cache_hits(
     host_backend: ResidualCorrHostData,
     distance_telemetry: ResidualDistanceTelemetry,
     limit_value: int,
-    force_whitened: bool,
     use_masked_append: bool,
     bitset_enabled: bool,
     scope_buffers: np.ndarray | None,
@@ -166,30 +164,15 @@ def _process_level_cache_hits(
             int(cached_ids.size),
             kernel_elapsed,
         )
-        if force_whitened:
-            dist_block = np.empty((query_id_arr.size, cached_ids.size), dtype=np.float64)
-            mask_block = np.empty((query_id_arr.size, cached_ids.size), dtype=np.uint8)
-            for local_idx in range(query_id_arr.size):
-                distances_row, mask_row = compute_residual_distances_with_radius(
-                    backend=host_backend,
-                    query_index=int(query_id_arr[local_idx]),
-                    chunk_indices=cached_ids,
-                    kernel_row=kernel_block[local_idx],
-                    radius=float(radii_arr[local_idx]),
-                    workspace=shared_workspace,
-                    telemetry=distance_telemetry,
-                    force_whitened=True,
-                )
-                dist_block[local_idx] = distances_row
-                mask_block[local_idx] = mask_row
-        else:
-            dist_block, mask_block = compute_residual_distances_block_no_gate(
-                backend=host_backend,
-                query_indices=query_id_arr,
-                chunk_indices=cached_ids,
-                kernel_block=kernel_block,
-                radii=radii_arr,
-            )
+        
+        dist_block, mask_block = compute_residual_distances_block_no_gate(
+            backend=host_backend,
+            query_indices=query_id_arr,
+            chunk_indices=cached_ids,
+            kernel_block=kernel_block,
+            radii=radii_arr,
+        )
+        
         for local_idx, qi in enumerate(qi_arr):
             if saturated[qi]:
                 continue
@@ -253,7 +236,8 @@ def _process_level_cache_hits(
 
     return total_prefetch, total_hits
 
-def _collect_residual_scopes_streaming_serial(
+
+def _collect_residual_scopes(
     *,
     tree: PCCTree,
     host_backend: ResidualCorrHostData,
@@ -269,7 +253,6 @@ def _collect_residual_scopes_streaming_serial(
     stream_tile: int | None = None,
     workspace: ResidualWorkspace | None = None,
     telemetry: ResidualDistanceTelemetry | None = None,
-    force_whitened: bool = False,
     bitset_enabled: bool = False,
     dynamic_query_block: bool = False,
     dense_scope_streamer: bool = False,
@@ -281,7 +264,6 @@ def _collect_residual_scopes_streaming_serial(
     Tuple[Tuple[int, ...], ...],
     int,
     int,
-    ResidualGateTelemetry,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -293,392 +275,6 @@ def _collect_residual_scopes_streaming_serial(
     int,
     int,
     int,
-    int,
-]:
-    batch_size = int(query_indices.shape[0])
-    total_points = int(tree_indices.shape[0])
-    next_cache_np = np.asarray(tree.next_cache, dtype=np.int64)
-    top_levels_np = np.asarray(tree.top_levels, dtype=np.int64)
-    parent_positions_np = np.asarray(parent_positions, dtype=np.int64)
-    tree_positions = np.arange(total_points, dtype=np.int64)
-
-    scope_owner_chunks: list[np.ndarray] = []
-    scope_member_chunks: list[np.ndarray] = []
-    scope_lengths = np.zeros(batch_size, dtype=np.int64)
-    chunk = int(host_backend.chunk_size or 512)
-    trimmed_scopes = 0
-    max_scope_members = 0
-    max_scope_after = 0
-    limit_value = int(scope_limit) if scope_limit and scope_limit > 0 else 0
-
-    shared_workspace = workspace or ResidualWorkspace(max_queries=1, max_chunk=chunk)
-    distance_telemetry = telemetry or ResidualDistanceTelemetry()
-    observed_radii = np.zeros(batch_size, dtype=np.float64)
-    saturation_flags = np.zeros(batch_size, dtype=np.uint8)
-    chunk_iterations = np.zeros(batch_size, dtype=np.int64)
-    chunk_points = np.zeros(batch_size, dtype=np.int64)
-    dedupe_hits = np.zeros(batch_size, dtype=np.int64)
-    flags_length = max(total_points, 1)
-    collected_flags = np.zeros(flags_length, dtype=np.uint8)
-    scope_buffer = np.empty(flags_length, dtype=np.int64)
-    chain_capacity = max(int(next_cache_np.shape[0]), 1)
-    chain_flags = np.zeros(chain_capacity, dtype=np.uint8)
-    chain_buffer = np.empty(chain_capacity, dtype=np.int64)
-    scan_cap_value = scan_cap if scan_cap and scan_cap > 0 else None
-    cache_limit = scope_limit if scope_limit and scope_limit > 0 else _RESIDUAL_SCOPE_DEFAULT_LIMIT
-    level_scope_cache: Dict[int, np.ndarray] = {}
-    cache_hits_total = 0
-    cache_prefetch_total = 0
-    budget_schedule = tuple(scope_budget_schedule or ())
-    budget_schedule_arr = np.asarray(budget_schedule, dtype=np.int64)
-    budget_schedule_arr = np.asarray(budget_schedule, dtype=np.int64)
-    budget_up = float(scope_budget_up_thresh) if scope_budget_up_thresh is not None else 0.0
-    budget_down = float(scope_budget_down_thresh) if scope_budget_down_thresh is not None else 0.0
-    budget_enabled = bool(budget_schedule)
-    budget_start_total = 0
-    budget_final_total = 0
-    budget_escalations_total = 0
-    budget_early_total = 0
-
-    gate_snapshot = host_backend.gate_stats.snapshot()
-
-    for qi in range(batch_size):
-        parent_pos = int(parent_positions_np[qi])
-        if parent_pos < 0:
-            scope_lengths[qi] = 0
-            continue
-
-        parent_level = int(top_levels_np[parent_pos]) if 0 <= parent_pos < top_levels_np.shape[0] else -1
-        query_id = int(query_indices[qi])
-        radius = float(radii[qi])
-        scope_count = 0
-        saturated = False
-        fully_scanned = True
-        cap_reached = False
-        budget_active = budget_enabled and bool(budget_schedule)
-        budget_current_idx = 0
-        budget_current_limit = 0
-        budget_final_val = 0
-        budget_escalations = 0
-        budget_low_streak = 0
-        budget_survivors = 0
-        budget_early = False
-        if budget_active:
-            budget_current_limit = budget_schedule[0]
-            if scan_cap_value is not None:
-                budget_current_limit = min(budget_current_limit, scan_cap_value)
-            if budget_current_limit <= 0:
-                budget_active = False
-            else:
-                budget_start_total += budget_current_limit
-                budget_final_val = budget_current_limit
-
-        query_idx_arr = np.asarray([query_id], dtype=np.int64)
-        cached_positions = (
-            level_scope_cache.get(parent_level)
-            if parent_level >= 0
-            else None
-        )
-        if cached_positions is not None and cached_positions.size:
-            valid_cached = cached_positions[
-                (cached_positions >= 0) & (cached_positions < total_points)
-            ]
-            if valid_cached.size:
-                cache_prefetch_total += int(valid_cached.size)
-                cached_ids = tree_indices[valid_cached]
-                cache_kernel_start = time.perf_counter()
-                cache_kernel_full = host_backend.kernel_provider(
-                    query_idx_arr,
-                    cached_ids,
-                )
-                cache_kernel_elapsed = time.perf_counter() - cache_kernel_start
-                distance_telemetry.record_kernel(
-                    int(query_idx_arr.size), int(cached_ids.size), cache_kernel_elapsed
-                )
-                cache_kernel = cache_kernel_full[0]
-                cache_distances, cache_mask = compute_residual_distances_with_radius(
-                    backend=host_backend,
-                    query_index=query_id,
-                    chunk_indices=cached_ids,
-                    kernel_row=cache_kernel,
-                    radius=radius,
-                    workspace=shared_workspace,
-                    telemetry=distance_telemetry,
-                    force_whitened=force_whitened,
-                )
-                cache_include = np.nonzero(cache_mask)[0]
-                if cache_include.size:
-                    cache_hits_total += int(cache_include.size)
-                    include_positions = valid_cached[cache_include]
-                    prev_scope = scope_count
-                    scope_count, dedupe_delta, hit_limit = residual_scope_append(
-                        collected_flags,
-                        include_positions,
-                        scope_buffer,
-                        scope_count,
-                        limit_value,
-                        respect_limit=True,
-                    )
-                    added = scope_count - prev_scope
-                    if budget_active and added > 0:
-                        budget_survivors += added
-                    dedupe_hits[qi] += dedupe_delta
-                    if hit_limit:
-                        saturated = True
-                        fully_scanned = False
-                        cap_reached = True
-        if not saturated:
-            for start in range(0, total_points, chunk):
-                if scan_cap_value and chunk_points[qi] >= scan_cap_value:
-                    saturated = True
-                    fully_scanned = False
-                    break
-                if budget_active and budget_survivors >= budget_current_limit:
-                    saturated = True
-                    fully_scanned = False
-                    cap_reached = True
-                    break
-                stop = min(start + chunk, total_points)
-                chunk_ids = tree_indices[start:stop]
-                if chunk_ids.size == 0:
-                    continue
-                chunk_positions = tree_positions[start:stop]
-                chunk_iterations[qi] += 1
-                chunk_points[qi] += chunk_ids.size
-                if scan_cap_value and chunk_points[qi] >= scan_cap_value:
-                    cap_reached = True
-                distances, mask = compute_residual_distances_with_radius(
-                    backend=host_backend,
-                    query_index=query_id,
-                    chunk_indices=chunk_ids,
-                    kernel_row=None,
-                    radius=radius,
-                    workspace=shared_workspace,
-                    telemetry=distance_telemetry,
-                    force_whitened=force_whitened,
-                )
-                if mask.size == 0:
-                    continue
-                include_idx = np.nonzero(mask)[0]
-                if include_idx.size:
-                    max_chunk = float(np.max(distances[include_idx]))
-                    if max_chunk > observed_radii[qi]:
-                        observed_radii[qi] = max_chunk
-                    include_positions = chunk_positions[include_idx]
-                    prev_scope = scope_count
-                    scope_count, dedupe_delta, hit_limit = residual_scope_append(
-                        collected_flags,
-                        include_positions,
-                        scope_buffer,
-                        scope_count,
-                        limit_value,
-                        respect_limit=True,
-                    )
-                    added = scope_count - prev_scope
-                    if budget_active and added > 0:
-                        budget_survivors += added
-                    dedupe_hits[qi] += dedupe_delta
-                    if hit_limit:
-                        saturated = True
-                        cap_reached = True
-                if budget_active and chunk_points[qi] > 0:
-                    ratio = budget_survivors / float(chunk_points[qi]) if chunk_points[qi] else 0.0
-                    if (
-                        ratio >= budget_up
-                        and budget_schedule
-                        and budget_current_idx + 1 < len(budget_schedule)
-                    ):
-                        next_limit = budget_schedule[budget_current_idx + 1]
-                        if scan_cap_value is not None:
-                            next_limit = min(next_limit, scan_cap_value)
-                        if next_limit > budget_current_limit:
-                            budget_current_idx += 1
-                            budget_current_limit = next_limit
-                            budget_final_val = next_limit
-                            budget_escalations += 1
-                            budget_low_streak = 0
-                    elif ratio < budget_down:
-                        budget_low_streak += 1
-                        if budget_low_streak >= 2:
-                            budget_early = True
-                            saturated = True
-                            fully_scanned = False
-                            break
-                    else:
-                        budget_low_streak = 0
-                if budget_active and budget_survivors >= budget_current_limit:
-                    cap_reached = True
-                if saturated or cap_reached:
-                    saturated = True
-                    fully_scanned = False
-                    break
-        # `saturated` indicates we bailed early; keep track of full scans so
-        # telemetry can distinguish true caps from naturally small scopes.
-
-        if level_cache_batching:
-            chain_len = residual_collect_next_chain(
-                next_cache_np,
-                parent_pos,
-                chain_flags,
-                chain_buffer,
-            )
-            if chain_len > 0:
-                ensure_arr = chain_buffer[:chain_len]
-                scope_count, _, _ = residual_scope_append(
-                    collected_flags,
-                    ensure_arr,
-                    scope_buffer,
-                    scope_count,
-                    limit_value,
-                    respect_limit=False,
-                )
-        else:
-            ensure_positions: list[int] = []
-            if 0 <= parent_pos < total_points:
-                ensure_positions.append(int(parent_pos))
-            chain = _collect_next_chain(tree, parent_pos, next_cache=next_cache_np)
-            for node in chain:
-                pos = int(node)
-                if 0 <= pos < total_points:
-                    ensure_positions.append(pos)
-            if ensure_positions:
-                ensure_arr = np.asarray(ensure_positions, dtype=np.int64)
-                scope_count, _, _ = residual_scope_append(
-                    collected_flags,
-                    ensure_arr,
-                    scope_buffer,
-                    scope_count,
-                    limit_value,
-                    respect_limit=False,
-                )
-
-        if scope_count > 0:
-            scope_vec = scope_buffer[:scope_count].copy()
-        else:
-            scope_vec = np.empty(0, dtype=np.int64)
-
-        original_size = scope_vec.size
-        max_scope_members = max(max_scope_members, original_size)
-
-        over_limit = bool(limit_value) and original_size > limit_value
-        if over_limit:
-            trimmed_scopes += 1
-            saturation_flags[qi] = 1
-        elif limit_value and saturated and not fully_scanned:
-            trimmed_scopes += 1
-            saturation_flags[qi] = 1
-        elif saturated:
-            saturation_flags[qi] = 1
-
-        scope_after_limit = original_size if not limit_value else min(original_size, limit_value)
-        max_scope_after = max(max_scope_after, scope_after_limit)
-
-        scope_lengths[qi] = int(scope_after_limit)
-        if scope_vec.size:
-            owner_chunk = np.full(scope_vec.size, qi, dtype=np.int64)
-            scope_owner_chunks.append(owner_chunk)
-            scope_member_chunks.append(scope_vec.astype(np.int64, copy=False))
-
-        if budget_active:
-            budget_final_total += budget_final_val
-            budget_escalations_total += budget_escalations
-            if budget_early:
-                budget_early_total += 1
-
-        if parent_level >= 0 and scope_vec.size:
-            cache_slice = scope_vec[: min(cache_limit, scope_vec.size)].copy()
-            level_scope_cache[parent_level] = cache_slice
-
-        residual_scope_reset(collected_flags, scope_buffer, scope_count)
-
-    if scope_member_chunks:
-        if len(scope_owner_chunks) == 1:
-            owners_arr = scope_owner_chunks[0]
-            members_arr = scope_member_chunks[0]
-        else:
-            owners_arr = np.concatenate(scope_owner_chunks)
-            members_arr = np.concatenate(scope_member_chunks)
-        owners_arr = owners_arr.astype(np.int64, copy=False)
-        members_arr = members_arr.astype(np.int64, copy=False)
-        scope_indptr, scope_indices_i32 = build_scope_csr_from_pairs(
-            owners_arr,
-            members_arr,
-            batch_size,
-            limit=limit_value,
-            top_levels=top_levels_np,
-            parents=parent_positions_np,
-        )
-        scope_indices = scope_indices_i32.astype(np.int64, copy=False)
-    else:
-        scope_indptr = np.zeros(batch_size + 1, dtype=np.int64)
-        scope_indices = np.empty(0, dtype=np.int64)
-    conflict_scopes_tuple = tuple(
-        tuple(int(x) for x in scope_indices[scope_indptr[i] : scope_indptr[i + 1]])
-        for i in range(batch_size)
-    )
-    gate_delta = host_backend.gate_stats.delta(gate_snapshot)
-    return (
-        scope_indptr,
-        scope_indices,
-        conflict_scopes_tuple,
-        trimmed_scopes,
-        max_scope_after,
-        gate_delta,
-        observed_radii,
-        saturation_flags,
-        chunk_iterations,
-        chunk_points,
-        dedupe_hits,
-        cache_hits_total,
-        cache_prefetch_total,
-        budget_start_total,
-        budget_final_total,
-        budget_escalations_total,
-        budget_early_total,
-    )
-
-def _collect_residual_scopes_streaming_parallel(
-    *,
-    tree: PCCTree,
-    host_backend: ResidualCorrHostData,
-    query_indices: np.ndarray,
-    tree_indices: np.ndarray,
-    parent_positions: np.ndarray,
-    radii: np.ndarray,
-    scope_limit: int | None = None,
-    scan_cap: int | None = None,
-    scope_budget_schedule: Tuple[int, ...] | None = None,
-    scope_budget_up_thresh: float | None = None,
-    scope_budget_down_thresh: float | None = None,
-    stream_tile: int | None = None,
-    workspace: ResidualWorkspace | None = None,
-    telemetry: ResidualDistanceTelemetry | None = None,
-    force_whitened: bool = False,
-    bitset_enabled: bool = False,
-    dynamic_query_block: bool = False,
-    dense_scope_streamer: bool = False,
-    masked_scope_append: bool = True,
-    level_cache_batching: bool = True,
-) -> Tuple[
-    np.ndarray,
-    np.ndarray,
-    Tuple[Tuple[int, ...], ...],
-    int,
-    int,
-    ResidualGateTelemetry,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    int,
-    int,
-    int,
-    int,
-    int,
-    int,
-    int,
-    float,
 ]:
     distance_telemetry = telemetry or ResidualDistanceTelemetry()
     batch_size = int(query_indices.shape[0])
@@ -687,10 +283,7 @@ def _collect_residual_scopes_streaming_parallel(
     top_levels_np = np.asarray(tree.top_levels, dtype=np.int64)
     parent_positions_np = np.asarray(parent_positions, dtype=np.int64)
     tree_indices_np = np.asarray(tree_indices, dtype=np.int64)
-    dataset_to_pos = {int(tree_indices_np[i]): int(i) for i in range(total_points)}
-
-    gate_snapshot = host_backend.gate_stats.snapshot()
-
+    
     limit_value = int(scope_limit) if scope_limit and scope_limit > 0 else 0
     max_points = max(total_points, 1)
     flags_matrix = np.zeros((batch_size, max_points), dtype=np.uint8)
@@ -840,7 +433,6 @@ def _collect_residual_scopes_streaming_parallel(
                             host_backend=host_backend,
                             distance_telemetry=distance_telemetry,
                             limit_value=limit_value,
-                            force_whitened=force_whitened,
                             use_masked_append=use_masked_append,
                             bitset_enabled=bitset_enabled,
                             scope_buffers=scope_buffers,
@@ -871,7 +463,6 @@ def _collect_residual_scopes_streaming_parallel(
                 host_backend=host_backend,
                 distance_telemetry=distance_telemetry,
                 limit_value=limit_value,
-                force_whitened=force_whitened,
                 use_masked_append=use_masked_append,
                 bitset_enabled=bitset_enabled,
                 scope_buffers=scope_buffers,
@@ -939,30 +530,15 @@ def _collect_residual_scopes_streaming_parallel(
                     int(tile_ids.size),
                     kernel_elapsed,
                 )
-                if force_whitened:
-                    dist_block = np.empty((tile_query_ids.size, tile_ids.size), dtype=np.float64)
-                    mask_block = np.empty((tile_query_ids.size, tile_ids.size), dtype=np.uint8)
-                    for local_idx in range(tile_query_ids.size):
-                        distances_row, mask_row = compute_residual_distances_with_radius(
-                            backend=host_backend,
-                            query_index=int(tile_query_ids[local_idx]),
-                            chunk_indices=tile_ids,
-                            kernel_row=kernel_block[local_idx],
-                            radius=float(tile_radii[local_idx]),
-                            workspace=shared_workspace,
-                            telemetry=distance_telemetry,
-                            force_whitened=True,
-                        )
-                        dist_block[local_idx] = distances_row
-                        mask_block[local_idx] = mask_row
-                else:
-                    dist_block, mask_block = compute_residual_distances_block_no_gate(
-                        backend=host_backend,
-                        query_indices=tile_query_ids,
-                        chunk_indices=tile_ids,
-                        kernel_block=kernel_block,
-                        radii=tile_radii,
-                    )
+                
+                dist_block, mask_block = compute_residual_distances_block_no_gate(
+                    backend=host_backend,
+                    query_indices=tile_query_ids,
+                    chunk_indices=tile_ids,
+                    kernel_block=kernel_block,
+                    radii=tile_radii,
+                )
+                
                 for local_idx, block_slot in enumerate(active_idx):
                     qi = int(block_idx_arr[block_slot])
                     if saturated[qi]:
@@ -1188,7 +764,6 @@ def _collect_residual_scopes_streaming_parallel(
         conflict_scopes_tuple,
         trimmed_scopes,
         max_scope_after,
-        host_backend.gate_stats.delta(gate_snapshot),
         observed_radii,
         saturated_flags,
         chunk_iterations,
@@ -1202,7 +777,7 @@ def _collect_residual_scopes_streaming_parallel(
         budget_early_total,
     )
 
-def _resolve_scope_limits(runtime: Any, gate_active: bool) -> Tuple[int, int]:
+def _resolve_scope_limits(runtime: Any) -> Tuple[int, int]:
     """Derive scope/scan caps with a dense fallback for gate-off runs."""
 
     chunk_target = int(getattr(runtime, "scope_chunk_target", 0) or 0)
@@ -1215,19 +790,13 @@ def _resolve_scope_limits(runtime: Any, gate_active: bool) -> Tuple[int, int]:
 
     member_limit_raw = getattr(runtime, "residual_scope_member_limit", None)
     member_limit: int | None
-    if gate_active:
-        member_limit = (
-            int(member_limit_raw)
-            if isinstance(member_limit_raw, int) and member_limit_raw > 0
-            else None
-        )
+    
+    if member_limit_raw is None:
+        member_limit = _RESIDUAL_SCOPE_DENSE_FALLBACK_LIMIT
+    elif isinstance(member_limit_raw, int) and member_limit_raw > 0:
+        member_limit = member_limit_raw
     else:
-        if member_limit_raw is None:
-            member_limit = _RESIDUAL_SCOPE_DENSE_FALLBACK_LIMIT
-        elif isinstance(member_limit_raw, int) and member_limit_raw > 0:
-            member_limit = member_limit_raw
-        else:
-            member_limit = None
+        member_limit = None
 
     if member_limit is not None and member_limit > 0:
         scope_limit = min(scope_limit, member_limit) if scope_limit > 0 else member_limit
@@ -1314,17 +883,6 @@ def _update_scope_budget_state(
         saturated[qi] = True
         saturated_flags[qi] = 1
 
-
-def _residual_gate_active(host_backend: ResidualCorrHostData) -> bool:
-    enabled = bool(getattr(host_backend, "gate1_enabled", False))
-    if not enabled:
-        return False
-    radius_cap = getattr(host_backend, "gate1_radius_cap", None)
-    if radius_cap is not None and radius_cap <= 0.0:
-        return False
-    gate_vectors = getattr(host_backend, "gate_v32", None)
-    lookup = getattr(host_backend, "gate_lookup", None)
-    return gate_vectors is not None or lookup is not None
 
 def _append_scope_positions(
     flags_row: np.ndarray,
@@ -1699,32 +1257,24 @@ def _collect_residual(
         if budget_down is None:
             budget_down = 0.01
     scope_start = time.perf_counter()
-    gate_active = _residual_gate_active(host_backend)
-    scope_limit, scan_cap = _resolve_scope_limits(runtime, gate_active)
+    
+    scope_limit, scan_cap = _resolve_scope_limits(runtime)
     stream_tile_override = getattr(runtime, "residual_stream_tile", None)
     if isinstance(stream_tile_override, int) and stream_tile_override <= 0:
         stream_tile_override = None
-    force_whitened_stream = gate_active or bool(
-        getattr(runtime, "residual_force_whitened", False)
-    )
-    streaming_fn = (
-        _collect_residual_scopes_streaming_serial
-        if gate_active
-        else _collect_residual_scopes_streaming_parallel
-    )
+    
     bitset_enabled = bool(getattr(runtime, "residual_scope_bitset", False))
     dynamic_query_block = bool(getattr(runtime, "residual_dynamic_query_block", False))
     dense_scope_streamer = bool(getattr(runtime, "residual_dense_scope_streamer", False))
     masked_scope_append = bool(getattr(runtime, "residual_masked_scope_append", True))
     level_cache_batching = bool(getattr(runtime, "residual_level_cache_batching", True))
-    engine_label = "residual_serial" if gate_active else "residual_parallel"
+    engine_label = "residual_parallel"
     (
         scope_indptr_np,
         scope_indices_np,
         conflict_scopes,
         trimmed_scopes,
         chunk_max_members,
-        gate_delta,
         scope_radii_np,
         saturation_flags,
         chunk_iterations,
@@ -1736,7 +1286,7 @@ def _collect_residual(
         budget_final_total,
         budget_escalations_total,
         budget_early_total,
-    ) = streaming_fn(
+    ) = _collect_residual_scopes(
         tree=tree,
         host_backend=host_backend,
         query_indices=batch_indices_np,
@@ -1751,7 +1301,6 @@ def _collect_residual(
         stream_tile=stream_tile_override,
         workspace=workspace,
         telemetry=distance_telemetry,
-        force_whitened=force_whitened_stream,
         bitset_enabled=bitset_enabled,
         dynamic_query_block=dynamic_query_block,
         dense_scope_streamer=dense_scope_streamer,
@@ -1759,9 +1308,9 @@ def _collect_residual(
         level_cache_batching=level_cache_batching,
     )
     semisort_seconds = time.perf_counter() - scope_start
-    whitened_pairs_total = int(distance_telemetry.whitened_pairs)
-    whitened_seconds_total = float(distance_telemetry.whitened_seconds)
-    whitened_calls_total = int(distance_telemetry.whitened_calls)
+    whitened_pairs_total = 0
+    whitened_seconds_total = 0.0
+    whitened_calls_total = 0
     kernel_pairs_total = int(distance_telemetry.kernel_pairs)
     kernel_seconds_total = float(distance_telemetry.kernel_seconds)
     kernel_calls_total = int(distance_telemetry.kernel_calls)
@@ -1805,10 +1354,6 @@ def _collect_residual(
             scope_budget_final=int(budget_final_total),
             scope_budget_escalations=int(budget_escalations_total),
             scope_budget_early_terminate=int(budget_early_total),
-            gate1_candidates=int(gate_delta.candidates),
-            gate1_kept=int(gate_delta.kept),
-            gate1_pruned=int(gate_delta.pruned),
-            gate1_seconds=float(gate_delta.seconds),
             whitened_block_pairs=int(whitened_pairs_total),
             whitened_block_seconds=float(whitened_seconds_total),
             whitened_block_calls=int(whitened_calls_total),
@@ -1829,7 +1374,7 @@ def _collect_residual(
             scope_radius_caps=scope_cap_values,
         ),
         engine=engine_label,
-        gate_active=gate_active,
+        gate_active=False,
     )
 
 

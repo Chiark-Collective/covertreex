@@ -52,10 +52,6 @@ class TraversalTimings:
     scope_chunk_segments: int = 0
     scope_chunk_emitted: int = 0
     scope_chunk_max_members: int = 0
-    gate1_candidates: int = 0
-    gate1_kept: int = 0
-    gate1_pruned: int = 0
-    gate1_seconds: float = 0.0
     scope_chunk_scans: int = 0
     scope_chunk_points: int = 0
     scope_chunk_dedupe: int = 0

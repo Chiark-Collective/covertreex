@@ -350,78 +350,6 @@ ResidualRadiusFloorOption = Annotated[
 ]
 
 # Gate & prefilter
-ResidualGateOption = Annotated[
-    Literal["off", "lookup"],
-    typer.Option("--residual-gate", help="Residual Gate-1 mode (off or lookup).", rich_help_panel=GATE_PANEL),
-]
-ResidualGateLookupPathOption = Annotated[
-    str,
-    typer.Option(
-        "--residual-gate-lookup-path",
-        help="Lookup table path used when --residual-gate=lookup.",
-        rich_help_panel=GATE_PANEL,
-    ),
-]
-ResidualGateMarginOption = Annotated[
-    float,
-    typer.Option("--residual-gate-margin", help="Lookup margin applied when the gate is enabled.", rich_help_panel=GATE_PANEL),
-]
-ResidualGateCapOption = Annotated[
-    float,
-    typer.Option("--residual-gate-cap", help="Optional radius cap when using lookup presets.", rich_help_panel=GATE_PANEL),
-]
-ResidualGateAlphaOption = Annotated[
-    Optional[float],
-    typer.Option("--residual-gate-alpha", help="Manual override for Gate-1 alpha.", rich_help_panel=GATE_PANEL),
-]
-ResidualGateEpsOption = Annotated[
-    Optional[float],
-    typer.Option("--residual-gate-eps", help="Gate-1 epsilon override.", rich_help_panel=GATE_PANEL),
-]
-ResidualGateBandEpsOption = Annotated[
-    Optional[float],
-    typer.Option("--residual-gate-band-eps", help="Gate-1 band epsilon override.", rich_help_panel=GATE_PANEL),
-]
-ResidualGateKeepPctOption = Annotated[
-    Optional[float],
-    typer.Option("--residual-gate-keep-pct", help="Gate-1 keep percentage.", rich_help_panel=GATE_PANEL),
-]
-ResidualGatePrunePctOption = Annotated[
-    Optional[float],
-    typer.Option("--residual-gate-prune-pct", help="Gate-1 prune percentage.", rich_help_panel=GATE_PANEL),
-]
-ResidualGateAuditOption = Annotated[
-    Optional[bool],
-    typer.Option(
-        "--residual-gate-audit/--no-residual-gate-audit",
-        help="Emit gate audit payloads.",
-        rich_help_panel=GATE_PANEL,
-    ),
-]
-ResidualGateProfilePathOption = Annotated[
-    Optional[str],
-    typer.Option(
-        "--residual-gate-profile-path",
-        help="Write gate profile samples to this JSON file.",
-        rich_help_panel=GATE_PANEL,
-    ),
-]
-ResidualGateProfileBinsOption = Annotated[
-    int,
-    typer.Option(
-        "--residual-gate-profile-bins",
-        help="Histogram bins when recording gate profiles.",
-        rich_help_panel=GATE_PANEL,
-    ),
-]
-ResidualGateProfileLogOption = Annotated[
-    Optional[str],
-    typer.Option(
-        "--residual-gate-profile-log",
-        help="Append profile metadata to this JSONL log.",
-        rich_help_panel=GATE_PANEL,
-    ),
-]
 ResidualPrefilterOption = Annotated[
     Optional[bool],
     typer.Option(
@@ -518,19 +446,6 @@ __all__ = [
     "ResidualScopeCapPercentileOption",
     "ResidualScopeCapMarginOption",
     "ResidualRadiusFloorOption",
-    "ResidualGateOption",
-    "ResidualGateLookupPathOption",
-    "ResidualGateMarginOption",
-    "ResidualGateCapOption",
-    "ResidualGateAlphaOption",
-    "ResidualGateEpsOption",
-    "ResidualGateBandEpsOption",
-    "ResidualGateKeepPctOption",
-    "ResidualGatePrunePctOption",
-    "ResidualGateAuditOption",
-    "ResidualGateProfilePathOption",
-    "ResidualGateProfileBinsOption",
-    "ResidualGateProfileLogOption",
     "ResidualPrefilterOption",
     "ResidualPrefilterLookupPathOption",
     "ResidualPrefilterMarginOption",

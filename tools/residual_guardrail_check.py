@@ -31,7 +31,6 @@ class GuardrailMetrics:
     whitened_pairs_sum: float
     kernel_pairs_sum: float
     semisort_median_ms: float
-    gate1_pruned_total: int
     pairwise_reused_batches: int
 
     @property
@@ -97,7 +96,6 @@ def parse_guardrail_metrics(path: Path) -> GuardrailMetrics:
     semisort: List[float] = []
     whitened = 0.0
     kernel = 0.0
-    gate_pruned = 0
     pairwise_reused = 0
     for record in _load_records(path):
         if not record.get("dominated"):
@@ -106,7 +104,6 @@ def parse_guardrail_metrics(path: Path) -> GuardrailMetrics:
         semisort.append(float(record.get("traversal_semisort_ms", 0.0)))
         whitened += float(record.get("traversal_whitened_block_pairs", 0.0))
         kernel += float(record.get("traversal_kernel_provider_pairs", 0.0))
-        gate_pruned += int(record.get("traversal_gate1_pruned", 0) or 0)
         if record.get("conflict_pairwise_reused"):
             pairwise_reused += 1
     if not dominated:
@@ -116,7 +113,6 @@ def parse_guardrail_metrics(path: Path) -> GuardrailMetrics:
         whitened_pairs_sum=whitened,
         kernel_pairs_sum=kernel,
         semisort_median_ms=statistics.median(semisort),
-        gate1_pruned_total=gate_pruned,
         pairwise_reused_batches=pairwise_reused,
     )
 
@@ -126,7 +122,6 @@ def evaluate_metrics(
     *,
     min_whitened_coverage: float,
     max_median_semisort_ms: float,
-    require_gate1_prunes: bool,
     require_pairwise_reuse: bool,
     min_dominated_batches: int,
 ) -> List[str]:
@@ -146,8 +141,6 @@ def evaluate_metrics(
             f"median traversal_semisort_ms {metrics.semisort_median_ms:.2f} "
             f"> maximum {max_median_semisort_ms:.2f}"
         )
-    if require_gate1_prunes and metrics.gate1_pruned_total <= 0:
-        failures.append("traversal_gate1_pruned never increased (expected non-zero)")
     if require_pairwise_reuse and not metrics.all_pairwise_reused:
         failures.append(
             f"conflict_pairwise_reused=1 for {metrics.pairwise_reused_batches}/"
@@ -164,7 +157,6 @@ def _write_summary(path: Path, metrics: GuardrailMetrics) -> None:
         "whitened_coverage": metrics.whitened_coverage,
         "semisort_median_ms": metrics.semisort_median_ms,
         "semisort_median_seconds": metrics.semisort_median_seconds,
-        "gate1_pruned_total": metrics.gate1_pruned_total,
         "pairwise_reused_batches": metrics.pairwise_reused_batches,
         "all_pairwise_reused": metrics.all_pairwise_reused,
     }
@@ -209,11 +201,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Minimum dominated batch count required for the guardrail run",
     )
     parser.add_argument(
-        "--require-gate1-prunes",
-        action="store_true",
-        help="Fail if traversal_gate1_pruned stays at zero",
-    )
-    parser.add_argument(
         "--no-require-pairwise-reuse",
         action="store_true",
         help="Allow any conflict_pairwise_reused=0 batches (default: fail)",
@@ -238,13 +225,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     metrics = parse_guardrail_metrics(log_path)
     print(
-        "[guardrail] dominated_batches=%d coverage=%.3f semisort_median=%.2fms gate1_pruned=%d "
+        "[guardrail] dominated_batches=%d coverage=%.3f semisort_median=%.2fms "
         "pairwise_reused=%d"
         % (
             metrics.dominated_batches,
             metrics.whitened_coverage,
             metrics.semisort_median_ms,
-            metrics.gate1_pruned_total,
             metrics.pairwise_reused_batches,
         )
     )
@@ -253,7 +239,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         metrics,
         min_whitened_coverage=args.min_whitened_coverage,
         max_median_semisort_ms=args.max_median_semisort_ms,
-        require_gate1_prunes=args.require_gate1_prunes,
         require_pairwise_reuse=not args.no_require_pairwise_reuse,
         min_dominated_batches=args.min_dominated_batches,
     )

@@ -77,21 +77,7 @@ class RuntimeConfig:
     prefix_growth_small: float
     prefix_growth_mid: float
     prefix_growth_large: float
-    residual_gate1_enabled: bool
-    residual_gate1_alpha: float
-    residual_gate1_margin: float
-    residual_gate1_eps: float
-    residual_gate1_audit: bool
-    residual_gate1_radius_cap: float
-    residual_gate1_band_eps: float
-    residual_gate1_keep_pct: float
-    residual_gate1_prune_pct: float
     residual_radius_floor: float
-    residual_gate1_profile_path: str | None
-    residual_gate1_profile_bins: int
-    residual_gate1_lookup_path: str | None
-    residual_gate1_lookup_margin: float
-    residual_force_whitened: bool
     residual_scope_member_limit: int | None
     residual_stream_tile: int | None
     residual_scope_bitset: bool
@@ -101,6 +87,9 @@ class RuntimeConfig:
     residual_level_cache_batching: bool
     residual_scope_cap_path: str | None
     residual_scope_cap_default: float
+    residual_scope_cap_output: str | None
+    residual_scope_cap_percentile: float
+    residual_scope_cap_margin: float
     residual_prefilter_enabled: bool
     residual_prefilter_lookup_path: str | None
     residual_prefilter_margin: float
@@ -129,9 +118,6 @@ class RuntimeConfig:
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
         return RuntimeModel.from_env().to_runtime_config()
-
-
-
 
 
 def _apply_jax_runtime_flags(config: RuntimeConfig) -> None:
@@ -306,27 +292,16 @@ def describe_runtime() -> Dict[str, Any]:
         "prefix_growth_small": config.prefix_growth_small,
         "prefix_growth_mid": config.prefix_growth_mid,
         "prefix_growth_large": config.prefix_growth_large,
-        "residual_gate1_enabled": config.residual_gate1_enabled,
-        "residual_gate1_alpha": config.residual_gate1_alpha,
-        "residual_gate1_margin": config.residual_gate1_margin,
-        "residual_gate1_eps": config.residual_gate1_eps,
-        "residual_gate1_audit": config.residual_gate1_audit,
-        "residual_gate1_radius_cap": config.residual_gate1_radius_cap,
-        "residual_gate1_band_eps": config.residual_gate1_band_eps,
-        "residual_gate1_keep_pct": config.residual_gate1_keep_pct,
-        "residual_gate1_prune_pct": config.residual_gate1_prune_pct,
         "residual_radius_floor": config.residual_radius_floor,
-        "residual_gate1_profile_path": config.residual_gate1_profile_path,
-        "residual_gate1_profile_bins": config.residual_gate1_profile_bins,
-        "residual_gate1_lookup_path": config.residual_gate1_lookup_path,
-        "residual_gate1_lookup_margin": config.residual_gate1_lookup_margin,
-        "residual_force_whitened": config.residual_force_whitened,
         "residual_scope_bitset": config.residual_scope_bitset,
         "residual_dynamic_query_block": config.residual_dynamic_query_block,
         "residual_level_cache_batching": config.residual_level_cache_batching,
         "residual_scope_member_limit": config.residual_scope_member_limit,
         "residual_scope_cap_path": config.residual_scope_cap_path,
         "residual_scope_cap_default": config.residual_scope_cap_default,
+        "residual_scope_cap_output": config.residual_scope_cap_output,
+        "residual_scope_cap_percentile": config.residual_scope_cap_percentile,
+        "residual_scope_cap_margin": config.residual_scope_cap_margin,
         "residual_grid_whiten_scale": config.residual_grid_whiten_scale,
     }
 

@@ -9,19 +9,6 @@ from covertreex.core.tree import TreeBackend
 from covertreex.telemetry import artifact_root, resolve_artifact_path
 
 
-def gate_active_for_backend(host_backend: Any | None) -> bool:
-    if host_backend is None:
-        return False
-    if not bool(getattr(host_backend, "gate1_enabled", False)):
-        return False
-    radius_cap = getattr(host_backend, "gate1_radius_cap", None)
-    if radius_cap is not None and radius_cap <= 0.0:
-        return False
-    gate_vectors = getattr(host_backend, "gate_v32", None)
-    lookup = getattr(host_backend, "gate_lookup", None)
-    return gate_vectors is not None or lookup is not None
-
-
 def ensure_thread_env_defaults() -> Dict[str, str]:
     cores = max(1, os.cpu_count() or 1)
     defaults = {
@@ -55,12 +42,11 @@ def thread_env_snapshot() -> Dict[str, str]:
     }
 
 
-def emit_engine_banner(engine: str, gate_active: bool, threads: Dict[str, str]) -> None:
-    gate_state = "on" if gate_active else "off"
+def emit_engine_banner(engine: str, threads: Dict[str, str]) -> None:
     blas_val = threads.get("blas_threads", "auto")
     numba_val = threads.get("numba_threads", "auto")
     print(
-        f"[queries] engine={engine} gate={gate_state} "
+        f"[queries] engine={engine} "
         f"blas_threads={blas_val} numba_threads={numba_val}"
     )
 

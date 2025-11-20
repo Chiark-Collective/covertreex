@@ -41,17 +41,10 @@ _DEFAULT_PREFIX_DENSITY_HIGH = 0.55
 _DEFAULT_PREFIX_GROWTH_SMALL = 1.25
 _DEFAULT_PREFIX_GROWTH_MID = 1.75
 _DEFAULT_PREFIX_GROWTH_LARGE = 2.25
-_DEFAULT_RESIDUAL_GATE1_ALPHA = 4.0
-_DEFAULT_RESIDUAL_GATE1_MARGIN = 0.05
-_DEFAULT_RESIDUAL_GATE1_EPS = 1e-6
-_DEFAULT_RESIDUAL_GATE1_RADIUS_CAP = 1.0
 _DEFAULT_RESIDUAL_RADIUS_FLOOR = 1e-3
-_DEFAULT_RESIDUAL_GATE1_PROFILE_BINS = 256
-_DEFAULT_RESIDUAL_GATE1_LOOKUP_MARGIN = 0.02
-_DEFAULT_RESIDUAL_GATE1_BAND_EPS = 0.02
-_DEFAULT_RESIDUAL_GATE1_KEEP_PCT = 95.0
-_DEFAULT_RESIDUAL_GATE1_PRUNE_PCT = 99.9
 _DEFAULT_RESIDUAL_SCOPE_CAP_DEFAULT = 0.0
+_DEFAULT_RESIDUAL_SCOPE_CAP_PERCENTILE = 0.5
+_DEFAULT_RESIDUAL_SCOPE_CAP_MARGIN = 0.05
 _DEFAULT_RESIDUAL_PREFILTER_MARGIN = 0.02
 _DEFAULT_RESIDUAL_PREFILTER_RADIUS_CAP = 10.0
 _DEFAULT_RESIDUAL_PREFILTER_LOOKUP = str(
@@ -59,7 +52,6 @@ _DEFAULT_RESIDUAL_PREFILTER_LOOKUP = str(
 )
 _DEFAULT_RESIDUAL_PREFILTER_AUDIT = False
 _DEFAULT_RESIDUAL_GRID_WHITEN_SCALE = 1.0
-_DEFAULT_RESIDUAL_FORCE_WHITENED = False
 
 
 def _bool_from_env(value: str | None, *, default: bool) -> bool:
@@ -261,21 +253,7 @@ class ResidualConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    gate1_enabled: bool = False
-    gate1_alpha: float = _DEFAULT_RESIDUAL_GATE1_ALPHA
-    gate1_margin: float = _DEFAULT_RESIDUAL_GATE1_MARGIN
-    gate1_eps: float = _DEFAULT_RESIDUAL_GATE1_EPS
-    gate1_audit: bool = False
-    gate1_radius_cap: float = _DEFAULT_RESIDUAL_GATE1_RADIUS_CAP
-    gate1_band_eps: float = _DEFAULT_RESIDUAL_GATE1_BAND_EPS
-    gate1_keep_pct: float = _DEFAULT_RESIDUAL_GATE1_KEEP_PCT
-    gate1_prune_pct: float = _DEFAULT_RESIDUAL_GATE1_PRUNE_PCT
     radius_floor: float = _DEFAULT_RESIDUAL_RADIUS_FLOOR
-    gate1_profile_path: str | None = None
-    gate1_profile_bins: int = _DEFAULT_RESIDUAL_GATE1_PROFILE_BINS
-    gate1_lookup_path: str | None = None
-    gate1_lookup_margin: float = _DEFAULT_RESIDUAL_GATE1_LOOKUP_MARGIN
-    force_whitened: bool = _DEFAULT_RESIDUAL_FORCE_WHITENED
     scope_member_limit: int | None = None
     stream_tile: int | None = None
     scope_bitset: bool = False
@@ -285,6 +263,9 @@ class ResidualConfig(BaseModel):
     level_cache_batching: bool = True
     scope_cap_path: str | None = None
     scope_cap_default: float = _DEFAULT_RESIDUAL_SCOPE_CAP_DEFAULT
+    scope_cap_output: str | None = None
+    scope_cap_percentile: float = _DEFAULT_RESIDUAL_SCOPE_CAP_PERCENTILE
+    scope_cap_margin: float = _DEFAULT_RESIDUAL_SCOPE_CAP_MARGIN
     prefilter_enabled: bool = False
     prefilter_lookup_path: str | None = _DEFAULT_RESIDUAL_PREFILTER_LOOKUP
     prefilter_margin: float = _DEFAULT_RESIDUAL_PREFILTER_MARGIN
@@ -340,14 +321,6 @@ class RuntimeModel(BaseModel):
     @property
     def log_level(self) -> str:
         return self.diagnostics.log_level
-
-    @property
-    def residual_gate1_enabled(self) -> bool:
-        return self.residual.gate1_enabled
-
-    @property
-    def residual_force_whitened(self) -> bool:
-        return self.residual.force_whitened
 
     @property
     def residual_scope_member_limit(self) -> int | None:
@@ -410,21 +383,7 @@ class RuntimeModel(BaseModel):
             prefix_growth_small=self.prefix_growth_small,
             prefix_growth_mid=self.prefix_growth_mid,
             prefix_growth_large=self.prefix_growth_large,
-            residual_gate1_enabled=residual.gate1_enabled,
-            residual_gate1_alpha=residual.gate1_alpha,
-            residual_gate1_margin=residual.gate1_margin,
-            residual_gate1_eps=residual.gate1_eps,
-            residual_gate1_audit=residual.gate1_audit,
-            residual_gate1_radius_cap=residual.gate1_radius_cap,
-            residual_gate1_band_eps=residual.gate1_band_eps,
-            residual_gate1_keep_pct=residual.gate1_keep_pct,
-            residual_gate1_prune_pct=residual.gate1_prune_pct,
             residual_radius_floor=residual.radius_floor,
-            residual_gate1_profile_path=residual.gate1_profile_path,
-            residual_gate1_profile_bins=residual.gate1_profile_bins,
-            residual_gate1_lookup_path=residual.gate1_lookup_path,
-            residual_gate1_lookup_margin=residual.gate1_lookup_margin,
-            residual_force_whitened=residual.force_whitened,
             residual_scope_member_limit=residual.scope_member_limit,
             residual_stream_tile=residual.stream_tile,
             residual_scope_bitset=residual.scope_bitset,
@@ -434,6 +393,9 @@ class RuntimeModel(BaseModel):
             residual_level_cache_batching=residual.level_cache_batching,
             residual_scope_cap_path=residual.scope_cap_path,
             residual_scope_cap_default=residual.scope_cap_default,
+            residual_scope_cap_output=residual.scope_cap_output,
+            residual_scope_cap_percentile=residual.scope_cap_percentile,
+            residual_scope_cap_margin=residual.scope_cap_margin,
             residual_prefilter_enabled=residual.prefilter_enabled,
             residual_prefilter_lookup_path=residual.prefilter_lookup_path,
             residual_prefilter_margin=residual.prefilter_margin,
@@ -445,21 +407,7 @@ class RuntimeModel(BaseModel):
     @classmethod
     def from_legacy_config(cls, legacy: "RuntimeConfig") -> "RuntimeModel":
         residual = ResidualConfig(
-            gate1_enabled=legacy.residual_gate1_enabled,
-            gate1_alpha=legacy.residual_gate1_alpha,
-            gate1_margin=legacy.residual_gate1_margin,
-            gate1_eps=legacy.residual_gate1_eps,
-            gate1_audit=legacy.residual_gate1_audit,
-            gate1_radius_cap=legacy.residual_gate1_radius_cap,
-            gate1_band_eps=legacy.residual_gate1_band_eps,
-            gate1_keep_pct=legacy.residual_gate1_keep_pct,
-            gate1_prune_pct=legacy.residual_gate1_prune_pct,
             radius_floor=legacy.residual_radius_floor,
-            gate1_profile_path=legacy.residual_gate1_profile_path,
-            gate1_profile_bins=legacy.residual_gate1_profile_bins,
-            gate1_lookup_path=legacy.residual_gate1_lookup_path,
-            gate1_lookup_margin=legacy.residual_gate1_lookup_margin,
-            force_whitened=legacy.residual_force_whitened,
             scope_member_limit=legacy.residual_scope_member_limit,
             stream_tile=legacy.residual_stream_tile,
             scope_bitset=legacy.residual_scope_bitset,
@@ -469,6 +417,9 @@ class RuntimeModel(BaseModel):
             level_cache_batching=legacy.residual_level_cache_batching,
             scope_cap_path=legacy.residual_scope_cap_path,
             scope_cap_default=legacy.residual_scope_cap_default,
+            scope_cap_output=legacy.residual_scope_cap_output,
+            scope_cap_percentile=legacy.residual_scope_cap_percentile,
+            scope_cap_margin=legacy.residual_scope_cap_margin,
             prefilter_enabled=legacy.residual_prefilter_enabled,
             prefilter_lookup_path=legacy.residual_prefilter_lookup_path,
             prefilter_margin=legacy.residual_prefilter_margin,
@@ -618,68 +569,10 @@ class RuntimeModel(BaseModel):
             source.get("COVERTREEX_PREFIX_GROWTH_LARGE"),
             default=_DEFAULT_PREFIX_GROWTH_LARGE,
         )
-        residual_gate1_enabled = _bool_from_env(
-            source.get("COVERTREEX_RESIDUAL_GATE1"),
-            default=True if residual_metric else False,
-        )
-        residual_gate1_alpha = _parse_optional_float(
-            source.get("COVERTREEX_RESIDUAL_GATE1_ALPHA"),
-            default=_DEFAULT_RESIDUAL_GATE1_ALPHA,
-        )
-        residual_gate1_margin = _parse_optional_float(
-            source.get("COVERTREEX_RESIDUAL_GATE1_MARGIN"),
-            default=_DEFAULT_RESIDUAL_GATE1_MARGIN,
-        )
-        residual_gate1_eps = _parse_optional_float(
-            source.get("COVERTREEX_RESIDUAL_GATE1_EPS"),
-            default=_DEFAULT_RESIDUAL_GATE1_EPS,
-        )
-        residual_gate1_audit = _bool_from_env(
-            source.get("COVERTREEX_RESIDUAL_GATE1_AUDIT"),
-            default=False,
-        )
-        residual_gate1_radius_cap = _parse_optional_float(
-            source.get("COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP"),
-            default=_DEFAULT_RESIDUAL_GATE1_RADIUS_CAP,
-        )
-        residual_gate1_band_eps = _parse_optional_float(
-            source.get("COVERTREEX_RESIDUAL_GATE1_BAND_EPS"),
-            default=_DEFAULT_RESIDUAL_GATE1_BAND_EPS,
-        )
-        if residual_gate1_band_eps < 0.0:
-            residual_gate1_band_eps = _DEFAULT_RESIDUAL_GATE1_BAND_EPS
-        residual_gate1_keep_pct = _parse_optional_float(
-            source.get("COVERTREEX_RESIDUAL_GATE1_KEEP_PCT"),
-            default=_DEFAULT_RESIDUAL_GATE1_KEEP_PCT,
-        )
-        residual_gate1_prune_pct = _parse_optional_float(
-            source.get("COVERTREEX_RESIDUAL_GATE1_PRUNE_PCT"),
-            default=_DEFAULT_RESIDUAL_GATE1_PRUNE_PCT,
-        )
-        residual_gate1_keep_pct = float(min(max(residual_gate1_keep_pct, 0.0), 100.0))
-        residual_gate1_prune_pct = float(min(max(residual_gate1_prune_pct, 0.0), 100.0))
-        if residual_gate1_prune_pct < residual_gate1_keep_pct:
-            residual_gate1_prune_pct = residual_gate1_keep_pct
+        
         residual_radius_floor = _parse_optional_float(
             source.get("COVERTREEX_RESIDUAL_RADIUS_FLOOR"),
             default=_DEFAULT_RESIDUAL_RADIUS_FLOOR,
-        )
-        residual_gate1_profile_path = source.get("COVERTREEX_RESIDUAL_GATE1_PROFILE_PATH")
-        raw_profile_bins = _parse_optional_int(
-            source.get("COVERTREEX_RESIDUAL_GATE1_PROFILE_BINS")
-        )
-        if raw_profile_bins is None or raw_profile_bins <= 0:
-            residual_gate1_profile_bins = _DEFAULT_RESIDUAL_GATE1_PROFILE_BINS
-        else:
-            residual_gate1_profile_bins = raw_profile_bins
-        residual_gate1_lookup_path = source.get("COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH")
-        residual_gate1_lookup_margin = _parse_optional_float(
-            source.get("COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN"),
-            default=_DEFAULT_RESIDUAL_GATE1_LOOKUP_MARGIN,
-        )
-        residual_force_whitened = _bool_from_env(
-            source.get("COVERTREEX_RESIDUAL_FORCE_WHITENED"),
-            default=False,
         )
         residual_scope_bitset = _bool_from_env(
             source.get("COVERTREEX_RESIDUAL_SCOPE_BITSET"),
@@ -720,6 +613,15 @@ class RuntimeModel(BaseModel):
             source.get("COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT"),
             default=_DEFAULT_RESIDUAL_SCOPE_CAP_DEFAULT,
         )
+        residual_scope_cap_output = source.get("COVERTREEX_RESIDUAL_SCOPE_CAP_OUTPUT")
+        residual_scope_cap_percentile = _parse_optional_float(
+            source.get("COVERTREEX_RESIDUAL_SCOPE_CAP_PERCENTILE"),
+            default=_DEFAULT_RESIDUAL_SCOPE_CAP_PERCENTILE,
+        )
+        residual_scope_cap_margin = _parse_optional_float(
+            source.get("COVERTREEX_RESIDUAL_SCOPE_CAP_MARGIN"),
+            default=_DEFAULT_RESIDUAL_SCOPE_CAP_MARGIN,
+        )
         residual_prefilter_enabled = _bool_from_env(
             source.get("COVERTREEX_RESIDUAL_PREFILTER"),
             default=False,
@@ -744,37 +646,8 @@ class RuntimeModel(BaseModel):
         if residual_grid_whiten_scale <= 0.0:
             residual_grid_whiten_scale = _DEFAULT_RESIDUAL_GRID_WHITEN_SCALE
 
-        if residual_prefilter_enabled:
-            residual_gate1_enabled = True
-            if residual_gate1_lookup_path is None:
-                residual_gate1_lookup_path = (
-                    residual_prefilter_lookup_path or _DEFAULT_RESIDUAL_PREFILTER_LOOKUP
-                )
-            if source.get("COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN") is None:
-                residual_gate1_lookup_margin = residual_prefilter_margin
-            if source.get("COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP") is None:
-                residual_gate1_radius_cap = residual_prefilter_radius_cap
-            if source.get("COVERTREEX_RESIDUAL_GATE1_AUDIT") is None:
-                residual_gate1_audit = residual_prefilter_audit
-        if residual_gate1_lookup_path is None and residual_metric:
-            residual_gate1_lookup_path = _DEFAULT_RESIDUAL_PREFILTER_LOOKUP
-
         residual = ResidualConfig(
-            gate1_enabled=residual_gate1_enabled,
-            gate1_alpha=residual_gate1_alpha,
-            gate1_margin=residual_gate1_margin,
-            gate1_eps=residual_gate1_eps,
-            gate1_audit=residual_gate1_audit,
-            gate1_radius_cap=residual_gate1_radius_cap,
-            gate1_band_eps=residual_gate1_band_eps,
-            gate1_keep_pct=residual_gate1_keep_pct,
-            gate1_prune_pct=residual_gate1_prune_pct,
             radius_floor=residual_radius_floor,
-            gate1_profile_path=residual_gate1_profile_path,
-            gate1_profile_bins=residual_gate1_profile_bins,
-            gate1_lookup_path=residual_gate1_lookup_path,
-            gate1_lookup_margin=residual_gate1_lookup_margin,
-            force_whitened=residual_force_whitened,
             scope_member_limit=residual_scope_member_limit,
             stream_tile=residual_stream_tile,
             scope_bitset=residual_scope_bitset,
@@ -784,6 +657,9 @@ class RuntimeModel(BaseModel):
             level_cache_batching=residual_level_cache_batching,
             scope_cap_path=residual_scope_cap_path,
             scope_cap_default=residual_scope_cap_default,
+            scope_cap_output=residual_scope_cap_output,
+            scope_cap_percentile=residual_scope_cap_percentile,
+            scope_cap_margin=residual_scope_cap_margin,
             prefilter_enabled=residual_prefilter_enabled,
             prefilter_lookup_path=(
                 residual_prefilter_lookup_path or _DEFAULT_RESIDUAL_PREFILTER_LOOKUP

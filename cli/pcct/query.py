@@ -9,7 +9,7 @@ from covertreex.metrics import build_residual_backend, configure_residual_correl
 
 from .support.baseline_utils import run_baseline_comparisons
 from .support.benchmark_utils import QueryBenchmarkResult, benchmark_knn_latency
-from .support.runtime_utils import emit_engine_banner as _emit_engine_banner, gate_active_for_backend as _gate_active_for_backend
+from .support.runtime_utils import emit_engine_banner as _emit_engine_banner
 from tests.utils.datasets import gaussian_points
 
 from .execution import BenchmarkRun
@@ -39,8 +39,8 @@ def _run_residual_backend(options: "QueryCLIOptions", points: np.ndarray, *, con
         chunk_size=options.residual_chunk_size,
     )
     configure_residual_correlation(residual_backend, context=context)
-    gate_active = _gate_active_for_backend(residual_backend)
-    engine_label = "residual_serial" if gate_active else "residual_parallel"
+    gate_active = False
+    engine_label = "residual_parallel"
     return engine_label, gate_active
 
 
@@ -85,11 +85,11 @@ def execute_query_benchmark(options: "QueryCLIOptions", run: BenchmarkRun) -> Qu
         engine_label = "residual_lite"
         runtime_snapshot["runtime_traversal_engine"] = engine_label
         runtime_snapshot["runtime_gate_active"] = gate_flag
-        _emit_engine_banner(engine_label, gate_flag, thread_snapshot)
+        _emit_engine_banner(engine_label, thread_snapshot)
     elif options.metric != "residual":
         runtime_snapshot["runtime_traversal_engine"] = engine_label
         runtime_snapshot["runtime_gate_active"] = gate_flag
-        _emit_engine_banner(engine_label, gate_flag, thread_snapshot)
+        _emit_engine_banner(engine_label, thread_snapshot)
 
     points_np, queries_np = _generate_datasets(options)
 
@@ -97,7 +97,7 @@ def execute_query_benchmark(options: "QueryCLIOptions", run: BenchmarkRun) -> Qu
         engine_label, gate_flag = _run_residual_backend(options, points_np, context=context)
         runtime_snapshot["runtime_traversal_engine"] = engine_label
         runtime_snapshot["runtime_gate_active"] = gate_flag
-        _emit_engine_banner(engine_label, gate_flag, thread_snapshot)
+        _emit_engine_banner(engine_label, thread_snapshot)
     elif options.metric != "residual-lite":
         runtime_snapshot.setdefault("runtime_traversal_engine", engine_label)
         runtime_snapshot.setdefault("runtime_gate_active", gate_flag)

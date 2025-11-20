@@ -4,7 +4,6 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, Mapping, Sequence, Tuple
 
 from covertreex import config as cx_config
-from covertreex.metrics.residual.policy import ResidualPolicy
 from covertreex.runtime.model import RuntimeModel
 
 
@@ -26,32 +25,6 @@ def _active_runtime_config() -> cx_config.RuntimeConfig:
     if active is not None:
         return active.config
     return cx_config.RuntimeConfig.from_env()
-
-
-def _policy_to_overrides(policy: ResidualPolicy) -> Dict[str, Any]:
-    return {
-        "residual_gate1_enabled": policy.gate1_enabled,
-        "residual_gate1_alpha": policy.gate1_alpha,
-        "residual_gate1_margin": policy.gate1_margin,
-        "residual_gate1_eps": policy.gate1_eps,
-        "residual_gate1_audit": policy.gate1_audit,
-        "residual_gate1_radius_cap": policy.gate1_radius_cap,
-        "residual_gate1_band_eps": policy.gate1_band_eps,
-        "residual_gate1_keep_pct": policy.gate1_keep_pct,
-        "residual_gate1_prune_pct": policy.gate1_prune_pct,
-        "residual_radius_floor": policy.radius_floor,
-        "residual_scope_cap_path": policy.scope_cap_path,
-        "residual_scope_cap_default": policy.scope_cap_default,
-        "residual_gate1_profile_path": policy.gate1_profile_path,
-        "residual_gate1_profile_bins": policy.gate1_profile_bins,
-        "residual_gate1_lookup_path": policy.gate1_lookup_path,
-        "residual_gate1_lookup_margin": policy.gate1_lookup_margin,
-        "residual_prefilter_enabled": policy.prefilter_enabled,
-        "residual_prefilter_lookup_path": policy.prefilter_lookup_path,
-        "residual_prefilter_margin": policy.prefilter_margin,
-        "residual_prefilter_radius_cap": policy.prefilter_radius_cap,
-        "residual_prefilter_audit": policy.prefilter_audit,
-    }
 
 
 _ATTR_TO_FIELD = {
@@ -128,119 +101,29 @@ def _set_nested(payload: Dict[str, Any], path: Sequence[str], value: Any) -> Non
 
 @dataclass(frozen=True)
 class Residual:
-    """Optional residual-metric tuning knobs grouped for readability."""
-
-    policy: ResidualPolicy | None = None
-    gate1_enabled: bool | None = None
-    gate1_alpha: float | None = None
-    gate1_margin: float | None = None
-    gate1_eps: float | None = None
-    gate1_audit: bool | None = None
-    gate1_radius_cap: float | None = None
-    gate1_band_eps: float | None = None
-    gate1_keep_pct: float | None = None
-    gate1_prune_pct: float | None = None
+    """
+    Legacy wrapper for residual metric configuration.
+    
+    Most gate-related fields have been deprecated/removed.
+    """
     radius_floor: float | None = None
     scope_cap_path: str | None = None
     scope_cap_default: float | None = None
-    profile_path: str | None = None
-    profile_bins: int | None = None
-    lookup_path: str | None = None
-    lookup_margin: float | None = None
-    prefilter_enabled: bool | None = None
-    prefilter_lookup_path: str | None = None
-    prefilter_margin: float | None = None
-    prefilter_radius_cap: float | None = None
-    prefilter_audit: bool | None = None
 
-    def as_overrides(self, base_policy: ResidualPolicy | None = None) -> Dict[str, Any]:
-        policy = self.to_policy(base=base_policy)
-        return _policy_to_overrides(policy)
+    def as_overrides(self) -> Dict[str, Any]:
+        return {
+            "residual_radius_floor": self.radius_floor,
+            "residual_scope_cap_path": self.scope_cap_path,
+            "residual_scope_cap_default": self.scope_cap_default,
+        }
 
     @classmethod
     def from_config(cls, config: cx_config.RuntimeConfig) -> "Residual":
-        policy = ResidualPolicy.from_runtime(config)
         return cls(
-            policy=policy,
-            gate1_enabled=config.residual_gate1_enabled,
-            gate1_alpha=config.residual_gate1_alpha,
-            gate1_margin=config.residual_gate1_margin,
-            gate1_eps=config.residual_gate1_eps,
-            gate1_audit=config.residual_gate1_audit,
-            gate1_radius_cap=config.residual_gate1_radius_cap,
-            gate1_band_eps=config.residual_gate1_band_eps,
-            gate1_keep_pct=config.residual_gate1_keep_pct,
-            gate1_prune_pct=config.residual_gate1_prune_pct,
             radius_floor=config.residual_radius_floor,
             scope_cap_path=config.residual_scope_cap_path,
             scope_cap_default=config.residual_scope_cap_default,
-            profile_path=config.residual_gate1_profile_path,
-            profile_bins=config.residual_gate1_profile_bins,
-            lookup_path=config.residual_gate1_lookup_path,
-            lookup_margin=config.residual_gate1_lookup_margin,
-            prefilter_enabled=config.residual_prefilter_enabled,
-            prefilter_lookup_path=config.residual_prefilter_lookup_path,
-            prefilter_margin=config.residual_prefilter_margin,
-            prefilter_radius_cap=config.residual_prefilter_radius_cap,
-            prefilter_audit=config.residual_prefilter_audit,
         )
-
-    @classmethod
-    def from_policy(cls, policy: ResidualPolicy) -> "Residual":
-        return cls(
-            policy=policy,
-            gate1_enabled=policy.gate1_enabled,
-            gate1_alpha=policy.gate1_alpha,
-            gate1_margin=policy.gate1_margin,
-            gate1_eps=policy.gate1_eps,
-            gate1_audit=policy.gate1_audit,
-            gate1_radius_cap=policy.gate1_radius_cap,
-            gate1_band_eps=policy.gate1_band_eps,
-            gate1_keep_pct=policy.gate1_keep_pct,
-            gate1_prune_pct=policy.gate1_prune_pct,
-            radius_floor=policy.radius_floor,
-            scope_cap_path=policy.scope_cap_path,
-            scope_cap_default=policy.scope_cap_default,
-            profile_path=policy.gate1_profile_path,
-            profile_bins=policy.gate1_profile_bins,
-            lookup_path=policy.gate1_lookup_path,
-            lookup_margin=policy.gate1_lookup_margin,
-            prefilter_enabled=policy.prefilter_enabled,
-            prefilter_lookup_path=policy.prefilter_lookup_path,
-            prefilter_margin=policy.prefilter_margin,
-            prefilter_radius_cap=policy.prefilter_radius_cap,
-            prefilter_audit=policy.prefilter_audit,
-        )
-
-    def to_policy(self, base: ResidualPolicy | None = None) -> ResidualPolicy:
-        policy = self.policy or base
-        if policy is None:
-            policy = ResidualPolicy.from_runtime(_active_runtime_config())
-        updates: Dict[str, Any] = {}
-        _apply_if_present(updates, "gate1_enabled", self.gate1_enabled)
-        _apply_if_present(updates, "gate1_alpha", self.gate1_alpha)
-        _apply_if_present(updates, "gate1_margin", self.gate1_margin)
-        _apply_if_present(updates, "gate1_eps", self.gate1_eps)
-        _apply_if_present(updates, "gate1_audit", self.gate1_audit)
-        _apply_if_present(updates, "gate1_radius_cap", self.gate1_radius_cap)
-        _apply_if_present(updates, "gate1_band_eps", self.gate1_band_eps)
-        _apply_if_present(updates, "gate1_keep_pct", self.gate1_keep_pct)
-        _apply_if_present(updates, "gate1_prune_pct", self.gate1_prune_pct)
-        _apply_if_present(updates, "radius_floor", self.radius_floor)
-        _apply_if_present(updates, "scope_cap_path", self.scope_cap_path)
-        _apply_if_present(updates, "scope_cap_default", self.scope_cap_default)
-        _apply_if_present(updates, "gate1_profile_path", self.profile_path)
-        _apply_if_present(updates, "gate1_profile_bins", self.profile_bins)
-        _apply_if_present(updates, "gate1_lookup_path", self.lookup_path)
-        _apply_if_present(updates, "gate1_lookup_margin", self.lookup_margin)
-        _apply_if_present(updates, "prefilter_enabled", self.prefilter_enabled)
-        _apply_if_present(updates, "prefilter_lookup_path", self.prefilter_lookup_path)
-        _apply_if_present(updates, "prefilter_margin", self.prefilter_margin)
-        _apply_if_present(updates, "prefilter_radius_cap", self.prefilter_radius_cap)
-        _apply_if_present(updates, "prefilter_audit", self.prefilter_audit)
-        if not updates:
-            return policy
-        return replace(policy, **updates)
 
 
 @dataclass(frozen=True)
@@ -289,7 +172,8 @@ class Runtime:
     def to_model(self, base: RuntimeModel | None = None) -> RuntimeModel:
         base_model = base or RuntimeModel.from_env()
         payload = base_model.model_dump()
-        base_config = base_model.to_runtime_config()
+        # base_config unused in stripped version but kept for interface stability if needed
+        # base_config = base_model.to_runtime_config()
 
         for attr, field_name in _ATTR_TO_FIELD.items():
             value = getattr(self, attr)
@@ -300,10 +184,10 @@ class Runtime:
             self._apply_field(payload, field_name, value)
 
         if self.residual is not None:
-            base_policy = ResidualPolicy.from_runtime(base_config)
-            overrides = self.residual.as_overrides(base_policy=base_policy)
+            overrides = self.residual.as_overrides()
             for key, value in overrides.items():
-                self._apply_field(payload, key, value)
+                if value is not None:
+                    self._apply_field(payload, key, value)
 
         for key, value in self.extra.items():
             self._apply_field(payload, key, value)
