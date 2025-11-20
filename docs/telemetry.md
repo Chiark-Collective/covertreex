@@ -90,8 +90,7 @@ Sample Markdown output:
 - whitened time: 15.20 ms (78.5% of time)
 
 ### Gate metrics
-- candidates=4096 kept=3840 pruned=256 (6.2% pruned)
-- conflict pairwise reuse: 100.0% of batches
+(Deprecated/Removed in v2)
 
 # Measurement fields
 traversal_ms

@@ -1,5 +1,7 @@
 # Residual PCCT Build Optimisation — Living Plan
 
+> **Note:** The "Sparse Gated" strategy (Residual Gate 1) described in this plan was implemented, evaluated, and found ineffective (0% pruning). It has been removed from the codebase as of Nov 2025 in favor of an optimized "Dense" baseline. See `docs/RESIDUAL_GATE_POSTMORTEM.md` for details.
+
 _Last updated: 2025-11-10_
 
 This file tracks ongoing work on the residual-correlation PCCT build pipeline. It captures the current state, recent experiments, and the next concrete steps so anyone can pick up the thread quickly.

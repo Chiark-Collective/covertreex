@@ -66,7 +66,7 @@ new examples in `docs/examples/profile_workflows.md` illustrate how to:
 The `covertreex.api.Runtime` façade now mirrors every CLI flag (backend, precision, scope caps, residual gates, prefilters, stream tiling, etc.). For non-CLI consumers, configuration can still be driven by environment variables read during import, but the CLI is the source of truth for supported knobs. Highlights:
 
 - `Runtime(...).activate()` installs an in-process configuration without mutating `os.environ`.
-- All residual gate/prefilter settings (lookup paths, margins, audits, membership caps, forced whitening, etc.) are addressable via CLI flags or `Runtime` keyword arguments.
+- All residual settings (membership caps, forced whitening, etc.) are addressable via CLI flags or `Runtime` keyword arguments.
 - CLI runs always emit batch-level telemetry (`BenchmarkLogWriter`) unless `--no-log-file` is passed, so reproductions include scope budgets, kernel/whitened counters, and resource snapshots. Render those logs with `pcct telemetry render ...` for Markdown/JSON/CSV views.
 - Seed handling is unified through `Runtime.seeds` / `SeedPack`; reuse the same values (or `--global-seed`) to regenerate runs that should match byte-for-byte.
 
@@ -84,7 +84,7 @@ rt = Runtime(
     precision="float64",
     conflict_graph="grid",
     batch_order="hilbert",
-    residual=Residual(gate1_enabled=True, gate1_alpha=2.0),
+    residual=Residual(),
 )
 
 points = [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]

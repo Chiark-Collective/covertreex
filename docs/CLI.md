@@ -21,15 +21,6 @@ python -m cli.pcct query --help
 # dense Euclidean sweep
 python -m cli.pcct query --dimension 8 --tree-points 4096 --queries 1024 --k 8
 
-# residual audit with gate lookup and scope cap capture
-python -m cli.pcct query \
-  --metric residual \
-  --dimension 8 --tree-points 32768 --queries 1024 --batch-size 512 --k 8 \
-  --residual-gate lookup \
-  --residual-gate-lookup-path docs/data/residual_gate_profile_32768_caps.json \
-  --residual-scope-cap-output artifacts/residual_scope_caps.json \
-  --baseline both
-
 # build-only mode
 python -m cli.pcct build --dimension 8 --tree-points 65536 --batch-size 1024 --profile default
 
@@ -154,7 +145,6 @@ Seed overrides feed the `SeedPack` channels directly (`seeds.global`, `seeds.mis
 | **Benchmark shape** | Controls dataset geometry and build style. | `--dimension`, `--tree-points`, `--batch-size`, `--queries`, `--k`, `--seed`, `--build-mode`. |
 | **Runtime controls** | Mirrors `covertreex.api.Runtime` knobs. | `--profile`, `--set PATH=VALUE`, `--backend`, `--precision`, `--device/-d`, `--enable-numba/--disable-numba`, `--conflict-graph`, `--scope-chunk-target`, `--batch-order`, `--prefix-*`, `--global-seed`, `--mis-seed`, `--residual-grid-seed`. |
 | **Residual metric** | Synthetic backend + traversal caps. | `--residual-lengthscale`, `--residual-variance`, `--residual-inducing`, `--residual-stream-tile`, `--residual-scope-member-limit`, `--residual-scope-caps`, `--residual-scope-cap-output`, `--residual-force-whitened`. |
-| **Gate & prefilter** | Gate-1/prefilter lookup management. | `--residual-gate` (off/lookup), `--residual-gate-lookup-path`, `--residual-gate-margin/cap`, `--residual-gate-alpha/eps/band-eps`, `--residual-gate-profile-*`, `--residual-prefilter*`. |
 | **Telemetry & baselines** | Output paths + comparisons. | `--log-file`, `--no-log-file`, `--baseline` (none/sequential/gpboost/external/both/all). |
 
 Every flag can also be driven via `covertreex.api.Runtime` for programmatic scenarios; the CLI simply exposes them without touching environment variables.
@@ -162,7 +152,7 @@ Every flag can also be driven via `covertreex.api.Runtime` for programmatic scen
 ## Telemetry & reproducibility
 
 - By default, runs emit JSONL telemetry containing traversal/conflict timings, scope budgets, kernel vs. whitened counters, MIS iterations, and RSS deltas. Set `--log-file` to control the destination or `--no-log-file` to disable.
-- Residual runs can additionally emit per-level scope caps (`--residual-scope-cap-output`) and gate lookup profiles (`--residual-gate-profile-log`).
+- Residual runs can additionally emit per-level scope caps (`--residual-scope-cap-output`).
 - The helper `cli.queries.telemetry.initialise_cli_telemetry()` centralises log writer initialisation so the CLI and any future tools share the same behaviour. The Typer subcommand `pcct telemetry render LOG.jsonl --format md|csv|json --show fields` renders the resulting JSONL in human-friendly formats.
 - `python -m cli.pcct telemetry render ...` turns the JSONL stream into JSON/Markdown/CSV summaries (see `docs/telemetry.md` for schema details and sample output).
 

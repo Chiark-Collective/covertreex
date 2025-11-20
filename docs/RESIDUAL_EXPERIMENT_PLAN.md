@@ -1,5 +1,7 @@
 # Residual Experiment & Telemetry Plan
 
+> **Note:** The experiments regarding "Residual Gate 1" described here have concluded. The gate proved ineffective and has been removed. The codebase now focuses on the optimized dense baseline. See `docs/RESIDUAL_GATE_POSTMORTEM.md`.
+
 This plan translates the findings from `docs/RESIDUAL_SWEEP_BREAKDOWN.md`, `docs/residual_metric_notes.md`, and the associated source (`tools/run_residual_gold_sweep.py`, `covertreex/metrics/residual/*`, `covertreex/telemetry/logs.py`, `profiles/residual-*.yaml`) into structured experiment stories. Every change keeps the audited APIs intact (`cli.pcct`, `Runtime`, `BenchmarkLogWriter`) and treats the gold residual sweep as the reference surface.
 
 ## Context and Guardrails
