@@ -60,11 +60,14 @@ def _print_baseline_results(
         slowdown = (
             baseline.latency_ms / benchmark_result.latency_ms if benchmark_result.latency_ms else float("inf")
         )
+        cpu_time = (baseline.cpu_user_seconds or 0.0) + (baseline.cpu_system_seconds or 0.0)
         print(
             f"baseline[{baseline.name}] | build={baseline.build_seconds:.4f}s "
             f"time={baseline.elapsed_seconds:.4f}s "
             f"latency={baseline.latency_ms:.4f}ms "
             f"throughput={baseline.queries_per_second:,.1f} q/s "
+            f"cpu={cpu_time:.4f}s "
+            f"rss_delta={baseline.rss_delta_bytes / 1024 / 1024:.2f}MB "
             f"slowdown={slowdown:.3f}x"
         )
 
@@ -118,12 +121,15 @@ def execute_query_benchmark(options: "QueryCLIOptions", run: BenchmarkRun) -> Qu
         context=context,
     )
 
+    cpu_time = (result.cpu_user_seconds or 0.0) + (result.cpu_system_seconds or 0.0)
     print(
         f"pcct | build={result.build_seconds:.4f}s "
         f"queries={result.queries} k={result.k} "
         f"time={result.elapsed_seconds:.4f}s "
         f"latency={result.latency_ms:.4f}ms "
-        f"throughput={result.queries_per_second:,.1f} q/s"
+        f"throughput={result.queries_per_second:,.1f} q/s "
+        f"cpu={cpu_time:.4f}s "
+        f"rss_delta={result.rss_delta_bytes / 1024 / 1024:.2f}MB"
     )
 
     if options.baseline != "none":

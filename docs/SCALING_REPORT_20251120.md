@@ -2,8 +2,12 @@
 
 This report analyses the scaling behavior of **PCCT** versus `scikit-learn` (BallTree) and `scipy` (cKDTree) across varying dataset sizes ($N$) and dimensions ($D$).
 
-**Key Finding:**
-In high-dimensional spaces ($D=64$), PCCT provides **orders of magnitude higher throughput** (up to **100x**) compared to standard partitioning trees, which suffer from the curse of dimensionality.
+## Interactive Plots
+
+*   [Query Throughput vs Dataset Size](plots/scaling_throughput.html)
+*   [Build Time vs Dataset Size](plots/scaling_build_time.html)
+*   [Query Latency vs Dataset Size](plots/scaling_latency.html)
+*   [Memory Usage (RSS Delta)](plots/scaling_memory.html)
 
 ## 1. High-Dimensional Scaling ($D=64$)
 

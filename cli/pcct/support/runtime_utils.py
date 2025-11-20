@@ -1,12 +1,36 @@
 from __future__ import annotations
 
 import os
+import time
+import resource
+import psutil
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict
 
 from covertreex import config as cx_config
 from covertreex.core.tree import TreeBackend
 from covertreex.telemetry import artifact_root, resolve_artifact_path
+
+
+@contextmanager
+def measure_resources():
+    process = psutil.Process()
+    usage_start = resource.getrusage(resource.RUSAGE_SELF)
+    rss_start = process.memory_info().rss
+    start_time = time.perf_counter()
+    
+    stats = {}
+    yield stats
+    
+    end_time = time.perf_counter()
+    rss_end = process.memory_info().rss
+    usage_end = resource.getrusage(resource.RUSAGE_SELF)
+    
+    stats['wall'] = end_time - start_time
+    stats['user'] = usage_end.ru_utime - usage_start.ru_utime
+    stats['system'] = usage_end.ru_stime - usage_start.ru_stime
+    stats['rss_delta'] = rss_end - rss_start
 
 
 def ensure_thread_env_defaults() -> Dict[str, str]:

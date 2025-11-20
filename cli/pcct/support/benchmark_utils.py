@@ -14,7 +14,7 @@ from covertreex.queries.knn import knn
 from covertreex.telemetry import BenchmarkLogWriter, ResidualScopeCapRecorder
 from tests.utils.datasets import gaussian_points
 
-from .runtime_utils import resolve_backend
+from .runtime_utils import resolve_backend, measure_resources
 
 
 def _ensure_context(context: cx_config.RuntimeContext | None) -> cx_config.RuntimeContext:
@@ -32,6 +32,9 @@ class QueryBenchmarkResult:
     latency_ms: float
     queries_per_second: float
     build_seconds: float | None = None
+    cpu_user_seconds: float = 0.0
+    cpu_system_seconds: float = 0.0
+    rss_delta_bytes: int = 0
 
 
 def _generate_backend_points(
@@ -235,9 +238,11 @@ def benchmark_knn_latency(
         queries = backend.asarray(
             prebuilt_queries, dtype=backend.default_float
         )
-    start = time.perf_counter()
-    knn(tree, queries, k=k, context=resolved_context)
-    elapsed = time.perf_counter() - start
+    
+    with measure_resources() as query_stats:
+        knn(tree, queries, k=k, context=resolved_context)
+    
+    elapsed = query_stats['wall']
     qps = query_count / elapsed if elapsed > 0 else float("inf")
     latency = (elapsed / query_count) * 1e3 if query_count else 0.0
     return tree, QueryBenchmarkResult(
@@ -247,6 +252,9 @@ def benchmark_knn_latency(
         latency_ms=latency,
         queries_per_second=qps,
         build_seconds=tree_build_seconds,
+        cpu_user_seconds=query_stats['user'],
+        cpu_system_seconds=query_stats['system'],
+        rss_delta_bytes=query_stats['rss_delta'],
     )
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -19,6 +19,7 @@ from covertreex.baseline import (
     has_sklearn_baseline,
     has_scipy_baseline,
 )
+from .runtime_utils import measure_resources
 
 
 @dataclass(frozen=True)
@@ -28,43 +29,55 @@ class BaselineComparison:
     elapsed_seconds: float
     latency_ms: float
     queries_per_second: float
+    cpu_user_seconds: float = 0.0
+    cpu_system_seconds: float = 0.0
+    rss_delta_bytes: int = 0
 
 
 def _run_sequential_baseline(points: np.ndarray, queries: np.ndarray, *, k: int) -> BaselineComparison:
-    start_build = time.perf_counter()
-    tree = BaselineCoverTree.from_points(points)
-    build_seconds = time.perf_counter() - start_build
-    start = time.perf_counter()
-    tree.knn(queries, k=k, return_distances=False)
-    elapsed = time.perf_counter() - start
-    qps = queries.shape[0] / elapsed if elapsed > 0 else float("inf")
-    latency = (elapsed / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+    with measure_resources() as build_stats:
+        tree = BaselineCoverTree.from_points(points)
+    
+    with measure_resources() as query_stats:
+        tree.knn(queries, k=k, return_distances=False)
+        
+    qps = queries.shape[0] / query_stats['wall'] if query_stats['wall'] > 0 else float("inf")
+    latency = (query_stats['wall'] / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+    
     return BaselineComparison(
         name="sequential",
-        build_seconds=build_seconds,
-        elapsed_seconds=elapsed,
+        build_seconds=build_stats['wall'],
+        elapsed_seconds=query_stats['wall'],
         latency_ms=latency,
         queries_per_second=qps,
+        cpu_user_seconds=query_stats['user'],
+        cpu_system_seconds=query_stats['system'],
+        rss_delta_bytes=query_stats['rss_delta'],
     )
 
 
 def _run_external_baseline(points: np.ndarray, queries: np.ndarray, *, k: int) -> BaselineComparison:
     if not has_external_cover_tree():
         raise RuntimeError("External cover tree baseline requested but `covertree` is not available.")
-    start_build = time.perf_counter()
-    tree = ExternalCoverTreeBaseline.from_points(points)
-    build_seconds = time.perf_counter() - start_build
-    start = time.perf_counter()
-    tree.knn(queries, k=k, return_distances=False)
-    elapsed = time.perf_counter() - start
-    qps = queries.shape[0] / elapsed if elapsed > 0 else float("inf")
-    latency = (elapsed / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+        
+    with measure_resources() as build_stats:
+        tree = ExternalCoverTreeBaseline.from_points(points)
+        
+    with measure_resources() as query_stats:
+        tree.knn(queries, k=k, return_distances=False)
+        
+    qps = queries.shape[0] / query_stats['wall'] if query_stats['wall'] > 0 else float("inf")
+    latency = (query_stats['wall'] / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+    
     return BaselineComparison(
         name="external",
-        build_seconds=build_seconds,
-        elapsed_seconds=elapsed,
+        build_seconds=build_stats['wall'],
+        elapsed_seconds=query_stats['wall'],
         latency_ms=latency,
         queries_per_second=qps,
+        cpu_user_seconds=query_stats['user'],
+        cpu_system_seconds=query_stats['system'],
+        rss_delta_bytes=query_stats['rss_delta'],
     )
 
 
@@ -73,20 +86,25 @@ def _run_gpboost_baseline(points: np.ndarray, queries: np.ndarray, *, k: int) ->
         raise RuntimeError(
             "GPBoost cover tree baseline requested but 'numba' extra is not installed."
         )
-    start_build = time.perf_counter()
-    tree = GPBoostCoverTreeBaseline.from_points(points)
-    build_seconds = time.perf_counter() - start_build
-    start = time.perf_counter()
-    tree.knn(queries, k=k, return_distances=False)
-    elapsed = time.perf_counter() - start
-    qps = queries.shape[0] / elapsed if elapsed > 0 else float("inf")
-    latency = (elapsed / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+        
+    with measure_resources() as build_stats:
+        tree = GPBoostCoverTreeBaseline.from_points(points)
+        
+    with measure_resources() as query_stats:
+        tree.knn(queries, k=k, return_distances=False)
+        
+    qps = queries.shape[0] / query_stats['wall'] if query_stats['wall'] > 0 else float("inf")
+    latency = (query_stats['wall'] / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+    
     return BaselineComparison(
         name="gpboost",
-        build_seconds=build_seconds,
-        elapsed_seconds=elapsed,
+        build_seconds=build_stats['wall'],
+        elapsed_seconds=query_stats['wall'],
         latency_ms=latency,
         queries_per_second=qps,
+        cpu_user_seconds=query_stats['user'],
+        cpu_system_seconds=query_stats['system'],
+        rss_delta_bytes=query_stats['rss_delta'],
     )
 
 
@@ -95,20 +113,25 @@ def _run_mlpack_baseline(points: np.ndarray, queries: np.ndarray, *, k: int) -> 
         raise RuntimeError(
             "mlpack cover tree baseline requested but mlpack bindings are not installed."
         )
-    start_build = time.perf_counter()
-    tree = MlpackCoverTreeBaseline.from_points(points)
-    build_seconds = time.perf_counter() - start_build
-    start = time.perf_counter()
-    tree.knn(queries, k=k, return_distances=False)
-    elapsed = time.perf_counter() - start
-    qps = queries.shape[0] / elapsed if elapsed > 0 else float("inf")
-    latency = (elapsed / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+        
+    with measure_resources() as build_stats:
+        tree = MlpackCoverTreeBaseline.from_points(points)
+        
+    with measure_resources() as query_stats:
+        tree.knn(queries, k=k, return_distances=False)
+        
+    qps = queries.shape[0] / query_stats['wall'] if query_stats['wall'] > 0 else float("inf")
+    latency = (query_stats['wall'] / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+    
     return BaselineComparison(
         name="mlpack",
-        build_seconds=build_seconds,
-        elapsed_seconds=elapsed,
+        build_seconds=build_stats['wall'],
+        elapsed_seconds=query_stats['wall'],
         latency_ms=latency,
         queries_per_second=qps,
+        cpu_user_seconds=query_stats['user'],
+        cpu_system_seconds=query_stats['system'],
+        rss_delta_bytes=query_stats['rss_delta'],
     )
 
 
@@ -117,20 +140,25 @@ def _run_sklearn_baseline(points: np.ndarray, queries: np.ndarray, *, k: int) ->
         raise RuntimeError(
             "scikit-learn baseline requested but scikit-learn is not installed."
         )
-    start_build = time.perf_counter()
-    tree = ScikitLearnBaseline.from_points(points, algorithm="ball_tree")
-    build_seconds = time.perf_counter() - start_build
-    start = time.perf_counter()
-    tree.knn(queries, k=k, return_distances=False)
-    elapsed = time.perf_counter() - start
-    qps = queries.shape[0] / elapsed if elapsed > 0 else float("inf")
-    latency = (elapsed / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+        
+    with measure_resources() as build_stats:
+        tree = ScikitLearnBaseline.from_points(points, algorithm="ball_tree")
+        
+    with measure_resources() as query_stats:
+        tree.knn(queries, k=k, return_distances=False)
+        
+    qps = queries.shape[0] / query_stats['wall'] if query_stats['wall'] > 0 else float("inf")
+    latency = (query_stats['wall'] / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+    
     return BaselineComparison(
         name="sklearn_balltree",
-        build_seconds=build_seconds,
-        elapsed_seconds=elapsed,
+        build_seconds=build_stats['wall'],
+        elapsed_seconds=query_stats['wall'],
         latency_ms=latency,
         queries_per_second=qps,
+        cpu_user_seconds=query_stats['user'],
+        cpu_system_seconds=query_stats['system'],
+        rss_delta_bytes=query_stats['rss_delta'],
     )
 
 
@@ -139,20 +167,25 @@ def _run_scipy_baseline(points: np.ndarray, queries: np.ndarray, *, k: int) -> B
         raise RuntimeError(
             "scipy baseline requested but scipy is not installed."
         )
-    start_build = time.perf_counter()
-    tree = ScipyBaseline.from_points(points)
-    build_seconds = time.perf_counter() - start_build
-    start = time.perf_counter()
-    tree.knn(queries, k=k, return_distances=False)
-    elapsed = time.perf_counter() - start
-    qps = queries.shape[0] / elapsed if elapsed > 0 else float("inf")
-    latency = (elapsed / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+        
+    with measure_resources() as build_stats:
+        tree = ScipyBaseline.from_points(points)
+        
+    with measure_resources() as query_stats:
+        tree.knn(queries, k=k, return_distances=False)
+        
+    qps = queries.shape[0] / query_stats['wall'] if query_stats['wall'] > 0 else float("inf")
+    latency = (query_stats['wall'] / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+    
     return BaselineComparison(
         name="scipy_ckdtree",
-        build_seconds=build_seconds,
-        elapsed_seconds=elapsed,
+        build_seconds=build_stats['wall'],
+        elapsed_seconds=query_stats['wall'],
         latency_ms=latency,
         queries_per_second=qps,
+        cpu_user_seconds=query_stats['user'],
+        cpu_system_seconds=query_stats['system'],
+        rss_delta_bytes=query_stats['rss_delta'],
     )
 
 
