@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "covertreex"
@@ -50,16 +50,9 @@ viz = [
 homepage = "https://github.com/chiark/cover-tree"
 repository = "https://github.com/chiark/cover-tree"
 
-[tool.setuptools]
-package-dir = {"" = "."}
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["covertreex*", "profiles*"]
-
-[tool.setuptools.package-data]
-"covertreex" = ["py.typed"]
-"profiles" = ["*.yaml"]
+[tool.maturin]
+python-source = "."
+module-name = "covertreex_backend"
 
 [tool.ruff]
 line-length = 100
