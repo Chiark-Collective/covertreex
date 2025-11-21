@@ -165,42 +165,34 @@ def residual_knn_query(
         p_diag = host_backend.p_diag
         v_norm_sq = host_backend.v_norm_sq
         
+        # Handle Lengthscales (Scalar or ARD)
+        dim = kernel_coords.shape[1]
+        if np.ndim(rbf_ls) == 0:
+            ls_scalar = float(rbf_ls)
+            ls_sq_arr = np.full(dim, ls_scalar**2, dtype=np.float64)
+        else:
+            ls_arr = np.asarray(rbf_ls, dtype=np.float64)
+            # Flatten to ensure 1D check
+            if ls_arr.ndim != 1: ls_arr = ls_arr.flatten()
+            
+            if ls_arr.size == 1:
+                # Broadcast
+                ls_sq_arr = np.full(dim, ls_arr.item()**2, dtype=np.float64)
+            elif ls_arr.size == dim:
+                # ARD
+                ls_sq_arr = ls_arr**2
+            else:
+                raise ValueError(f"RBF lengthscale array size {ls_arr.size} does not match dimension {dim}.")
+        
         for q_idx, q_dataset_idx in enumerate(query_indices):
-            # Numba Call
             indices, dists = residual_knn_search_numba(
-                children_np,
-                next_cache_np,
-                parents_np,
-                node_to_dataset,
-                v_matrix,
-                p_diag,
-                v_norm_sq,
-                kernel_coords,
-                float(rbf_var),
-                float(rbf_ls),
-                int(q_dataset_idx),
-                int(k),
-                heap_keys,
-                heap_vals,
-                heap_extras,
-                knn_keys,
-                knn_indices,
-                visited_bitset
+                children_np, next_cache_np, parents_np,
+                node_to_dataset, v_matrix, p_diag, v_norm_sq,
+                kernel_coords, float(rbf_var), ls_sq_arr,
+                int(q_dataset_idx), int(k),
+                heap_keys, heap_vals, heap_extras,
+                knn_keys, knn_indices, visited_bitset
             )
-            # Result indices are Node Indices?
-            # Wait, `_update_knn_sorted` stores `node_idx`.
-            # But standard KNN returns DATASET indices usually?
-            # No, `knn` usually returns indices into the tree?
-            # The standard `_knn_impl` returns `indices_arr`. `_single_query_knn` returns `indices` from `best_heap`.
-            # `best_heap` stores `node_idx`.
-            # So we return Node Indices.
-            # BUT, standard `knn` wrapper returns `sorted_indices`.
-            # Users usually expect indices into the dataset if tree.points corresponds to dataset.
-            # If `residual_knn_search_numba` returns node indices, we are consistent with standard `knn`.
-            # But wait, `residual_knn_query` in Python returned `batch_nodes` which were node indices?
-            # No, `_single_query_residual_knn` pushed `int(root)` (node idx) to heap.
-            # And returned `indices` from heap. So yes, Node Indices.
-            # OK.
             results_indices.append(indices.copy())
             results_distances.append(dists.copy())
             
