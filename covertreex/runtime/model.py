@@ -21,6 +21,12 @@ try:
 except ImportError:
     _NUMBA_AVAILABLE = False
 
+try:
+    import covertreex_backend
+    _RUST_AVAILABLE = True
+except ImportError:
+    _RUST_AVAILABLE = False
+
 _LOGGER = logging.getLogger("covertreex")
 _FALLBACK_CPU_DEVICE = ("cpu:0",)
 
@@ -290,6 +296,7 @@ class RuntimeModel(BaseModel):
     precision: str = "float64"
     devices: Tuple[str, ...] = Field(default_factory=tuple)
     enable_numba: bool = False
+    enable_rust: bool = False
     enable_sparse_traversal: bool = False
     conflict_graph_impl: str = "dense"
     scope_segment_dedupe: bool = True
@@ -372,6 +379,7 @@ class RuntimeModel(BaseModel):
             precision=self.precision,
             devices=self.devices,
             enable_numba=self.enable_numba,
+            enable_rust=self.enable_rust,
             enable_sparse_traversal=self.enable_sparse_traversal,
             enable_diagnostics=diagnostics.enabled,
             log_level=diagnostics.log_level,
@@ -457,6 +465,7 @@ class RuntimeModel(BaseModel):
             precision=legacy.precision,
             devices=legacy.devices,
             enable_numba=legacy.enable_numba,
+            enable_rust=legacy.enable_rust,
             enable_sparse_traversal=legacy.enable_sparse_traversal,
             conflict_graph_impl=legacy.conflict_graph_impl,
             scope_segment_dedupe=legacy.scope_segment_dedupe,
@@ -490,6 +499,9 @@ class RuntimeModel(BaseModel):
         devices = _resolve_jax_devices(requested_devices) if backend == "jax" else ()
         enable_numba = _bool_from_env(
             source.get("COVERTREEX_ENABLE_NUMBA"), default=_NUMBA_AVAILABLE
+        )
+        enable_rust = _bool_from_env(
+            source.get("COVERTREEX_ENABLE_RUST"), default=_RUST_AVAILABLE
         )
         enable_sparse_traversal = _bool_from_env(
             source.get("COVERTREEX_ENABLE_SPARSE_TRAVERSAL"), default=False

@@ -90,9 +90,10 @@ pub fn batch_knn_query(
 fn single_knn_query(
     tree: &CoverTreeData,
     metric: &dyn Metric,
-    q_point: ndarray::ArrayView1<f32>,
+    q_point_view: ndarray::ArrayView1<f32>,
     k: usize,
 ) -> (Vec<i64>, Vec<f32>) {
+    let q_point = q_point_view.as_slice().unwrap();
     let mut candidate_heap = BinaryHeap::new();
     let mut result_heap: BinaryHeap<Neighbor> = BinaryHeap::new();
     

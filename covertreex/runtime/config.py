@@ -55,6 +55,7 @@ class RuntimeConfig:
     precision: str
     devices: Tuple[str, ...]
     enable_numba: bool
+    enable_rust: bool
     enable_sparse_traversal: bool
     enable_diagnostics: bool
     log_level: str
@@ -270,6 +271,7 @@ def describe_runtime() -> Dict[str, Any]:
         "devices": config.devices,
         "primary_platform": config.primary_platform,
         "enable_numba": config.enable_numba,
+        "enable_rust": config.enable_rust,
         "enable_sparse_traversal": config.enable_sparse_traversal,
         "enable_diagnostics": config.enable_diagnostics,
         "log_level": config.log_level,

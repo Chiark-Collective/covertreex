@@ -24,6 +24,7 @@ class QueryCLIOptions:
     precision: str | None = None
     devices: Tuple[str, ...] | None = None
     enable_numba: bool | None = None
+    enable_rust: bool | None = None
     enable_sparse_traversal: bool | None = None
     diagnostics: bool | None = None
     log_level: str | None = None

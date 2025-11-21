@@ -33,6 +33,7 @@ _ATTR_TO_FIELD = {
     "metric": "metric",
     "devices": "devices",
     "enable_numba": "enable_numba",
+    "enable_rust": "enable_rust",
     "enable_sparse_traversal": "enable_sparse_traversal",
     "diagnostics": "enable_diagnostics",
     "log_level": "log_level",
@@ -135,6 +136,7 @@ class Runtime:
     metric: str | None = None
     devices: Tuple[str, ...] | None = None
     enable_numba: bool | None = None
+    enable_rust: bool | None = None
     enable_sparse_traversal: bool | None = None
     diagnostics: bool | None = None
     log_level: str | None = None
@@ -221,6 +223,7 @@ class Runtime:
             "batch_order": config.batch_order_strategy,
             "prefix_schedule": config.prefix_schedule,
             "enable_numba": config.enable_numba,
+            "enable_rust": config.enable_rust,
             "enable_sparse_traversal": config.enable_sparse_traversal,
             "enable_diagnostics": config.enable_diagnostics,
             "residual_scope_member_limit": config.residual_scope_member_limit,
@@ -271,6 +274,7 @@ class Runtime:
             metric=config.metric,
             devices=config.devices,
             enable_numba=config.enable_numba,
+            enable_rust=config.enable_rust,
             enable_sparse_traversal=config.enable_sparse_traversal,
             diagnostics=config.enable_diagnostics,
             log_level=config.log_level,

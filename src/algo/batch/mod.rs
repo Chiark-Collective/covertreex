@@ -14,13 +14,19 @@ fn compute_candidate_conflicts(
     let n = points.nrows();
     (0..n).into_par_iter()
         .flat_map_iter(|i| {
-            let row_i = points.row(i);
+            // Don't compute row_i here to avoid lifetime issues with returning iterator
+            // Capture points reference instead
             (i + 1..n).filter_map(move |j| {
-                let d = metric.distance(row_i, points.row(j));
+                let row_i_view = points.row(i);
+                let row_i = row_i_view.as_slice().unwrap();
+                
+                let row_j_view = points.row(j);
+                let row_j = row_j_view.as_slice().unwrap();
+                
+                let d = metric.distance(row_i, row_j);
                 if d <= radius {
                     Some((i, j))
-                }
-                else {
+                } else {
                     None
                 }
             })
@@ -34,7 +40,6 @@ pub fn batch_insert(
     metric: &dyn Metric,
 ) {
     // 0. Append all points to tree with dummy level
-
     let start_idx = tree.len();
     for row in batch.outer_iter() {
         tree.add_point(row, i32::MIN, -1);
@@ -137,7 +142,8 @@ pub fn batch_insert(
             let n_far = far_candidates.len();
             let mut far_points = Array2::<f32>::zeros((n_far, tree.dimension));
             for (i, &idx) in far_candidates.iter().enumerate() {
-                far_points.row_mut(i).assign(&tree.get_point_row(idx));
+                // Use copy_from_slice for fast copy
+                far_points.row_mut(i).as_slice_mut().unwrap().copy_from_slice(tree.get_point_row(idx));
             }
             
             let conflicts = compute_candidate_conflicts(&far_points, radius, metric);
@@ -146,12 +152,12 @@ pub fn batch_insert(
             
             // Identify Leaders
             let mut leaders = Vec::new();
-            let mut leader_indices = Vec::new(); // Index in far_candidates
+            // let mut leader_indices = Vec::new(); // Index in far_candidates - Unused
             
             for (i, &is_leader) in mis_mask.iter().enumerate() {
                 if is_leader {
                     leaders.push(far_candidates[i]);
-                    leader_indices.push(i);
+                    // leader_indices.push(i);
                     
                     let q_idx = far_candidates[i];
                     tree.set_level(q_idx, current_level);
@@ -171,9 +177,6 @@ pub fn batch_insert(
             ).unwrap();
             
             // For each non-leader, find covering leader
-            // This can be parallelized
-            // We need to map back to next_candidates
-            
             // Collect non-leaders to process
             let non_leader_indices: Vec<usize> = mis_mask.iter().enumerate()
                 .filter(|(_, &is_l)| !is_l)
@@ -184,36 +187,41 @@ pub fn batch_insert(
                 .map(|&i| {
                     let q_idx = far_candidates[i];
                     let q_point = tree.get_point_row(q_idx);
-                    let mut covered_by = Vec::new();
-                    // Check all leaders
-                    for (l_i, &l_idx) in leaders.iter().enumerate() {
-                        if metric.distance(q_point, leader_points_arr.row(l_i)) <= radius {
-                            covered_by.push(l_idx);
+                    // Greedy scan inside loop
+                    let mut best_dist = f32::MAX;
+                    let mut best_leader = usize::MAX;
+                    
+                    for l_i in 0..leaders.len() {
+                        let l_point_view = leader_points_arr.row(l_i);
+                        let l_point = l_point_view.as_slice().unwrap();
+                        let d = metric.distance(q_point, l_point);
+                        if d <= radius && d < best_dist {
+                            best_dist = d;
+                            best_leader = leaders[l_i];
                         }
                     }
-                    covered_by
+                    
+                    if best_leader != usize::MAX {
+                        vec![best_leader]
+                    } else {
+                        Vec::<usize>::new()
+                    }
                 })
                 .collect();
                 
             // Push non-leaders to next
             for (k, &i) in non_leader_indices.iter().enumerate() {
                 let q_idx = far_candidates[i];
-                let covered_by = &non_leader_results[k];
+                let covered_by: &Vec<usize> = &non_leader_results[k];
                 if !covered_by.is_empty() {
                     next_candidates.push(q_idx);
                     next_active_sets.push(covered_by.clone());
                 } else {
-                    // Should not happen if MIS/Conflict is correct?
-                    // Unless rounding errors?
-                    // Force insert or drop? 
-                    // For Phase 3, force insert as leaf later?
-                    // Or force link to parent?
-                    // Let's add to next but keep active set from before?
-                    // Re-use parent cover? No, "Far" means not covered by parents.
-                    // So it must be covered by new nodes.
-                    // If not covered, it's an Orphan.
-                    // Panic? Or log.
-                    // eprintln!("Orphan node {}", q_idx);
+                    // Orphan - treat as 'far' again? No, they are skipped for this level.
+                    // effectively dropped from insertion at this level, pushed to next?
+                    // But not added to next_candidates. So they are dropped from candidates list.
+                    // They remain in tree with i32::MIN.
+                    // This is correct for "failed to insert".
                 }
             }
         }

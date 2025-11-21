@@ -52,10 +52,10 @@ impl CoverTreeData {
         ArrayView2::from_shape((1, self.dimension), &self.points[start..end]).unwrap()
     }
     
-    pub fn get_point_row(&self, idx: usize) -> ndarray::ArrayView1<'_, f32> {
+    pub fn get_point_row(&self, idx: usize) -> &[f32] {
         let start = idx * self.dimension;
         let end = start + self.dimension;
-        ArrayView1::from_shape((self.dimension,), &self.points[start..end]).unwrap()
+        &self.points[start..end]
     }
     
     pub fn add_point(&mut self, point: ArrayView1<f32>, level: i32, parent: i64) -> usize {

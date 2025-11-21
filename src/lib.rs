@@ -54,12 +54,19 @@ impl CoverTreeWrapper {
         rbf_ls: numpy::PyReadonlyArray1<f32>,
     ) -> PyResult<()> {
         let batch_view = batch_indices.as_array();
+        
+        let p_diag_arr = p_diag.as_array();
+        let p_diag_slice = p_diag_arr.as_slice().unwrap();
+        
+        let rbf_ls_arr = rbf_ls.as_array();
+        let rbf_ls_slice = rbf_ls_arr.as_slice().unwrap();
+        
         let metric = ResidualMetric {
             v_matrix: v_matrix.as_array(),
-            p_diag: p_diag.as_array(),
+            p_diag: p_diag_slice,
             coords: coords.as_array(),
             rbf_var,
-            rbf_ls_sq: rbf_ls.as_array(),
+            rbf_ls_sq: rbf_ls_slice,
         };
         batch_insert(&mut self.data, batch_view, &metric);
         Ok(())
@@ -112,12 +119,15 @@ impl CoverTreeWrapper {
         k: usize,
     ) -> PyResult<(Bound<'py, numpy::PyArray2<i64>>, Bound<'py, numpy::PyArray2<f32>>)> {
         
+        let p_diag_arr = p_diag.as_array();
+        let rbf_ls_arr = rbf_ls.as_array();
+        
         let metric = ResidualMetric {
             v_matrix: v_matrix.as_array(),
-            p_diag: p_diag.as_array(),
+            p_diag: p_diag_arr.as_slice().unwrap(),
             coords: coords.as_array(),
             rbf_var,
-            rbf_ls_sq: rbf_ls.as_array(), // Assumes squared passed from Python
+            rbf_ls_sq: rbf_ls_arr.as_slice().unwrap(),
         };
         
         let (indices, dists) = batch_residual_knn_query(
