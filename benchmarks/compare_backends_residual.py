@@ -58,7 +58,7 @@ def prepare_tree(
     runtime_cfg = covertreex.config.runtime_config()
     cfg_common = dataclasses.replace(
         runtime_cfg,
-        metric="euclidean",
+        metric="residual_correlation",
         precision=dtype_label,
         enable_numba=True,
         enable_rust=False,
@@ -66,7 +66,7 @@ def prepare_tree(
         enable_diagnostics=False,
         log_level="WARNING",
         batch_order_strategy="natural",
-        residual_use_static_euclidean_tree=True,
+        residual_use_static_euclidean_tree=False,
     )
     covertreex.config.configure_runtime(cfg_common)
     object.__setattr__(backend, "rbf_variance", 1.0)
