@@ -180,7 +180,7 @@ def main():
 
         if row["d"] == 64 and row["n"] == max(SCALES) and row["k"] == 10:
 
-             print(f"Impl: {row['impl']:<20} QPS: {row['qps']:, .1f} RSS: {row['rss_mb']}MB")
+             print(f"Impl: {row['impl']:<20} QPS: {row['qps']:,.1f} RSS: {row['rss_mb']}MB")
 
 if __name__ == "__main__":
     main()

@@ -90,3 +90,18 @@ This list is reprioritised to focus on the configurations that already deliver â
 ### Documentation deltas
 - **Goal:** After the benchmark refresh, update `docs/CORE_IMPLEMENTATIONS.md` and summarise outcomes in the archived audit doc.
 - **Status:** Blocked on the refreshed artefacts.
+
+## D. VIF Scalability (Point Clouds)
+
+### Static Tree Validation (Euclidean Pruning)
+- **Goal:** Rigorously validate the "Static Tree" hypothesis: that the Euclidean tree structure provides a valid and efficient branch-and-bound index for the dynamic Residual Correlation metric.
+- **Why:** We cannot afford to rebuild the tree every step (current Python build is too slow). The Static Tree strategy is our primary path to viability.
+- **Action:** Create a dedicated test suite that compares "Static Tree + Dynamic Query" accuracy vs Brute Force for synthetic and real VIF kernels.
+
+### Low-Dimensional Build Optimization
+- **Goal:** Investigate and fix the pathological build time for Low-D datasets ($N=200k, D=8 \approx 10$ mins vs $D=64 \approx 1$ min).
+- **Hypothesis:** "Crowding" in low dimensions forces deeper trees and exposes Python interpreter overhead in node management. Tuning `base` (expansion constant) or switching to a flatter structure might help.
+
+### Plan B: Flat Array Tree (Numba Port)
+- **Goal:** If Static Tree pruning is invalid or too loose, we must enable the "Rebuild" strategy (like GPBoost). This requires porting the **entire tree structure** (not just distances) to a Numba-friendly Flat Array format (CSR-like) to drop build times from ~600s to ~10s.
+- **Status:** Deferred until Static Tree is proven insufficient.

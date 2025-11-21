@@ -180,4 +180,5 @@ Automated agents or contributors must follow `AGENTS.md`: do **not** remove code
 
 - `PARALLEL_COMPRESSED_PLAN.md` &mdash; architecture, milestones, and testing ladder.
 - `docs/API.md` &mdash; public runtime/PCCT façade usage and CLI entrypoints.
+- `docs/feature_static_tree_dynamic_query.md` &mdash; experimental Static Tree/Dynamic Query strategy for VIF.
 - `notes/` &mdash; upstream context and domain-specific constraints gathered during planning.

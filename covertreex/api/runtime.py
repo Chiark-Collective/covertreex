@@ -52,7 +52,6 @@ _ATTR_TO_FIELD = {
     "prefix_growth_small": "prefix_growth_small",
     "prefix_growth_mid": "prefix_growth_mid",
     "prefix_growth_large": "prefix_growth_large",
-    "residual_force_whitened": "residual_force_whitened",
     "residual_scope_member_limit": "residual_scope_member_limit",
     "residual_stream_tile": "residual_stream_tile",
     "residual_scope_bitset": "residual_scope_bitset",
@@ -60,6 +59,7 @@ _ATTR_TO_FIELD = {
     "residual_dynamic_query_block": "residual_dynamic_query_block",
     "residual_dense_scope_streamer": "residual_dense_scope_streamer",
     "residual_level_cache_batching": "residual_level_cache_batching",
+    "residual_use_static_euclidean_tree": "residual_use_static_euclidean_tree",
 }
 
 
@@ -155,7 +155,6 @@ class Runtime:
     prefix_growth_mid: float | None = None
     prefix_growth_large: float | None = None
     residual: Residual | None = None
-    residual_force_whitened: bool | None = None
     residual_scope_member_limit: int | None = None
     residual_stream_tile: int | None = None
     residual_scope_bitset: bool | None = None
@@ -163,6 +162,7 @@ class Runtime:
     residual_dynamic_query_block: bool | None = None
     residual_dense_scope_streamer: bool | None = None
     residual_level_cache_batching: bool | None = None
+    residual_use_static_euclidean_tree: bool | None = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def _apply_field(self, payload: Dict[str, Any], field: str, value: Any) -> None:
@@ -223,7 +223,6 @@ class Runtime:
             "enable_numba": config.enable_numba,
             "enable_sparse_traversal": config.enable_sparse_traversal,
             "enable_diagnostics": config.enable_diagnostics,
-            "residual_force_whitened": config.residual_force_whitened,
             "residual_scope_member_limit": config.residual_scope_member_limit,
             "residual_stream_tile": config.residual_stream_tile,
             "residual_dense_scope_streamer": config.residual_dense_scope_streamer,
@@ -292,7 +291,6 @@ class Runtime:
             prefix_growth_mid=config.prefix_growth_mid,
             prefix_growth_large=config.prefix_growth_large,
             residual=residual,
-            residual_force_whitened=config.residual_force_whitened,
             residual_scope_member_limit=config.residual_scope_member_limit,
             residual_stream_tile=config.residual_stream_tile,
             residual_scope_bitset=config.residual_scope_bitset,
@@ -300,4 +298,5 @@ class Runtime:
             residual_dense_scope_streamer=config.residual_dense_scope_streamer,
             residual_dynamic_query_block=config.residual_dynamic_query_block,
             residual_level_cache_batching=config.residual_level_cache_batching,
+            residual_use_static_euclidean_tree=config.residual_use_static_euclidean_tree,
         )
