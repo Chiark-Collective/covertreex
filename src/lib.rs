@@ -4,7 +4,7 @@ use crate::tree::CoverTreeData;
 use crate::algo::batch::batch_insert;
 use crate::algo::batch_knn_query;
 use crate::algo::batch_residual_knn_query;
-use crate::metric::ResidualMetric;
+use crate::metric::{ResidualMetric, Euclidean};
 
 mod tree;
 mod metric;
@@ -18,7 +18,7 @@ struct CoverTreeWrapper {
 
 #[pymethods]
 impl CoverTreeWrapper {
-    // ... existing new/insert ...
+    // ... existing new ...
     #[new]
     fn new(
         points: PyReadonlyArray2<f32>,
@@ -38,7 +38,30 @@ impl CoverTreeWrapper {
     
     fn insert(&mut self, batch: PyReadonlyArray2<f32>) -> PyResult<()> {
         let batch_view = batch.as_array();
-        batch_insert(&mut self.data, batch_view);
+        let metric = Euclidean;
+        batch_insert(&mut self.data, batch_view, &metric);
+        Ok(())
+    }
+    
+    #[allow(clippy::too_many_arguments)]
+    fn insert_residual(
+        &mut self, 
+        batch_indices: PyReadonlyArray2<f32>,
+        v_matrix: PyReadonlyArray2<f32>,
+        p_diag: numpy::PyReadonlyArray1<f32>,
+        coords: PyReadonlyArray2<f32>,
+        rbf_var: f32,
+        rbf_ls: numpy::PyReadonlyArray1<f32>,
+    ) -> PyResult<()> {
+        let batch_view = batch_indices.as_array();
+        let metric = ResidualMetric {
+            v_matrix: v_matrix.as_array(),
+            p_diag: p_diag.as_array(),
+            coords: coords.as_array(),
+            rbf_var,
+            rbf_ls_sq: rbf_ls.as_array(),
+        };
+        batch_insert(&mut self.data, batch_view, &metric);
         Ok(())
     }
 

@@ -1,13 +1,16 @@
 use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 use crate::tree::CoverTreeData;
-use crate::metric::{Metric, Euclidean};
+use crate::metric::Metric;
 use crate::algo::batch::mis::compute_mis_greedy;
 
 pub mod mis;
 
-fn compute_candidate_conflicts(points: &Array2<f32>, radius: f32) -> Vec<(usize, usize)> {
-    let metric = Euclidean;
+fn compute_candidate_conflicts(
+    points: &Array2<f32>, 
+    radius: f32, 
+    metric: &dyn Metric
+) -> Vec<(usize, usize)> {
     let n = points.nrows();
     (0..n).into_par_iter()
         .flat_map_iter(|i| {
@@ -16,7 +19,8 @@ fn compute_candidate_conflicts(points: &Array2<f32>, radius: f32) -> Vec<(usize,
                 let d = metric.distance(row_i, points.row(j));
                 if d <= radius {
                     Some((i, j))
-                } else {
+                }
+                else {
                     None
                 }
             })
@@ -27,8 +31,10 @@ fn compute_candidate_conflicts(points: &Array2<f32>, radius: f32) -> Vec<(usize,
 pub fn batch_insert(
     tree: &mut CoverTreeData,
     batch: ArrayView2<f32>,
+    metric: &dyn Metric,
 ) {
     // 0. Append all points to tree with dummy level
+
     let start_idx = tree.len();
     for row in batch.outer_iter() {
         tree.add_point(row, i32::MIN, -1);
@@ -58,7 +64,6 @@ pub fn batch_insert(
     let root_idx = 0; 
     let mut active_sets: Vec<Vec<usize>> = vec![vec![root_idx]; candidates.len()];
     
-    let metric = Euclidean;
     let mut current_level: i32 = tree.max_level - 1;
     let min_level: i32 = tree.min_level;
     
@@ -135,7 +140,7 @@ pub fn batch_insert(
                 far_points.row_mut(i).assign(&tree.get_point_row(idx));
             }
             
-            let conflicts = compute_candidate_conflicts(&far_points, radius);
+            let conflicts = compute_candidate_conflicts(&far_points, radius, metric);
             let priorities = vec![1.0; n_far];
             let mis_mask = compute_mis_greedy(n_far, &conflicts, &priorities);
             
