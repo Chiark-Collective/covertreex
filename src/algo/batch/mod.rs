@@ -3,14 +3,18 @@ use rayon::prelude::*;
 use crate::tree::CoverTreeData;
 use crate::metric::Metric;
 use crate::algo::batch::mis::compute_mis_greedy;
+use num_traits::Float;
+use std::fmt::Debug;
 
 pub mod mis;
 
-fn compute_candidate_conflicts(
-    points: &Array2<f32>, 
-    radius: f32, 
-    metric: &dyn Metric
-) -> Vec<(usize, usize)> {
+fn compute_candidate_conflicts<T>(
+    points: &Array2<T>, 
+    radius: T, 
+    metric: &dyn Metric<T>
+) -> Vec<(usize, usize)> 
+where T: Float + Debug + Send + Sync + std::iter::Sum
+{
     let n = points.nrows();
     (0..n).into_par_iter()
         .flat_map_iter(|i| {
@@ -34,13 +38,20 @@ fn compute_candidate_conflicts(
         .collect()
 }
 
-pub fn batch_insert(
-    tree: &mut CoverTreeData,
-    batch: ArrayView2<f32>,
-    metric: &dyn Metric,
-) {
+pub fn batch_insert<T>(
+    tree: &mut CoverTreeData<T>,
+    batch: ArrayView2<T>,
+    metric: &dyn Metric<T>,
+) 
+where T: Float + Debug + Send + Sync + std::iter::Sum + 'static
+{
     // 0. Append all points to tree with dummy level
     let start_idx = tree.len();
+    let _min_val = T::min_value(); // i32::MIN equivalent not available for Float generally?
+    // CoverTreeData levels are i32.
+    // add_point takes level as i32.
+    // So Float T is for points/metric, but levels are i32.
+    
     for row in batch.outer_iter() {
         tree.add_point(row, i32::MIN, -1);
     }
@@ -65,7 +76,6 @@ pub fn batch_insert(
     if candidates.is_empty() { return; }
 
     // 2. Initialize Active Sets
-    // For Phase 3, we assume single root 0 is valid cover.
     let root_idx = 0; 
     let mut active_sets: Vec<Vec<usize>> = vec![vec![root_idx]; candidates.len()];
     
@@ -73,18 +83,17 @@ pub fn batch_insert(
     let min_level: i32 = tree.min_level;
     
     while current_level >= min_level {
-        let radius = 2.0_f32.powi(current_level);
+        let radius = T::from(2.0).unwrap().powi(current_level);
         
         // 3. Filter: Near vs Far
         let filter_results: Vec<(bool, Vec<usize>)> = candidates.par_iter().zip(active_sets.par_iter())
             .map(|(&q_idx, covers)| {
                 let q_point = tree.get_point_row(q_idx);
-                let mut best_dist = f32::MAX;
+                let mut best_dist = T::max_value();
                 let mut best_node = usize::MAX;
                 let mut is_near = false;
                 
                 for &p_idx in covers {
-                    // Check p itself
                     let p_point = tree.get_point_row(p_idx);
                     let d_p = metric.distance(q_point, p_point);
                     if d_p <= radius {
@@ -95,7 +104,6 @@ pub fn batch_insert(
                         is_near = true;
                     }
                     
-                    // Check children
                     let mut child = tree.children[p_idx];
                     while child != -1 {
                         let c_idx = child as usize;
@@ -140,24 +148,25 @@ pub fn batch_insert(
         // 5. Conflict Graph
         if !far_candidates.is_empty() {
             let n_far = far_candidates.len();
-            let mut far_points = Array2::<f32>::zeros((n_far, tree.dimension));
+            let mut far_points = Array2::<T>::zeros((n_far, tree.dimension));
             for (i, &idx) in far_candidates.iter().enumerate() {
                 // Use copy_from_slice for fast copy
                 far_points.row_mut(i).as_slice_mut().unwrap().copy_from_slice(tree.get_point_row(idx));
             }
             
             let conflicts = compute_candidate_conflicts(&far_points, radius, metric);
-            let priorities = vec![1.0; n_far];
+            // MIS uses f32 for priorities? Or T?
+            // compute_mis_greedy takes &[f32].
+            // Let's use f32 for priorities regardless of T.
+            let priorities = vec![1.0f32; n_far];
             let mis_mask = compute_mis_greedy(n_far, &conflicts, &priorities);
             
             // Identify Leaders
             let mut leaders = Vec::new();
-            // let mut leader_indices = Vec::new(); // Index in far_candidates - Unused
             
             for (i, &is_leader) in mis_mask.iter().enumerate() {
                 if is_leader {
                     leaders.push(far_candidates[i]);
-                    // leader_indices.push(i);
                     
                     let q_idx = far_candidates[i];
                     tree.set_level(q_idx, current_level);
@@ -170,14 +179,12 @@ pub fn batch_insert(
                 }
             }
             
-            // Handle Non-Leaders (must be covered by a Leader)
+            // Handle Non-Leaders
             let leader_points_arr = Array2::from_shape_vec(
                 (leaders.len(), tree.dimension),
                 leaders.iter().flat_map(|&idx| tree.get_point_row(idx).to_vec()).collect()
             ).unwrap();
             
-            // For each non-leader, find covering leader
-            // Collect non-leaders to process
             let non_leader_indices: Vec<usize> = mis_mask.iter().enumerate()
                 .filter(|(_, &is_l)| !is_l)
                 .map(|(i, _)| i)
@@ -187,8 +194,7 @@ pub fn batch_insert(
                 .map(|&i| {
                     let q_idx = far_candidates[i];
                     let q_point = tree.get_point_row(q_idx);
-                    // Greedy scan inside loop
-                    let mut best_dist = f32::MAX;
+                    let mut best_dist = T::max_value();
                     let mut best_leader = usize::MAX;
                     
                     for l_i in 0..leaders.len() {
@@ -209,19 +215,12 @@ pub fn batch_insert(
                 })
                 .collect();
                 
-            // Push non-leaders to next
             for (k, &i) in non_leader_indices.iter().enumerate() {
                 let q_idx = far_candidates[i];
                 let covered_by: &Vec<usize> = &non_leader_results[k];
                 if !covered_by.is_empty() {
                     next_candidates.push(q_idx);
                     next_active_sets.push(covered_by.clone());
-                } else {
-                    // Orphan - treat as 'far' again? No, they are skipped for this level.
-                    // effectively dropped from insertion at this level, pushed to next?
-                    // But not added to next_candidates. So they are dropped from candidates list.
-                    // They remain in tree with i32::MIN.
-                    // This is correct for "failed to insert".
                 }
             }
         }
@@ -231,7 +230,6 @@ pub fn batch_insert(
         current_level -= 1;
     }
     
-    // Finalize remaining
     for (i, &q_idx) in candidates.iter().enumerate() {
         tree.set_level(q_idx, min_level);
         if !active_sets[i].is_empty() {

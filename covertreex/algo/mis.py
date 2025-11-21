@@ -3,9 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Tuple
 
-import jax
-import jax.numpy as jnp
 import numpy as np
+
+try:
+    import jax
+    import jax.numpy as jnp
+except ImportError:
+    jax = None
+    jnp = None
 
 from covertreex import config as cx_config
 from covertreex.algo.conflict import ConflictGraph

@@ -1,9 +1,11 @@
-use ndarray::{Array2, ArrayView1, ArrayView2, ShapeBuilder};
+use ndarray::{Array2, ArrayView1, ArrayView2};
+use num_traits::Float;
+use std::fmt::Debug;
 
 #[allow(dead_code)]
-pub struct CoverTreeData {
+pub struct CoverTreeData<T> {
     // Flattened points (Row Major): [x0_0, x0_1, ..., x1_0, ...]
-    pub points: Vec<f32>, 
+    pub points: Vec<T>, 
     pub parents: Vec<i64>,
     pub children: Vec<i64>, // First child
     pub next_node: Vec<i64>, // Next sibling
@@ -13,9 +15,11 @@ pub struct CoverTreeData {
     pub max_level: i32,
 }
 
-impl CoverTreeData {
+impl<T> CoverTreeData<T> 
+where T: Float + Debug + Send + Sync
+{
     pub fn new(
-        points_array: Array2<f32>,
+        points_array: Array2<T>,
         parents: Vec<i64>,
         children: Vec<i64>,
         next_node: Vec<i64>,
@@ -38,27 +42,25 @@ impl CoverTreeData {
             max_level,
         }
     }
-    
-    // ... existing len/get_point ...
 
     pub fn len(&self) -> usize {
         self.points.len() / self.dimension
     }
 
     #[allow(dead_code)]
-    pub fn get_point(&self, idx: usize) -> ArrayView2<'_, f32> {
+    pub fn get_point(&self, idx: usize) -> ArrayView2<'_, T> {
         let start = idx * self.dimension;
         let end = start + self.dimension;
         ArrayView2::from_shape((1, self.dimension), &self.points[start..end]).unwrap()
     }
     
-    pub fn get_point_row(&self, idx: usize) -> &[f32] {
+    pub fn get_point_row(&self, idx: usize) -> &[T] {
         let start = idx * self.dimension;
         let end = start + self.dimension;
         &self.points[start..end]
     }
     
-    pub fn add_point(&mut self, point: ArrayView1<f32>, level: i32, parent: i64) -> usize {
+    pub fn add_point(&mut self, point: ArrayView1<T>, level: i32, parent: i64) -> usize {
         let idx = self.len();
         self.points.extend(point.iter());
         self.parents.push(parent);

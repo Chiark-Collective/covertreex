@@ -25,7 +25,7 @@ def gaussian_points(
     if count <= 0 or dimension <= 0:
         return np.zeros((max(count, 0), max(dimension, 0)), dtype=dtype)
     samples = generator.normal(loc=0.0, scale=1.0, size=(count, dimension))
-    return np.asarray(samples, dtype=dtype, copy=False)
+    return np.asarray(samples, dtype=dtype)
 
 
 def gaussian_dataset(
