@@ -185,16 +185,17 @@ def residual_knn_query(
                 raise ValueError(f"RBF lengthscale array size {ls_arr.size} does not match dimension {dim}.")
         
         for q_idx, q_dataset_idx in enumerate(query_indices):
+            # Numba Call
             indices, dists = residual_knn_search_numba(
                 children_np, next_cache_np, parents_np,
                 node_to_dataset, v_matrix, p_diag, v_norm_sq,
                 kernel_coords, float(rbf_var), ls_sq_arr,
                 int(q_dataset_idx), int(k),
+                root_candidates,
                 heap_keys, heap_vals, heap_extras,
                 knn_keys, knn_indices, visited_bitset
             )
             results_indices.append(indices.copy())
-            results_distances.append(dists.copy())
             
     else:
         # Python Fallback

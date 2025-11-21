@@ -174,6 +174,7 @@ def residual_knn_search_numba(
     lengthscales_sq: np.ndarray,
     q_dataset_idx: int,
     k: int,
+    root_indices: np.ndarray,
     heap_keys: np.ndarray,
     heap_vals: np.ndarray,
     heap_extras: np.ndarray,
@@ -183,9 +184,14 @@ def residual_knn_search_numba(
 ) -> Tuple[np.ndarray, np.ndarray]:
     
     heap_size = 0
-    heap_size = _push_min_heap(heap_keys, heap_vals, heap_extras, heap_size, 0.0, 0, 0)
+    # Push all roots
+    for r in range(root_indices.shape[0]):
+        root = root_indices[r]
+        heap_size = _push_min_heap(heap_keys, heap_vals, heap_extras, heap_size, 0.0, root, 0)
+        
     knn_size = 0
     knn_keys[:] = 1e30
+    knn_indices[:] = -1
     visited_bitset[:] = 0
     
     child_buf = np.empty(1024, dtype=np.int64)
