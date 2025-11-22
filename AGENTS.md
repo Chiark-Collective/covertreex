@@ -16,3 +16,4 @@
 - **Reproducibility**: Whenever a new benchmark is run with noteworthy results, update all documentation that contains benchmarks and make sure that:
     - The benchmark is reproducible, with the exact command used to run it included in the docs next to the benchmark results themselves.
     - The commit message mentions a benchmark result update
+- **Benchmark Hygiene**: Do **NOT** add ad-hoc benchmark scripts (e.g., `benchmarks/temp_test.py`) without explicit user consultation. Rely on `run_residual_gold_standard.sh` and `tools/run_reference_benchmarks.py` to ensure consistency. If a new scenario is needed, add it as a job to the reference suite.

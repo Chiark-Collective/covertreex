@@ -180,6 +180,25 @@ python tools/baseline_matrix.py \
 Each JSONL entry includes the CLI command, PCCT timings, external baseline timings (PyPI + mlpack when
 `--baseline-mode cover` is used), and resource telemetry (wall, CPU seconds, and RSS watermark).
 
+## Benchmark Suite (Sources of Truth)
+
+The repository maintains a few canonical scripts for validating performance and correctness. Please rely on these rather than creating ad-hoc scripts.
+
+1.  **`benchmarks/run_residual_gold_standard.sh`** (The "Gold Standard")
+    *   **Purpose:** Reproduces the definitive historical benchmark result (24.2s build / 0.046s query) for N=32k, D=3, Residual Metric.
+    *   **Usage:** `./benchmarks/run_residual_gold_standard.sh [log_path]`
+    *   **When to use:** Verifying that a change hasn't regressed the primary optimization target.
+
+2.  **`tools/run_reference_benchmarks.py`** (Automated Regression)
+    *   **Purpose:** Runs a suite of diverse jobs (smoke tests, scaling tests, various configurations) for CI/CD.
+    *   **Usage:** `python tools/run_reference_benchmarks.py`
+    *   **When to use:** Comprehensive stability checks before merging.
+
+3.  **`benchmarks/comprehensive_residual_benchmark.py`** (Rust vs Python)
+    *   **Purpose:** Comparative benchmark between Python/Numba and Rust backends, handling the data discrepancies (indices vs coordinates) correctly.
+    *   **Usage:** `python benchmarks/comprehensive_residual_benchmark.py`
+    *   **When to use:** Testing the new Rust backend's performance.
+
 ### Agents / Contributors
 
 Automated agents or contributors must follow `AGENTS.md`: do **not** remove code paths, telemetry, or historical artefacts unless explicitly requested. Prefer additive feature flags and keep runs reproducible.
