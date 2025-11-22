@@ -21,6 +21,9 @@ def build_fast_residual_tree(
     dataset indices; it is suitable when you only need residual-correlation
     queries and want minimal build overhead. The returned tree and mapping can
     be passed directly to `CoverTreeWrapper.knn_query_residual`.
+
+    `chunk_size` controls both the backend kernel chunking and the maximum
+    number of points processed per conflict-graph pass during tree insertion.
     """
 
     try:
@@ -52,7 +55,7 @@ def build_fast_residual_tree(
     tree = covertreex_backend.CoverTreeWrapper(dummy, empty_i64, empty_i64, empty_i64, empty_i64, -20, 20)
 
     indices_all = np.arange(host_backend.num_points, dtype=dtype).reshape(-1, 1)
-    tree.insert_residual(indices_all, v_matrix, p_diag, coords, rbf_var, rbf_ls)
+    tree.insert_residual(indices_all, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size)
 
     node_to_dataset = np.arange(host_backend.num_points, dtype=np.int64).tolist()
     return tree, node_to_dataset, host_backend

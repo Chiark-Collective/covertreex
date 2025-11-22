@@ -140,6 +140,7 @@ impl CoverTreeWrapper {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (batch_indices, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size=None))]
     fn insert_residual(
         &mut self,
         py: Python<'_>,
@@ -149,6 +150,7 @@ impl CoverTreeWrapper {
         coords: PyObject,
         rbf_var: f64,
         rbf_ls: PyObject,
+        chunk_size: Option<usize>,
     ) -> PyResult<()> {
         match &mut self.inner {
             CoverTreeInner::F32(data) => {
@@ -165,7 +167,14 @@ impl CoverTreeWrapper {
                     rbf_var as f32,
                     rbf_ls_arr.as_slice().unwrap(),
                 );
-                batch_insert(data, batch_arr.view(), &metric);
+                let chunk = chunk_size.unwrap_or_else(|| batch_arr.nrows());
+                let mut start = 0;
+                while start < batch_arr.nrows() {
+                    let end = std::cmp::min(start + chunk, batch_arr.nrows());
+                    let view = batch_arr.slice(ndarray::s![start..end, ..]);
+                    batch_insert(data, view, &metric);
+                    start = end;
+                }
             }
             CoverTreeInner::F64(data) => {
                 let batch_arr = to_array2_f64(&batch_indices.bind(py))?;
@@ -181,7 +190,14 @@ impl CoverTreeWrapper {
                     rbf_var,
                     rbf_ls_arr.as_slice().unwrap(),
                 );
-                batch_insert(data, batch_arr.view(), &metric);
+                let chunk = chunk_size.unwrap_or_else(|| batch_arr.nrows());
+                let mut start = 0;
+                while start < batch_arr.nrows() {
+                    let end = std::cmp::min(start + chunk, batch_arr.nrows());
+                    let view = batch_arr.slice(ndarray::s![start..end, ..]);
+                    batch_insert(data, view, &metric);
+                    start = end;
+                }
             }
         }
         Ok(())

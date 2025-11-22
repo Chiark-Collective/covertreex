@@ -10,7 +10,7 @@ pub mod mis;
 
 fn compute_candidate_conflicts<T>(
     points: &Array2<T>,
-    radius: T,
+    radius_sq: T,
     metric: &dyn Metric<T>,
 ) -> Vec<(usize, usize)>
 where
@@ -29,8 +29,8 @@ where
                 let row_j_view = points.row(j);
                 let row_j = row_j_view.as_slice().unwrap();
 
-                let d = metric.distance(row_i, row_j);
-                if d <= radius {
+                let d_sq = metric.distance_sq(row_i, row_j);
+                if d_sq <= radius_sq {
                     Some((i, j))
                 } else {
                     None
@@ -87,6 +87,11 @@ where
 
     while current_level >= min_level {
         let radius = T::from(2.0).unwrap().powi(current_level);
+        let radius_sq = radius * radius;
+        let covers_all = metric
+            .max_distance_hint()
+            .map(|max_d| radius >= max_d)
+            .unwrap_or(false);
 
         // 3. Filter: Near vs Far
         let filter_results: Vec<(bool, Vec<usize>)> = candidates
@@ -94,16 +99,24 @@ where
             .zip(active_sets.par_iter())
             .map(|(&q_idx, covers)| {
                 let q_point = tree.get_point_row(q_idx);
-                let mut best_dist = T::max_value();
+                let mut best_dist_sq = T::max_value();
                 let mut best_node = usize::MAX;
                 let mut is_near = false;
 
+                if covers_all && !covers.is_empty() {
+                    // Residual metric distance is bounded; if the current radius already
+                    // exceeds that bound, every candidate is automatically "near" its
+                    // first cover. This avoids expensive distance evaluations at coarse
+                    // levels.
+                    return (true, vec![covers[0]]);
+                }
+
                 for &p_idx in covers {
                     let p_point = tree.get_point_row(p_idx);
-                    let d_p = metric.distance(q_point, p_point);
-                    if d_p <= radius {
-                        if d_p < best_dist {
-                            best_dist = d_p;
+                    let d_p_sq = metric.distance_sq(q_point, p_point);
+                    if d_p_sq <= radius_sq {
+                        if d_p_sq < best_dist_sq {
+                            best_dist_sq = d_p_sq;
                             best_node = p_idx;
                         }
                         is_near = true;
@@ -113,10 +126,10 @@ where
                     while child != -1 {
                         let c_idx = child as usize;
                         let c_point = tree.get_point_row(c_idx);
-                        let d_c = metric.distance(q_point, c_point);
-                        if d_c <= radius {
-                            if d_c < best_dist {
-                                best_dist = d_c;
+                        let d_c_sq = metric.distance_sq(q_point, c_point);
+                        if d_c_sq <= radius_sq {
+                            if d_c_sq < best_dist_sq {
+                                best_dist_sq = d_c_sq;
                                 best_node = c_idx;
                             }
                             is_near = true;
@@ -167,7 +180,7 @@ where
                     .copy_from_slice(tree.get_point_row(idx));
             }
 
-            let conflicts = compute_candidate_conflicts(&far_points, radius, metric);
+            let conflicts = compute_candidate_conflicts(&far_points, radius_sq, metric);
             // MIS uses f32 for priorities? Or T?
             // compute_mis_greedy takes &[f32].
             // Let's use f32 for priorities regardless of T.
@@ -220,9 +233,9 @@ where
                     for l_i in 0..leaders.len() {
                         let l_point_view = leader_points_arr.row(l_i);
                         let l_point = l_point_view.as_slice().unwrap();
-                        let d = metric.distance(q_point, l_point);
-                        if d <= radius && d < best_dist {
-                            best_dist = d;
+                        let d_sq = metric.distance_sq(q_point, l_point);
+                        if d_sq <= radius_sq && d_sq < best_dist {
+                            best_dist = d_sq;
                             best_leader = leaders[l_i];
                         }
                     }

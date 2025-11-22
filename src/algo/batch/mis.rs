@@ -1,7 +1,3 @@
-use rayon::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
 /// Simple greedy MIS on the conflict graph.
 ///
 /// Inputs:

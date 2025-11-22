@@ -5,6 +5,15 @@ use std::fmt::Debug;
 pub trait Metric<T>: Sync + Send {
     fn distance(&self, p1: &[T], p2: &[T]) -> T;
     fn distance_sq(&self, p1: &[T], p2: &[T]) -> T;
+
+    /// Optional upper bound on the metric distance.
+    ///
+    /// If provided, callers can bypass expensive distance calculations when
+    /// the current radius is larger than this bound (e.g., residual
+    /// correlation is capped by √2). Default is `None`.
+    fn max_distance_hint(&self) -> Option<T> {
+        None
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -85,7 +94,7 @@ where
         }
     }
 
-    pub fn distance_idx(&self, idx_1: usize, idx_2: usize) -> T {
+    pub fn distance_sq_idx(&self, idx_1: usize, idx_2: usize) -> T {
         let x_view = self.scaled_coords.row(idx_1);
         let x = x_view.as_slice().unwrap();
 
@@ -122,7 +131,11 @@ where
         let one = T::one();
         let neg_one = -one;
         let rho_clamped = rho.max(neg_one).min(one);
-        (one - rho_clamped.abs()).sqrt()
+        one - rho_clamped.abs()
+    }
+
+    pub fn distance_idx(&self, idx_1: usize, idx_2: usize) -> T {
+        self.distance_sq_idx(idx_1, idx_2).sqrt()
     }
 }
 
@@ -138,7 +151,13 @@ where
     }
 
     fn distance_sq(&self, p1: &[T], p2: &[T]) -> T {
-        let d = self.distance(p1, p2);
-        d * d
+        let idx1 = p1[0].to_usize().unwrap();
+        let idx2 = p2[0].to_usize().unwrap();
+        self.distance_sq_idx(idx1, idx2)
+    }
+
+    fn max_distance_hint(&self) -> Option<T> {
+        // Residual correlation distance is bounded by sqrt(2).
+        Some(T::from(2.0).unwrap().sqrt())
     }
 }

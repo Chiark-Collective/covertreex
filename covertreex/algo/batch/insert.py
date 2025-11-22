@@ -234,8 +234,9 @@ def _rust_batch_insert(
             rbf_ls = np.full(dim, float(rbf_ls), dtype=np.float32)
         else:
             rbf_ls = np.asarray(rbf_ls, dtype=np.float32)
-            
-        wrapper.insert_residual(batch_np, v_matrix, p_diag, coords, rbf_var, rbf_ls)
+
+        chunk_size = int(getattr(context.config, "residual_chunk_size", batch_np.shape[0]))
+        wrapper.insert_residual(batch_np, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size)
     else:
         wrapper.insert(batch_np)
         

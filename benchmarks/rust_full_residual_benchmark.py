@@ -56,7 +56,8 @@ def run_benchmark():
             p_diag,
             X,
             rbf_var,
-            rbf_ls
+            rbf_ls,
+            batch_size,
         )
         print(f"  Inserted {end}/{N}")
         
