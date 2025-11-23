@@ -5,10 +5,11 @@ use num_traits::Float;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
 static DIST_EVALS: AtomicUsize = AtomicUsize::new(0);
 static HEAP_PUSHES: AtomicUsize = AtomicUsize::new(0);
+static EMIT_STATS: AtomicBool = AtomicBool::new(false);
 
 pub mod batch;
 
@@ -273,6 +274,7 @@ where
     let mut child_nodes = Vec::with_capacity(BATCH_SIZE);
     let mut child_dataset_indices = Vec::with_capacity(BATCH_SIZE);
     let mut child_distance_buffer: Vec<T> = Vec::with_capacity(BATCH_SIZE);
+    let emit_stats = EMIT_STATS.load(AtomicOrdering::Relaxed);
 
     while !candidate_heap.is_empty() {
         batch_nodes.clear();
@@ -297,7 +299,9 @@ where
 
         // 2. Batch Compute Distances
         metric.distances_sq_batch_idx_into(q_dataset_idx, &dataset_indices, &mut distance_buffer);
-        DIST_EVALS.fetch_add(distance_buffer.len(), AtomicOrdering::Relaxed);
+        if emit_stats {
+            DIST_EVALS.fetch_add(distance_buffer.len(), AtomicOrdering::Relaxed);
+        }
 
         // 3. Process Results
         for (i, &d_sq) in distance_buffer.iter().enumerate() {
@@ -352,7 +356,9 @@ where
                         dist: OrderedFloat(child_dist),
                         node_idx: child_node,
                     });
-                    HEAP_PUSHES.fetch_add(1, AtomicOrdering::Relaxed);
+                    if emit_stats {
+                        HEAP_PUSHES.fetch_add(1, AtomicOrdering::Relaxed);
+                    }
                 }
             }
         }
@@ -367,12 +373,14 @@ where
     }
 
     // Emit simple telemetry for debugging the Rust residual path.
-    eprintln!(
-        "[rust-hybrid] distances={} heap_pushes={}",
-        DIST_EVALS.load(AtomicOrdering::Relaxed),
-        HEAP_PUSHES.load(AtomicOrdering::Relaxed)
-    );
-    DIST_EVALS.store(0, AtomicOrdering::Relaxed);
-    HEAP_PUSHES.store(0, AtomicOrdering::Relaxed);
+    if emit_stats {
+        eprintln!(
+            "[rust-hybrid] distances={} heap_pushes={}",
+            DIST_EVALS.load(AtomicOrdering::Relaxed),
+            HEAP_PUSHES.load(AtomicOrdering::Relaxed)
+        );
+        DIST_EVALS.store(0, AtomicOrdering::Relaxed);
+        HEAP_PUSHES.store(0, AtomicOrdering::Relaxed);
+    }
     (indices, dists)
 }
