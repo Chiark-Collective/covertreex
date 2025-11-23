@@ -20,6 +20,19 @@ DEFAULT_ENGINE = "python-numba"
 SUPPORTED_ENGINES = ("python-numba", "rust-fast", "rust-hybrid")
 
 
+def _enable_rust_debug_stats_if_requested():
+    """Enable Rust-side debug counters when requested via env toggle."""
+    if os.environ.get("COVERTREEX_RUST_DEBUG_STATS") != "1":
+        return None
+    try:
+        import covertreex_backend  # type: ignore
+    except ImportError:
+        return None
+    if hasattr(covertreex_backend, "set_rust_debug_stats"):
+        covertreex_backend.set_rust_debug_stats(True)  # type: ignore
+    return covertreex_backend
+
+
 def _format_knn_output(
     indices: np.ndarray,
     distances: np.ndarray,
@@ -330,13 +343,7 @@ class RustFastResidualEngine:
         if runtime.metric != "residual_correlation":
             raise ValueError("rust-fast engine only supports the residual_correlation metric.")
 
-        try:
-            import covertreex_backend  # type: ignore
-            if os.environ.get("COVERTREEX_RUST_DEBUG_STATS") == "1":
-                if hasattr(covertreex_backend, "set_rust_debug_stats"):
-                    covertreex_backend.set_rust_debug_stats(True)  # type: ignore
-        except ImportError:
-            covertreex_backend = None
+        covertreex_backend = _enable_rust_debug_stats_if_requested()
 
         params = dict(residual_params or {})
         variance = float(params.get("variance", 1.0))
@@ -550,10 +557,12 @@ class RustHybridResidualEngine:
         if runtime.metric != "residual_correlation":
             raise ValueError("rust-hybrid engine only supports the residual_correlation metric.")
 
-        try:
-            import covertreex_backend  # type: ignore
-        except ImportError as exc:  # pragma: no cover
-            raise RuntimeError("covertreex_backend is not installed.") from exc
+        backend_mod = _enable_rust_debug_stats_if_requested()
+        if backend_mod is None:
+            try:
+                import covertreex_backend as backend_mod  # type: ignore
+            except ImportError as exc:  # pragma: no cover
+                raise RuntimeError("covertreex_backend is not installed.") from exc
 
         ctx = context or cx_config.configure_runtime(runtime)
 
@@ -572,7 +581,7 @@ class RustHybridResidualEngine:
 
         configure_residual_correlation(backend, context=ctx)
 
-        dtype = np.float32 if np.asarray(backend.v_matrix).dtype == np.float32 else np.float64
+        dtype = np.float32  # force float32 for residual rust-hybrid to match numba perf
         coords = np.asarray(getattr(backend, "kernel_points_f32", backend.v_matrix), dtype=dtype)
         v_matrix = np.asarray(backend.v_matrix, dtype=dtype)
         p_diag = np.asarray(backend.p_diag, dtype=dtype)
@@ -593,7 +602,7 @@ class RustHybridResidualEngine:
         dummy = np.empty((0, 1), dtype=dtype)
         empty_i64 = np.empty(0, dtype=np.int64)
         empty_i32 = np.empty(0, dtype=np.int32)
-        tree_handle = covertreex_backend.CoverTreeWrapper(dummy, empty_i64, empty_i64, empty_i64, empty_i32, -20, 20)
+        tree_handle = backend_mod.CoverTreeWrapper(dummy, empty_i64, empty_i64, empty_i64, empty_i32, -20, 20)
 
         start = time.perf_counter()
         tree_handle.insert_residual(indices, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size or batch_size)

@@ -100,22 +100,7 @@ where
         // Coords dot product (small dimension, typically 2-10)
         let x_view = self.scaled_coords.row(idx_1);
         let y_view = self.scaled_coords.row(idx_2);
-        
-        // Safety: We rely on the caller to provide valid indices. 
-        // In the context of Cover Tree, these are verified at construction or insertion.
-        let x = match x_view.as_slice() {
-            Some(s) => s,
-            None => panic!("Scaled coords must be row-contiguous"),
-        };
-        let y = match y_view.as_slice() {
-            Some(s) => s,
-            None => panic!("Scaled coords must be row-contiguous"),
-        };
-
-        let mut dot_scaled = T::zero();
-        for i in 0..x.len() {
-            dot_scaled = dot_scaled + x[i] * y[i];
-        }
+        let dot_scaled = dot_product_simd(x_view, y_view);
 
         let two = T::from(2.0).unwrap();
         let mut d2 = self.scaled_norms[idx_1] + self.scaled_norms[idx_2] - two * dot_scaled;
@@ -144,6 +129,7 @@ where
         one - rho_clamped.abs()
     }
 
+    #[allow(dead_code)]
     pub fn distances_sq_batch_idx(&self, q_idx: usize, p_indices: &[usize]) -> Vec<T> {
         let mut results = Vec::with_capacity(p_indices.len());
         self.distances_sq_batch_idx_into(q_idx, p_indices, &mut results);
@@ -154,37 +140,79 @@ where
         out.clear();
         out.reserve(p_indices.len());
         // Pre-fetch query data
-        let x_view = self.scaled_coords.row(q_idx);
-        let x = x_view.as_slice().unwrap_or_else(|| panic!("Query coords must be contiguous"));
         let q_norm = self.scaled_norms[q_idx];
-        let v1_view = self.v_matrix.row(q_idx);
         let q_diag = self.p_diag[q_idx];
         let two = T::from(2.0).unwrap();
         let one = T::one();
         let neg_one = -one;
         let eps = T::from(1e-9).unwrap();
 
-        for &idx_2 in p_indices {
-            // 1. Coords Part
-            let y_view = self.scaled_coords.row(idx_2);
-            let y = y_view.as_slice().unwrap(); // Assume contiguous from construction
-            
-            let mut dot_scaled = T::zero();
-            for i in 0..x.len() {
-                dot_scaled = dot_scaled + x[i] * y[i];
+        let coords_stride = self.scaled_coords.ncols();
+        let v_stride = self.v_matrix.ncols();
+
+        // Fast path when both arrays are standard layout: process targets in tiles to amortize overhead.
+        if let (Some(coords_flat), Some(v_flat)) = (
+            self.scaled_coords.as_slice_memory_order(),
+            self.v_matrix.as_slice_memory_order(),
+        ) {
+            let q_coords = &coords_flat[q_idx * coords_stride..(q_idx + 1) * coords_stride];
+            let q_v = &v_flat[q_idx * v_stride..(q_idx + 1) * v_stride];
+            const TILE: usize = 64;
+            let mut idx = 0;
+            while idx < p_indices.len() {
+                let end = usize::min(idx + TILE, p_indices.len());
+                for &idx_2 in &p_indices[idx..end] {
+                    // Coords dot
+                    let y = &coords_flat[idx_2 * coords_stride..(idx_2 + 1) * coords_stride];
+                    let dot_scaled = dot_product_simd_slice(q_coords, y);
+
+                    let mut d2 = q_norm + self.scaled_norms[idx_2] - two * dot_scaled;
+                    if d2 < T::zero() {
+                        d2 = T::zero();
+                    }
+
+                    let k_val = self.rbf_var * (self.neg_half * d2).exp();
+
+                    // V-matrix dot
+                    let v2 = &v_flat[idx_2 * v_stride..(idx_2 + 1) * v_stride];
+                    let dot = dot_product_simd_slice(q_v, v2);
+
+                    let denom = (q_diag * self.p_diag[idx_2]).sqrt();
+
+                    if denom < eps {
+                        out.push(T::one());
+                    } else {
+                        let rho = (k_val - dot) / denom;
+                        let rho_clamped = rho.max(neg_one).min(one);
+                        out.push(one - rho_clamped.abs());
+                    }
+                }
+                idx = end;
             }
-            
+            return;
+        }
+
+        // Fallback path using ndarray row views
+        let x_view = self.scaled_coords.row(q_idx);
+        let v1_view = self.v_matrix.row(q_idx);
+        for &idx_2 in p_indices {
+            // 1. Coords Part (SIMD)
+            let y_view = self.scaled_coords.row(idx_2);
+            let dot_scaled = dot_product_simd(x_view, y_view);
+
             let mut d2 = q_norm + self.scaled_norms[idx_2] - two * dot_scaled;
-            if d2 < T::zero() { d2 = T::zero(); }
-            
+            if d2 < T::zero() {
+                d2 = T::zero();
+            }
+
             let k_val = self.rbf_var * (self.neg_half * d2).exp();
 
-            // 2. V-Matrix Part
+            // 2. V-Matrix Part (SIMD)
             let v2_view = self.v_matrix.row(idx_2);
             let dot = dot_product_simd(v1_view, v2_view);
 
             let denom = (q_diag * self.p_diag[idx_2]).sqrt();
-            
+
             if denom < eps {
                 out.push(T::one());
             } else {
@@ -229,67 +257,88 @@ where
     T: Float + Debug + Send + Sync + std::iter::Sum,
 {
     if let (Some(av), Some(bv)) = (a.as_slice(), b.as_slice()) {
-        if std::mem::size_of::<T>() == 4 {
-            let avf: &[f32] = unsafe { std::slice::from_raw_parts(av.as_ptr() as *const f32, av.len()) };
-            let bvf: &[f32] = unsafe { std::slice::from_raw_parts(bv.as_ptr() as *const f32, bv.len()) };
-            let mut acc = 0.0f32;
-            let chunks = avf.len() / 8;
-            let tail_start = chunks * 8;
-            for i in 0..chunks {
-                let base = i * 8;
-                let va = f32x8::from([
-                    avf[base],
-                    avf[base + 1],
-                    avf[base + 2],
-                    avf[base + 3],
-                    avf[base + 4],
-                    avf[base + 5],
-                    avf[base + 6],
-                    avf[base + 7],
-                ]);
-                let vb = f32x8::from([
-                    bvf[base],
-                    bvf[base + 1],
-                    bvf[base + 2],
-                    bvf[base + 3],
-                    bvf[base + 4],
-                    bvf[base + 5],
-                    bvf[base + 6],
-                    bvf[base + 7],
-                ]);
-                acc += (va * vb).reduce_add();
-            }
-            for i in tail_start..avf.len() {
-                acc += avf[i] * bvf[i];
-            }
-            return NumCast::from(acc).unwrap();
-        }
-        if std::mem::size_of::<T>() == 8 {
-            let avf: &[f64] = unsafe { std::slice::from_raw_parts(av.as_ptr() as *const f64, av.len()) };
-            let bvf: &[f64] = unsafe { std::slice::from_raw_parts(bv.as_ptr() as *const f64, bv.len()) };
-            let mut acc = 0.0f64;
-            let chunks = avf.len() / 4;
-            let tail_start = chunks * 4;
-            for i in 0..chunks {
-                let base = i * 4;
-                let va = f64x4::from([avf[base], avf[base + 1], avf[base + 2], avf[base + 3]]);
-                let vb = f64x4::from([bvf[base], bvf[base + 1], bvf[base + 2], bvf[base + 3]]);
-                acc += (va * vb).reduce_add();
-            }
-            for i in tail_start..avf.len() {
-                acc += avf[i] * bvf[i];
-            }
-            return NumCast::from(acc).unwrap();
-        }
+        return dot_product_simd_slice(av, bv);
     }
-
-    // Fallback scalar (non-contiguous or other types)
+    // Fallback scalar (non-contiguous)
     let mut dot = T::zero();
     let len = a.len();
     for i in 0..len {
         unsafe {
             dot = dot + *a.uget(i) * *b.uget(i);
         }
+    }
+    dot
+}
+
+#[inline(always)]
+fn dot_product_simd_slice<T>(a: &[T], b: &[T]) -> T
+where
+    T: Float + Debug + Send + Sync + std::iter::Sum,
+{
+    debug_assert_eq!(a.len(), b.len());
+    if std::mem::size_of::<T>() == 4 {
+        let avf: &[f32] =
+            unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f32, a.len()) };
+        let bvf: &[f32] =
+            unsafe { std::slice::from_raw_parts(b.as_ptr() as *const f32, b.len()) };
+        let mut acc = 0.0f32;
+        let chunks = avf.len() / 8;
+        let tail_start = chunks * 8;
+        let mut i = 0;
+        while i < tail_start {
+            let va = f32x8::from([
+                avf[i],
+                avf[i + 1],
+                avf[i + 2],
+                avf[i + 3],
+                avf[i + 4],
+                avf[i + 5],
+                avf[i + 6],
+                avf[i + 7],
+            ]);
+            let vb = f32x8::from([
+                bvf[i],
+                bvf[i + 1],
+                bvf[i + 2],
+                bvf[i + 3],
+                bvf[i + 4],
+                bvf[i + 5],
+                bvf[i + 6],
+                bvf[i + 7],
+            ]);
+            acc += (va * vb).reduce_add();
+            i += 8;
+        }
+        for j in tail_start..avf.len() {
+            acc += avf[j] * bvf[j];
+        }
+        return NumCast::from(acc).unwrap();
+    }
+    if std::mem::size_of::<T>() == 8 {
+        let avf: &[f64] =
+            unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f64, a.len()) };
+        let bvf: &[f64] =
+            unsafe { std::slice::from_raw_parts(b.as_ptr() as *const f64, b.len()) };
+        let mut acc = 0.0f64;
+        let chunks = avf.len() / 4;
+        let tail_start = chunks * 4;
+        let mut i = 0;
+        while i < tail_start {
+            let va = f64x4::from([avf[i], avf[i + 1], avf[i + 2], avf[i + 3]]);
+            let vb = f64x4::from([bvf[i], bvf[i + 1], bvf[i + 2], bvf[i + 3]]);
+            acc += (va * vb).reduce_add();
+            i += 4;
+        }
+        for j in tail_start..avf.len() {
+            acc += avf[j] * bvf[j];
+        }
+        return NumCast::from(acc).unwrap();
+    }
+
+    // Fallback scalar
+    let mut dot = T::zero();
+    for i in 0..a.len() {
+        dot = dot + a[i] * b[i];
     }
     dot
 }

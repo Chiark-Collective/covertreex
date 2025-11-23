@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+import os
 from typing import Any, Callable, Mapping, Tuple
 
 import numpy as np
@@ -85,6 +86,23 @@ def _ensure_residual_backend(
     object.__setattr__(host_data, "kernel_points_f32", points.astype(np.float32))
     
     configure_residual_correlation(host_data, context=context)
+
+
+def _collect_rust_debug_stats() -> Mapping[str, int] | None:
+    if os.environ.get("COVERTREEX_RUST_DEBUG_STATS") != "1":
+        return None
+    try:
+        import covertreex_backend  # type: ignore
+    except ImportError:
+        return None
+    getter = getattr(covertreex_backend, "get_rust_debug_stats", None)
+    if getter is None:
+        return None
+    dist, pushes = getter()  # type: ignore[arg-type]
+    return {
+        "rust_distance_evals": int(dist),
+        "rust_heap_pushes": int(pushes),
+    }
 
 
 def build_tree(
@@ -234,7 +252,7 @@ def benchmark_knn_latency(
     elapsed = query_stats['wall']
     qps = query_count / elapsed if elapsed > 0 else float("inf")
     latency = (elapsed / query_count) * 1e3 if query_count else 0.0
-    return tree, QueryBenchmarkResult(
+    bench_result = QueryBenchmarkResult(
         elapsed_seconds=elapsed,
         queries=query_count,
         k=k,
@@ -245,6 +263,27 @@ def benchmark_knn_latency(
         cpu_system_seconds=query_stats['system'],
         rss_delta_bytes=query_stats['rss_delta'],
     )
+    engine_name = getattr(runtime, "engine", None) or "python-numba"
+    if log_writer is not None and not log_writer.has_records():
+        extra_payload: dict[str, Any] = {
+            "metric": runtime.metric,
+            "engine": engine_name,
+            "queries": query_count,
+            "k": k,
+            "query_seconds": elapsed,
+            "query_qps": qps,
+            "latency_ms": latency,
+            "build_seconds": tree_build_seconds or 0.0,
+            "dataset_size": dataset_size,
+            # Keep residual aggregators happy even without conflict telemetry.
+            "conflict_pairwise_reused": 1,
+        }
+        if runtime.metric == "residual_correlation" and engine_name in {"rust-fast", "rust-hybrid"}:
+            rust_stats = _collect_rust_debug_stats()
+            if rust_stats:
+                extra_payload.update(rust_stats)
+        log_writer.record_event(event="query_summary", extra=extra_payload)
+    return tree, bench_result
 
 
 __all__ = [

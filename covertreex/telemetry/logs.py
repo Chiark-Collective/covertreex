@@ -271,6 +271,38 @@ class BenchmarkLogWriter:
         self._handle.flush()
         self._batch_event_index += 1
 
+    def has_records(self) -> bool:
+        return self._batch_event_index > 0
+
+    def record_event(self, *, event: str, extra: Mapping[str, Any] | None = None) -> None:
+        record: Dict[str, Any] = {
+            "schema_id": self._schema_id,
+            "schema_version": self._schema_version,
+            "run_id": self._run_id,
+            "run_hash": self._run_hash,
+            "runtime_digest": self._runtime_digest,
+            "seed_pack": self._seed_pack,
+            "batch_event_index": int(self._batch_event_index),
+            "timestamp": time.time(),
+            "event": str(event),
+        }
+        record["runtime"] = self._runtime_snapshot
+        if self._runtime_fields:
+            record.update(self._runtime_fields)
+        if self._metadata:
+            record.update(self._metadata)
+        # Default to a “healthy” conflict reuse flag so residual aggregators do not fail.
+        record.setdefault("conflict_pairwise_reused", 1)
+        if extra:
+            for key, value in extra.items():
+                if value is None:
+                    continue
+                record[key] = value
+        self._handle.write(json.dumps(record, sort_keys=True))
+        self._handle.write("\n")
+        self._handle.flush()
+        self._batch_event_index += 1
+
     def __enter__(self) -> "BenchmarkLogWriter":
         return self
 

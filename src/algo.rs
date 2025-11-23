@@ -14,11 +14,31 @@ static EMIT_STATS: AtomicBool = AtomicBool::new(false);
 #[inline(always)]
 pub(crate) fn set_debug_stats_enabled(enabled: bool) {
     EMIT_STATS.store(enabled, AtomicOrdering::Relaxed);
+    if enabled {
+        DIST_EVALS.store(0, AtomicOrdering::Relaxed);
+        HEAP_PUSHES.store(0, AtomicOrdering::Relaxed);
+    }
 }
 
+#[allow(dead_code)]
 #[inline(always)]
 fn debug_stats_enabled() -> bool {
     EMIT_STATS.load(AtomicOrdering::Relaxed)
+}
+
+#[inline(always)]
+pub(crate) fn take_debug_stats() -> (usize, usize) {
+    let dist = DIST_EVALS.swap(0, AtomicOrdering::Relaxed);
+    let pushes = HEAP_PUSHES.swap(0, AtomicOrdering::Relaxed);
+    (dist, pushes)
+}
+
+#[inline(always)]
+pub(crate) fn debug_stats_snapshot() -> (usize, usize) {
+    (
+        DIST_EVALS.load(AtomicOrdering::Relaxed),
+        HEAP_PUSHES.load(AtomicOrdering::Relaxed),
+    )
 }
 
 pub mod batch;
@@ -313,9 +333,8 @@ where
             DIST_EVALS.fetch_add(distance_buffer.len(), AtomicOrdering::Relaxed);
         }
 
-        // 3. Process Results
-        for (i, &d_sq) in distance_buffer.iter().enumerate() {
-            let dist = d_sq.sqrt();
+        // 3. Process Results (avoid sqrt; metric already returns distance)
+        for (i, &dist) in distance_buffer.iter().enumerate() {
             let node_idx = batch_nodes[i];
 
             // Update k-NN
@@ -348,10 +367,17 @@ where
             // Collect children for batched distance evaluation
             child_nodes.clear();
             child_dataset_indices.clear();
+            child_distance_buffer.clear();
             let mut child = tree.children[node_idx as usize];
             while child != -1 {
-                child_nodes.push(child);
-                child_dataset_indices.push(node_to_dataset[child as usize] as usize);
+                // Triangle-inequality lower bound using cover-tree radius of child
+                let child_level = tree.levels[child as usize];
+                let child_radius = two.powi(child_level + 1);
+                let lower_bound_child = dist - child_radius;
+                if result_heap.len() < k || lower_bound_child <= kth_dist {
+                    child_nodes.push(child);
+                    child_dataset_indices.push(node_to_dataset[child as usize] as usize);
+                }
                 child = tree.next_node[child as usize];
                 if child == tree.children[node_idx as usize] {
                     break;
@@ -359,9 +385,22 @@ where
             }
 
             if !child_nodes.is_empty() {
-                metric.distances_sq_batch_idx_into(q_dataset_idx, &child_dataset_indices, &mut child_distance_buffer);
+                metric.distances_sq_batch_idx_into(
+                    q_dataset_idx,
+                    &child_dataset_indices,
+                    &mut child_distance_buffer,
+                );
                 for (j, &child_node) in child_nodes.iter().enumerate() {
-                    let child_dist = child_distance_buffer[j].sqrt();
+                    let child_dist = child_distance_buffer[j];
+                    // Child pruning after exact distance
+                    if result_heap.len() == k {
+                        let child_level = tree.levels[child_node as usize];
+                        let child_radius = two.powi(child_level + 1);
+                        let lb_child = child_dist - child_radius;
+                        if lb_child > kth_dist {
+                            continue;
+                        }
+                    }
                     candidate_heap.push(Candidate {
                         dist: OrderedFloat(child_dist),
                         node_idx: child_node,
@@ -382,15 +421,5 @@ where
         dists.push(n.dist.0);
     }
 
-    // Emit simple telemetry for debugging the Rust residual path.
-    if emit_stats {
-        eprintln!(
-            "[rust-hybrid] distances={} heap_pushes={}",
-            DIST_EVALS.load(AtomicOrdering::Relaxed),
-            HEAP_PUSHES.load(AtomicOrdering::Relaxed)
-        );
-        DIST_EVALS.store(0, AtomicOrdering::Relaxed);
-        HEAP_PUSHES.store(0, AtomicOrdering::Relaxed);
-    }
     (indices, dists)
 }
