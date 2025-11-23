@@ -94,14 +94,27 @@ where
         }
     }
 
+    #[inline(always)]
     pub fn distance_sq_idx(&self, idx_1: usize, idx_2: usize) -> T {
+        // Coords dot product (small dimension, typically 2-10)
         let x_view = self.scaled_coords.row(idx_1);
-        let x = x_view.as_slice().unwrap();
-
         let y_view = self.scaled_coords.row(idx_2);
-        let y = y_view.as_slice().unwrap();
+        
+        // Safety: We rely on the caller to provide valid indices. 
+        // In the context of Cover Tree, these are verified at construction or insertion.
+        let x = match x_view.as_slice() {
+            Some(s) => s,
+            None => panic!("Scaled coords must be row-contiguous"),
+        };
+        let y = match y_view.as_slice() {
+            Some(s) => s,
+            None => panic!("Scaled coords must be row-contiguous"),
+        };
 
-        let dot_scaled: T = x.iter().zip(y.iter()).map(|(&xi, &yi)| xi * yi).sum();
+        let mut dot_scaled = T::zero();
+        for i in 0..x.len() {
+            dot_scaled = dot_scaled + x[i] * y[i];
+        }
 
         let two = T::from(2.0).unwrap();
         let mut d2 = self.scaled_norms[idx_1] + self.scaled_norms[idx_2] - two * dot_scaled;
@@ -111,14 +124,22 @@ where
 
         let k_val = self.rbf_var * (self.neg_half * d2).exp();
 
+        // V-Matrix dot product (high dimension, typically 512+)
+        // This is the hot loop.
         let v1_view = self.v_matrix.row(idx_1);
         let v2_view = self.v_matrix.row(idx_2);
-
-        let dot: T = v1_view
-            .iter()
-            .zip(v2_view.iter())
-            .map(|(&a, &b)| a * b)
-            .sum();
+        
+        let mut dot = T::zero();
+        let len = v1_view.len();
+        
+        // Manual loop with unchecked indexing for performance.
+        // Slicing might fail if the array is not contiguous (e.g. F-ordered input),
+        // so we avoid as_slice().
+        for i in 0..len {
+            unsafe {
+                dot = dot + *v1_view.uget(i) * *v2_view.uget(i);
+            }
+        }
 
         let denom = (self.p_diag[idx_1] * self.p_diag[idx_2]).sqrt();
         let eps = T::from(1e-9).unwrap();

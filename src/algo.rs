@@ -126,9 +126,23 @@ where
         node_idx: root_idx,
     });
 
+    let two = T::from(2.0).unwrap();
+    let mut kth_dist = T::max_value();
+
     while let Some(cand) = candidate_heap.pop() {
         let dist = cand.dist.0;
         let node_idx = cand.node_idx;
+
+        // Pruning check: if the lower bound distance to any descendant is greater than
+        // the current k-th nearest neighbor distance, we can skip this branch.
+        if result_heap.len() == k {
+            let level = tree.levels[node_idx as usize];
+            let radius = two.powi(level + 1);
+            let lower_bound = dist - radius;
+            if lower_bound > kth_dist {
+                continue;
+            }
+        }
 
         result_heap.push(Neighbor {
             dist: OrderedFloat(dist),
@@ -137,10 +151,25 @@ where
         if result_heap.len() > k {
             result_heap.pop();
         }
+        if result_heap.len() == k {
+            if let Some(peek) = result_heap.peek() {
+                kth_dist = peek.dist.0;
+            }
+        }
 
         let mut child = tree.children[node_idx as usize];
         while child != -1 {
             let d_child = metric.distance(q_point, tree.get_point_row(child as usize));
+            // Optimization: Early check before pushing to heap?
+            // For now, just push. The loop popping will handle the pruning.
+            // However, we can prune *insertion* if d_child - child_radius > kth_dist,
+            // but child_radius requires looking up child level.
+            
+            // Tighter check for insertion: if d_child > kth_dist + child_radius?
+            // No, simpler to just let the main loop prune.
+            
+            // Optimization: if d_child > kth_dist + max_possible_radius?
+            // Keep it simple for now.
             candidate_heap.push(Candidate {
                 dist: OrderedFloat(d_child),
                 node_idx: child,
@@ -211,7 +240,6 @@ where
     if tree.len() == 0 {
         return (vec![], vec![]);
     }
-    let mut visited = vec![false; tree.len()];
 
     let root_node_idx = 0;
     let root_dataset_idx = node_to_dataset[root_node_idx as usize] as usize;
@@ -222,11 +250,22 @@ where
         node_idx: root_node_idx,
     });
 
-    visited[root_node_idx as usize] = true;
+    let two = T::from(2.0).unwrap();
+    let mut kth_dist = T::max_value();
 
     while let Some(cand) = candidate_heap.pop() {
         let dist = cand.dist.0;
         let node_idx = cand.node_idx;
+
+        // Pruning check
+        if result_heap.len() == k {
+            let level = tree.levels[node_idx as usize];
+            let radius = two.powi(level + 1);
+            let lower_bound = dist - radius;
+            if lower_bound > kth_dist {
+                continue;
+            }
+        }
 
         result_heap.push(Neighbor {
             dist: OrderedFloat(dist),
@@ -235,18 +274,22 @@ where
         if result_heap.len() > k {
             result_heap.pop();
         }
+        if result_heap.len() == k {
+            if let Some(peek) = result_heap.peek() {
+                kth_dist = peek.dist.0;
+            }
+        }
 
         let mut child = tree.children[node_idx as usize];
         while child != -1 {
-            if !visited[child as usize] {
-                visited[child as usize] = true;
-                let child_dataset_idx = node_to_dataset[child as usize] as usize;
-                let d_child = metric.distance_idx(q_dataset_idx, child_dataset_idx);
-                candidate_heap.push(Candidate {
-                    dist: OrderedFloat(d_child),
-                    node_idx: child,
-                });
-            }
+            // No visited check needed for tree structure
+            let child_dataset_idx = node_to_dataset[child as usize] as usize;
+            let d_child = metric.distance_idx(q_dataset_idx, child_dataset_idx);
+            
+            candidate_heap.push(Candidate {
+                dist: OrderedFloat(d_child),
+                node_idx: child,
+            });
 
             let next = tree.next_node[child as usize];
             if next == child {

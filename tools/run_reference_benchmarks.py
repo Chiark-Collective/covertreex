@@ -85,8 +85,6 @@ class BenchmarkJob:
             str(log_path),
         ]
         cmd.extend(self.cli_args)
-        if "--residual-gate" not in self.cli_args:
-            cmd.extend(["--residual-gate", "off"])
         return cmd
 
     def metadata(self) -> Dict[str, object]:
