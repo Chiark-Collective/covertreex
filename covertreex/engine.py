@@ -8,7 +8,11 @@ import numpy as np
 
 from covertreex import config as cx_config
 from covertreex.core.tree import PCCTree, TreeBackend
-from covertreex.metrics.residual import build_fast_residual_tree, configure_residual_correlation
+from covertreex.metrics.residual import (
+    build_fast_residual_tree,
+    build_residual_backend,
+    configure_residual_correlation,
+)
 from covertreex.runtime.config import RuntimeConfig
 
 DEFAULT_ENGINE = "python-numba"
@@ -469,6 +473,188 @@ _ENGINE_REGISTRY: Dict[str, TreeEngine] = {
 }
 
 
+# -----------------------------------------------------------------------------
+# Hybrid Rust Residual Engine (draft)
+# -----------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RustHybridHandle:
+    tree: Any
+    node_to_dataset: list[int]
+    v_matrix: np.ndarray
+    p_diag: np.ndarray
+    coords: np.ndarray
+    rbf_variance: float
+    rbf_lengthscale: np.ndarray
+    dtype: Any
+
+
+class RustHybridResidualEngine:
+    """
+    Draft residual engine that mirrors the python-numba workload shape (indices payload,
+    same seeds/params) but builds and queries via the generic Rust CoverTree backend.
+    The goal is a like-for-like baseline before deeper Rust optimisation.
+    """
+
+    name = "rust-hybrid"
+
+    def _ensure_backend(
+        self,
+        points: np.ndarray,
+        *,
+        runtime: RuntimeConfig,
+        residual_params: Mapping[str, Any] | None,
+    ):
+        params = dict(residual_params or {})
+        variance = float(params.get("variance", 1.0))
+        lengthscale = params.get("lengthscale", 1.0)
+        inducing = int(params.get("inducing_count", 512))
+        chunk_size = int(params.get("chunk_size", 512))
+
+        seed_pack = runtime.seeds
+        residual_seed = seed_pack.resolved("residual_grid", fallback=seed_pack.resolved("mis"))
+        backend = build_residual_backend(
+            np.asarray(points, dtype=np.float64),
+            seed=residual_seed,
+            inducing_count=inducing,
+            variance=variance,
+            lengthscale=lengthscale,
+            chunk_size=chunk_size,
+        )
+        return backend, variance, lengthscale, chunk_size
+
+    def build(
+        self,
+        points: np.ndarray,
+        *,
+        runtime: RuntimeConfig,
+        context: cx_config.RuntimeContext | None = None,
+        batch_size: int = 512,
+        seed: int = 0,
+        build_mode: str = "batch",
+        log_writer: Any | None = None,
+        scope_cap_recorder: Any | None = None,
+        plan_callback: Callable[[Any, int, int], Mapping[str, Any] | None] | None = None,
+        residual_backend: Any | None = None,
+        residual_params: Mapping[str, Any] | None = None,
+    ) -> CoverTree:
+        if runtime.metric != "residual_correlation":
+            raise ValueError("rust-hybrid engine only supports the residual_correlation metric.")
+
+        try:
+            import covertreex_backend  # type: ignore
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("covertreex_backend is not installed.") from exc
+
+        ctx = context or cx_config.configure_runtime(runtime)
+
+        if residual_backend is None:
+            backend, variance, lengthscale, chunk_size = self._ensure_backend(
+                points,
+                runtime=runtime,
+                residual_params=residual_params,
+            )
+        else:
+            backend = residual_backend
+            params = dict(residual_params or {})
+            variance = float(params.get("variance", 1.0))
+            lengthscale = params.get("lengthscale", 1.0)
+            chunk_size = int(params.get("chunk_size", 512))
+
+        configure_residual_correlation(backend, context=ctx)
+
+        dtype = np.float32 if np.asarray(backend.v_matrix).dtype == np.float32 else np.float64
+        coords = np.asarray(getattr(backend, "kernel_points_f32", backend.v_matrix), dtype=dtype)
+        v_matrix = np.asarray(backend.v_matrix, dtype=dtype)
+        p_diag = np.asarray(backend.p_diag, dtype=dtype)
+        rbf_var = float(getattr(backend, "rbf_variance", variance if variance is not None else 1.0))
+        rbf_ls = np.asarray(
+            getattr(
+                backend,
+                "rbf_lengthscale",
+                np.ones(coords.shape[1], dtype=dtype),
+            ),
+            dtype=dtype,
+        )
+
+        # Build tree on index payloads (same as python-numba residual path)
+        indices = np.arange(coords.shape[0], dtype=dtype).reshape(-1, 1)
+
+        # Empty tree wrapper, then insert residual batches
+        dummy = np.empty((0, 1), dtype=dtype)
+        empty_i64 = np.empty(0, dtype=np.int64)
+        empty_i32 = np.empty(0, dtype=np.int32)
+        tree_handle = covertreex_backend.CoverTreeWrapper(dummy, empty_i64, empty_i64, empty_i64, empty_i32, -20, 20)
+
+        start = time.perf_counter()
+        tree_handle.insert_residual(indices, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size or batch_size)
+        build_seconds = time.perf_counter() - start
+
+        handle = RustHybridHandle(
+            tree=tree_handle,
+            node_to_dataset=list(np.arange(coords.shape[0], dtype=np.int64)),
+            v_matrix=v_matrix,
+            p_diag=p_diag,
+            coords=coords,
+            rbf_variance=rbf_var,
+            rbf_lengthscale=rbf_ls,
+            dtype=dtype,
+        )
+        backend_tag = TreeBackend.numpy(precision="float32" if dtype == np.float32 else "float64")
+        meta = {
+            "build_seconds": build_seconds,
+            "dataset_size": coords.shape[0],
+            "node_to_dataset": handle.node_to_dataset,
+            "backend_dtype": str(dtype),
+            "chunk_size": chunk_size or batch_size,
+        }
+        return CoverTree(
+            engine=self,
+            handle=handle,
+            metric=runtime.metric,
+            backend=backend_tag,
+            meta=meta,
+        )
+
+    def knn(
+        self,
+        tree: CoverTree,
+        query_points: Any,
+        *,
+        k: int,
+        return_distances: bool,
+        context: cx_config.RuntimeContext,
+        runtime: RuntimeConfig,
+    ) -> Any:
+        handle: RustHybridHandle = tree.handle
+        queries = np.asarray(query_points)
+        if queries.ndim == 1:
+            queries = queries.reshape(-1, 1)
+        if queries.dtype.kind not in {"i", "u"}:
+            raise ValueError("rust-hybrid engine expects integer query payloads representing dataset indices.")
+        query_indices = np.asarray(queries, dtype=np.int64).reshape(-1)
+        indices, distances = handle.tree.knn_query_residual(
+            query_indices,
+            handle.node_to_dataset,
+            handle.v_matrix,
+            handle.p_diag,
+            handle.coords,
+            float(handle.rbf_variance),
+            np.asarray(handle.rbf_lengthscale, dtype=handle.dtype),
+            int(k),
+        )
+        sorted_indices = np.asarray(indices, dtype=np.int64)
+        sorted_distances = np.asarray(distances, dtype=handle.dtype)
+        return _format_knn_output(sorted_indices, sorted_distances, return_distances=return_distances)
+# Instantiate engines and registry
+_RUST_HYBRID_ENGINE = RustHybridResidualEngine()
+_ENGINE_REGISTRY: Dict[str, TreeEngine] = {
+    _PYTHON_ENGINE.name: _PYTHON_ENGINE,
+    _RUST_FAST_ENGINE.name: _RUST_FAST_ENGINE,
+    _RUST_HYBRID_ENGINE.name: _RUST_HYBRID_ENGINE,
+}
+
+
 __all__ = [
     "CoverTree",
     "TreeEngine",
@@ -478,4 +664,5 @@ __all__ = [
     "get_engine",
     "PythonNumbaEngine",
     "RustFastResidualEngine",
+    "RustHybridResidualEngine",
 ]
