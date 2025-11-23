@@ -1,6 +1,8 @@
 use crate::algo::batch::batch_insert;
-use crate::algo::batch_knn_query;
-use crate::algo::batch_residual_knn_query;
+use crate::algo::{
+    batch_knn_query, batch_residual_knn_query, debug_stats_snapshot, set_debug_stats_enabled,
+    take_debug_stats,
+};
 use crate::metric::{Euclidean, ResidualMetric};
 use crate::tree::CoverTreeData;
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2};
@@ -410,10 +412,21 @@ fn to_py_arrays<'py, T: numpy::Element + Copy + num_traits::Zero>(
 fn covertreex_backend(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CoverTreeWrapper>()?;
     m.add_function(wrap_pyfunction!(set_rust_debug_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(get_rust_debug_stats, m)?)?;
     Ok(())
 }
 
 #[pyfunction]
 fn set_rust_debug_stats(enable: bool) {
-    crate::algo::set_debug_stats_enabled(enable);
+    set_debug_stats_enabled(enable);
+}
+
+#[pyfunction(signature = (reset=None))]
+fn get_rust_debug_stats(reset: Option<bool>) -> (usize, usize) {
+    let should_reset = reset.unwrap_or(true);
+    if should_reset {
+        take_debug_stats()
+    } else {
+        debug_stats_snapshot()
+    }
 }

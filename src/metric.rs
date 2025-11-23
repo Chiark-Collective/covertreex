@@ -161,10 +161,54 @@ where
             let mut idx = 0;
             while idx < p_indices.len() {
                 let end = usize::min(idx + TILE, p_indices.len());
-                for &idx_2 in &p_indices[idx..end] {
-                    // Coords dot
-                    let y = &coords_flat[idx_2 * coords_stride..(idx_2 + 1) * coords_stride];
-                    let dot_scaled = dot_product_simd_slice(q_coords, y);
+                // Precompute dot products for coords and V across the tile
+                let _tile_len = end - idx;
+                let size = std::mem::size_of::<T>();
+                let mut dot_coords_f32 = [0f32; TILE];
+                let mut dot_v_f32 = [0f32; TILE];
+                let mut dot_coords_f64 = [0f64; TILE];
+                let mut dot_v_f64 = [0f64; TILE];
+                if size == 4 {
+                    let q_coords_f = unsafe {
+                        std::slice::from_raw_parts(q_coords.as_ptr() as *const f32, q_coords.len())
+                    };
+                    let coords_f = unsafe {
+                        std::slice::from_raw_parts(coords_flat.as_ptr() as *const f32, coords_flat.len())
+                    };
+                    let q_v_f = unsafe {
+                        std::slice::from_raw_parts(q_v.as_ptr() as *const f32, q_v.len())
+                    };
+                    let v_flat_f = unsafe {
+                        std::slice::from_raw_parts(v_flat.as_ptr() as *const f32, v_flat.len())
+                    };
+                    dot_tile_f32(q_coords_f, coords_f, coords_stride, &p_indices[idx..end], &mut dot_coords_f32);
+                    dot_tile_f32(q_v_f, v_flat_f, v_stride, &p_indices[idx..end], &mut dot_v_f32);
+                } else if size == 8 {
+                    let q_coords_f = unsafe {
+                        std::slice::from_raw_parts(q_coords.as_ptr() as *const f64, q_coords.len())
+                    };
+                    let coords_f = unsafe {
+                        std::slice::from_raw_parts(coords_flat.as_ptr() as *const f64, coords_flat.len())
+                    };
+                    let q_v_f = unsafe {
+                        std::slice::from_raw_parts(q_v.as_ptr() as *const f64, q_v.len())
+                    };
+                    let v_flat_f = unsafe {
+                        std::slice::from_raw_parts(v_flat.as_ptr() as *const f64, v_flat.len())
+                    };
+                    dot_tile_f64(q_coords_f, coords_f, coords_stride, &p_indices[idx..end], &mut dot_coords_f64);
+                    dot_tile_f64(q_v_f, v_flat_f, v_stride, &p_indices[idx..end], &mut dot_v_f64);
+                }
+
+                for (local_offset, &idx_2) in p_indices[idx..end].iter().enumerate() {
+                    let dot_scaled = if size == 4 {
+                        NumCast::from(dot_coords_f32[local_offset]).unwrap()
+                    } else if size == 8 {
+                        NumCast::from(dot_coords_f64[local_offset]).unwrap()
+                    } else {
+                        let y = &coords_flat[idx_2 * coords_stride..(idx_2 + 1) * coords_stride];
+                        dot_product_simd_slice(q_coords, y)
+                    };
 
                     let mut d2 = q_norm + self.scaled_norms[idx_2] - two * dot_scaled;
                     if d2 < T::zero() {
@@ -174,8 +218,14 @@ where
                     let k_val = self.rbf_var * (self.neg_half * d2).exp();
 
                     // V-matrix dot
-                    let v2 = &v_flat[idx_2 * v_stride..(idx_2 + 1) * v_stride];
-                    let dot = dot_product_simd_slice(q_v, v2);
+                    let dot = if size == 4 {
+                        NumCast::from(dot_v_f32[local_offset]).unwrap()
+                    } else if size == 8 {
+                        NumCast::from(dot_v_f64[local_offset]).unwrap()
+                    } else {
+                        let v2 = &v_flat[idx_2 * v_stride..(idx_2 + 1) * v_stride];
+                        dot_product_simd_slice(q_v, v2)
+                    };
 
                     let denom = (q_diag * self.p_diag[idx_2]).sqrt();
 
@@ -341,4 +391,77 @@ where
         dot = dot + a[i] * b[i];
     }
     dot
+}
+
+#[inline(always)]
+fn dot_tile_f32(
+    q: &[f32],
+    matrix_flat: &[f32],
+    stride: usize,
+    indices: &[usize],
+    out: &mut [f32; 64],
+) {
+    let tile_len = indices.len();
+    for k in 0..tile_len {
+        out[k] = 0.0;
+    }
+    let chunks = stride / 8;
+    let tail_start = chunks * 8;
+    for c in 0..chunks {
+        let base = c * 8;
+        let qv = f32x8::from([
+            q[base],
+            q[base + 1],
+            q[base + 2],
+            q[base + 3],
+            q[base + 4],
+            q[base + 5],
+            q[base + 6],
+            q[base + 7],
+        ]);
+        for (pos, &idx) in indices.iter().enumerate() {
+            let row = &matrix_flat[idx * stride + base..idx * stride + base + 8];
+            let rv = f32x8::from([
+                row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
+            ]);
+            out[pos] += (qv * rv).reduce_add();
+        }
+    }
+    for d in tail_start..stride {
+        let qd = q[d];
+        for (pos, &idx) in indices.iter().enumerate() {
+            out[pos] += qd * matrix_flat[idx * stride + d];
+        }
+    }
+}
+
+#[inline(always)]
+fn dot_tile_f64(
+    q: &[f64],
+    matrix_flat: &[f64],
+    stride: usize,
+    indices: &[usize],
+    out: &mut [f64; 64],
+) {
+    let tile_len = indices.len();
+    for k in 0..tile_len {
+        out[k] = 0.0;
+    }
+    let chunks = stride / 4;
+    let tail_start = chunks * 4;
+    for c in 0..chunks {
+        let base = c * 4;
+        let qv = f64x4::from([q[base], q[base + 1], q[base + 2], q[base + 3]]);
+        for (pos, &idx) in indices.iter().enumerate() {
+            let row = &matrix_flat[idx * stride + base..idx * stride + base + 4];
+            let rv = f64x4::from([row[0], row[1], row[2], row[3]]);
+            out[pos] += (qv * rv).reduce_add();
+        }
+    }
+    for d in tail_start..stride {
+        let qd = q[d];
+        for (pos, &idx) in indices.iter().enumerate() {
+            out[pos] += qd * matrix_flat[idx * stride + d];
+        }
+    }
 }
