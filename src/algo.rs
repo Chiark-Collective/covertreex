@@ -248,6 +248,34 @@ pub fn batch_residual_knn_query<'a, T>(
 where
     T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
 {
+    let use_heap = std::env::var("COVERTREEX_RUST_RESIDUAL_HEAP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if use_heap {
+        let results: Vec<(Vec<i64>, Vec<T>)> = query_indices
+            .into_par_iter()
+            .map(|&q_idx| {
+                single_residual_knn_query_heap(
+                    tree,
+                    node_to_dataset,
+                    metric,
+                    q_idx as usize,
+                    k,
+                    scope_caps,
+                )
+            })
+            .collect();
+
+        let mut indices = Vec::with_capacity(results.len());
+        let mut dists = Vec::with_capacity(results.len());
+        for (idx, dst) in results {
+            indices.push(idx);
+            dists.push(dst);
+        }
+        return (indices, dists);
+    }
+
     // Opt-in telemetry: disable parallelism to aggregate counts deterministically
     let results: Vec<(Vec<i64>, Vec<T>)> = if let Some(tele) = telemetry {
         let mut out = Vec::with_capacity(query_indices.len());
@@ -894,6 +922,309 @@ where
     if let Some(t) = telemetry {
         // final frontier expansion count (expanded = children processed)
         t.record_frontier(0, children_nodes.len());
+    }
+
+    let sorted_results = result_heap.into_sorted_vec();
+    let mut indices = Vec::with_capacity(k);
+    let mut dists = Vec::with_capacity(k);
+    for n in sorted_results {
+        indices.push(n.node_idx);
+        dists.push(n.dist.0);
+    }
+
+    (indices, dists)
+}
+
+// -----------------------------------------------------------------------------
+// Legacy heap-style residual query (parity with Python/Numba path)
+// -----------------------------------------------------------------------------
+
+fn single_residual_knn_query_heap<'a, T>(
+    tree: &'a CoverTreeData<T>,
+    node_to_dataset: &[i64],
+    metric: &ResidualMetric<'a, T>,
+    q_dataset_idx: usize,
+    k: usize,
+    scope_caps: Option<&HashMap<i32, T>>,
+) -> (Vec<i64>, Vec<T>)
+where
+    T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
+{
+    let mut candidate_heap = BinaryHeap::new();
+    let mut result_heap: BinaryHeap<Neighbor<T>> = BinaryHeap::new();
+
+    if tree.len() == 0 {
+        return (vec![], vec![]);
+    }
+
+    // Budget Configuration (mirrors prior heap implementation)
+    let budget_schedule_str = std::env::var("COVERTREEX_RESIDUAL_BUDGET_SCHEDULE").ok();
+    let budget_schedule: Vec<usize> = if let Some(s) = budget_schedule_str {
+        s.split(',').filter_map(|v| v.parse().ok()).collect()
+    } else {
+        vec![32, 64, 96]
+    };
+    let budget_up: f64 = std::env::var("COVERTREEX_RESIDUAL_BUDGET_UP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.6);
+    let budget_down: f64 = std::env::var("COVERTREEX_RESIDUAL_BUDGET_DOWN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.01);
+
+    let mut budget_idx = 0;
+    let mut budget_limit = if !budget_schedule.is_empty() {
+        budget_schedule[0]
+    } else {
+        usize::MAX
+    };
+    let mut survivors_count = 0;
+    let mut low_yield_streak = 0;
+
+    // Push root (index 0) with its true distance
+    let root_payload = tree.get_point_row(0);
+    let root_dataset_idx = root_payload[0].to_usize().unwrap();
+    let root_dist = metric.distance_idx(q_dataset_idx, root_dataset_idx);
+    candidate_heap.push(Candidate {
+        dist: OrderedFloat(root_dist),
+        node_idx: 0,
+    });
+    HEAP_PUSHES.fetch_add(1, AtomicOrdering::Relaxed);
+    survivors_count += 1;
+
+    let mut kth_dist = T::max_value();
+    const BATCH_SIZE: usize = 64;
+    let mut batch_nodes: Vec<(i64, T)> = Vec::with_capacity(BATCH_SIZE);
+
+    // Child buffers
+    let stream_tile = std::env::var("COVERTREEX_RESIDUAL_STREAM_TILE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(64);
+
+    let mut child_nodes = Vec::with_capacity(stream_tile);
+    let mut child_dataset_indices = Vec::with_capacity(stream_tile);
+    let mut child_distance_buffer: Vec<T> = Vec::with_capacity(stream_tile);
+
+    let emit_stats = EMIT_STATS.load(AtomicOrdering::Relaxed);
+    let prune_sentinel = T::max_value();
+    let use_pruning =
+        std::env::var("COVERTREEX_RUST_PRUNE_BOUNDS").map_or(false, |v| v == "1" || v == "true");
+    let scope_limit_env = std::env::var("COVERTREEX_SCOPE_CHUNK_TARGET")
+        .ok()
+        .and_then(|v| v.parse::<isize>().ok())
+        .unwrap_or(0);
+    let scope_limit: usize = if scope_limit_env > 0 {
+        scope_limit_env as usize
+    } else {
+        16_384
+    };
+    let radius_floor: T = std::env::var("COVERTREEX_RESIDUAL_RADIUS_FLOOR")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .map(|v| T::from(v).unwrap_or(T::zero()))
+        .unwrap_or_else(|| T::from(1e-3).unwrap());
+    let two = T::from(2.0).unwrap();
+
+    while !candidate_heap.is_empty() {
+        if survivors_count >= budget_limit && budget_limit != usize::MAX {
+            break;
+        }
+
+        batch_nodes.clear();
+
+        // 1. Collect Batch
+        while batch_nodes.len() < BATCH_SIZE {
+            if let Some(cand) = candidate_heap.pop() {
+                batch_nodes.push((cand.node_idx, cand.dist.0));
+            } else {
+                break;
+            }
+        }
+
+        if batch_nodes.is_empty() {
+            break;
+        }
+        if survivors_count >= scope_limit {
+            break;
+        }
+
+        // 2. Process Results (using exact distances from heap)
+        for &(node_idx, dist) in batch_nodes.iter() {
+            // Update k-NN
+            if result_heap.len() < k || dist < kth_dist {
+                result_heap.push(Neighbor {
+                    dist: OrderedFloat(dist),
+                    node_idx,
+                });
+                if result_heap.len() > k {
+                    result_heap.pop();
+                }
+                if result_heap.len() == k {
+                    if let Some(peek) = result_heap.peek() {
+                        kth_dist = peek.dist.0;
+                    }
+                }
+            }
+
+            // Expand Children
+            let level = tree.levels[node_idx as usize];
+            let mut radius = two.powi(level + 1);
+
+            // Apply Scope Cap
+            if let Some(caps) = scope_caps {
+                if let Some(&cap) = caps.get(&level) {
+                    let cap_t = cap;
+                    if cap_t < radius {
+                        radius = cap_t;
+                    }
+                }
+            }
+
+            // Apply Radius Floor
+            if radius < radius_floor {
+                radius = radius_floor;
+            }
+
+            let lower_bound = dist - radius;
+
+            if result_heap.len() == k && lower_bound > kth_dist {
+                continue;
+            }
+
+            // Collect children for batched distance evaluation
+            let mut child = tree.children[node_idx as usize];
+
+            while child != -1 {
+                child_nodes.clear();
+                child_dataset_indices.clear();
+
+                // Collect Tile
+                while child != -1 && child_nodes.len() < stream_tile {
+                    let child_level = tree.levels[child as usize];
+                    let mut child_radius = two.powi(child_level + 1);
+
+                    if let Some(caps) = scope_caps {
+                        if let Some(&cap) = caps.get(&child_level) {
+                            let cap_t = cap;
+                            if cap_t < child_radius {
+                                child_radius = cap_t;
+                            }
+                        }
+                    }
+
+                    if child_radius < radius_floor {
+                        child_radius = radius_floor;
+                    }
+
+                    let lb_child = dist - child_radius;
+
+                    if result_heap.len() < k || lb_child <= kth_dist {
+                        child_nodes.push(child);
+                        child_dataset_indices.push(node_to_dataset[child as usize] as usize);
+                    }
+
+                    let next = tree.next_node[child as usize];
+                    if next == child {
+                        child = -1;
+                    } else {
+                        child = next;
+                        if child == tree.children[node_idx as usize] {
+                            child = -1;
+                        }
+                    }
+                }
+
+                if child_nodes.is_empty() {
+                    break;
+                }
+
+                // Compute Dists
+                child_distance_buffer.clear();
+                metric.distances_sq_batch_idx_into_with_kth(
+                    q_dataset_idx,
+                    &child_dataset_indices,
+                    if use_pruning { Some(kth_dist) } else { None },
+                    &mut child_distance_buffer,
+                );
+
+                if emit_stats {
+                    let evals = child_distance_buffer
+                        .iter()
+                        .filter(|&&d| d != prune_sentinel)
+                        .count();
+                    DIST_EVALS.fetch_add(evals, AtomicOrdering::Relaxed);
+                }
+
+                let mut added_in_tile = 0;
+                for (j, &child_node) in child_nodes.iter().enumerate() {
+                    let child_dist = child_distance_buffer[j];
+                    if child_dist == prune_sentinel {
+                        continue;
+                    }
+
+                    if result_heap.len() == k {
+                        let child_level = tree.levels[child_node as usize];
+                        let mut child_radius = two.powi(child_level + 1);
+                        if let Some(caps) = scope_caps {
+                            if let Some(&cap) = caps.get(&child_level) {
+                                let cap_t = cap;
+                                if cap_t < child_radius {
+                                    child_radius = cap_t;
+                                }
+                            }
+                        }
+                        if child_radius < radius_floor {
+                            child_radius = radius_floor;
+                        }
+
+                        let lb_child = child_dist - child_radius;
+                        if lb_child > kth_dist {
+                            continue;
+                        }
+                    }
+
+                    candidate_heap.push(Candidate {
+                        dist: OrderedFloat(child_dist),
+                        node_idx: child_node,
+                    });
+                    if emit_stats {
+                        HEAP_PUSHES.fetch_add(1, AtomicOrdering::Relaxed);
+                    }
+                    added_in_tile += 1;
+                }
+
+                survivors_count += added_in_tile;
+
+                if !budget_schedule.is_empty() {
+                    let ratio = if !child_nodes.is_empty() {
+                        added_in_tile as f64 / child_nodes.len() as f64
+                    } else {
+                        0.0
+                    };
+                    if ratio >= budget_up {
+                        if budget_idx + 1 < budget_schedule.len() {
+                            budget_idx += 1;
+                            budget_limit = budget_schedule[budget_idx];
+                        }
+                        low_yield_streak = 0;
+                    } else if ratio < budget_down {
+                        low_yield_streak += 1;
+                        if low_yield_streak >= 2 {
+                            break;
+                        }
+                    } else {
+                        low_yield_streak = 0;
+                    }
+                }
+
+                if survivors_count >= budget_limit && budget_limit != usize::MAX {
+                    break;
+                }
+            }
+        }
     }
 
     let sorted_results = result_heap.into_sorted_vec();
