@@ -7,6 +7,11 @@ Status 2025-11-24 (evening):
 - ✅ Added `COVERTREEX_RESIDUAL_PARITY=1` toggle that disables budgets/caps, dynamic tiling, and child reordering to mirror the Python gold traversal (stream_tile=1, raw si radii, no cap ladder).
 - ⏳ Remaining gaps tracked below.
 
+Update 2025-11-24 (late):
+- Rust residual parity path now records query telemetry for both f32 and f64 builds; `COVERTREEX_RUST_QUERY_TELEMETRY=1` produces the same frontier/prune/eval counters as the f32 path.
+- Parity flag also forces the residual metric to bypass SIMD/tiled fast paths (or use `COVERTREEX_RESIDUAL_DISABLE_FAST_PATHS=1` explicitly).
+- Added an optional traversal visited set (auto-enabled under parity or via `COVERTREEX_RESIDUAL_VISITED_SET=1`) to keep node expansions deterministic when masked dedupe is disabled.
+
 The gold Numba run (via `benchmarks/run_residual_gold_standard.sh`) has these defaults **active**:
 - Level cache reuse (`residual_level_cache_batching=True`).
 - Dynamic block sizing (`residual_dynamic_query_block=True`) tied to active queries.

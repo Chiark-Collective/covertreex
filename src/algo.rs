@@ -656,6 +656,10 @@ where
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true)
     };
+    let use_visited = parity_mode
+        || std::env::var("COVERTREEX_RESIDUAL_VISITED_SET")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
     let scope_member_limit_env = std::env::var("COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT")
         .ok()
         .and_then(|v| v.parse::<isize>().ok())
@@ -713,6 +717,14 @@ where
     } else {
         Vec::new()
     };
+    let mut visited_nodes: Vec<bool> = if use_visited {
+        vec![false; tree.len()]
+    } else {
+        Vec::new()
+    };
+    if use_visited && !visited_nodes.is_empty() {
+        visited_nodes[0] = true;
+    }
     // Cached per-dataset lower bounds carried across levels (Numba-style level cache)
     let mut cached_lb: Vec<T> = vec![T::max_value(); node_to_dataset.len()];
 
@@ -799,9 +811,24 @@ where
             }
             for child_idx in parent_children.into_iter() {
                 let ds_idx = node_to_dataset[child_idx] as usize;
+                if use_visited {
+                    if let Some(already) = visited_nodes.get(child_idx).copied() {
+                        if already {
+                            if let Some(t) = telemetry.as_mut() {
+                                t.masked_dedup += 1;
+                            }
+                            continue;
+                        }
+                    }
+                }
                 if use_masked_append {
                     if ds_idx < seen_mask.len() && !seen_mask[ds_idx] {
                         seen_mask[ds_idx] = true;
+                        if use_visited {
+                            if let Some(slot) = visited_nodes.get_mut(child_idx) {
+                                *slot = true;
+                            }
+                        }
                         children_nodes.push(child_idx);
                         children_ds_idx.push(ds_idx);
                         children_parent_lb.push(parent_lb);
@@ -816,6 +843,11 @@ where
                         continue;
                     }
                 } else {
+                    if use_visited {
+                        if let Some(slot) = visited_nodes.get_mut(child_idx) {
+                            *slot = true;
+                        }
+                    }
                     children_nodes.push(child_idx);
                     children_ds_idx.push(ds_idx);
                     children_parent_lb.push(parent_lb);
@@ -931,13 +963,12 @@ where
 
             for (dist, child_idx, parent_lb_cached) in ordered.into_iter() {
                 let child_level = tree.levels[child_idx];
-                let mut child_radius = if !tree.si_cache.is_empty()
-                    && child_idx < tree.si_cache.len()
-                {
-                    tree.si_cache[child_idx]
-                } else {
-                    two.powi(child_level + 1)
-                };
+                let mut child_radius =
+                    if !tree.si_cache.is_empty() && child_idx < tree.si_cache.len() {
+                        tree.si_cache[child_idx]
+                    } else {
+                        two.powi(child_level + 1)
+                    };
                 let capped_child = if parity_mode {
                     child_radius
                 } else {

@@ -50,6 +50,7 @@ pub struct ResidualMetric<'a, T> {
     pub v_norms: Vec<T>,
     pub neg_half: T,
     pub cap_default: T,
+    pub disable_fast_paths: bool,
 }
 
 impl<'a, T> ResidualMetric<'a, T>
@@ -93,6 +94,14 @@ where
             v_norms.push(norm_sq.sqrt());
         }
 
+        let parity_mode = std::env::var("COVERTREEX_RESIDUAL_PARITY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let disable_fast_paths = parity_mode
+            || std::env::var("COVERTREEX_RESIDUAL_DISABLE_FAST_PATHS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+
         let neg_half = T::from(-0.5).unwrap();
         let cap_default = cap_default.unwrap_or_else(|| T::from(2.0).unwrap());
 
@@ -105,6 +114,7 @@ where
             v_norms,
             neg_half,
             cap_default,
+            disable_fast_paths,
         }
     }
 
@@ -183,6 +193,10 @@ where
     ) {
         out.clear();
         out.reserve(p_indices.len());
+        if self.disable_fast_paths {
+            self.distances_sq_batch_idx_into_with_kth_fallback(q_idx, p_indices, kth, out);
+            return;
+        }
         // Pre-fetch query data
         let q_norm = self.scaled_norms[q_idx];
         let q_diag = self.p_diag[q_idx];
@@ -407,7 +421,24 @@ where
             return;
         }
 
-        // Fallback path using ndarray row views
+        self.distances_sq_batch_idx_into_with_kth_fallback(q_idx, p_indices, kth, out);
+    }
+
+    fn distances_sq_batch_idx_into_with_kth_fallback(
+        &self,
+        q_idx: usize,
+        p_indices: &[usize],
+        kth: Option<T>,
+        out: &mut Vec<T>,
+    ) {
+        let q_norm = self.scaled_norms[q_idx];
+        let two = T::from(2.0).unwrap();
+        let one = T::one();
+        let neg_one = -one;
+        let eps = T::from(1e-9).unwrap();
+        let prune_sentinel = T::max_value();
+        let kth_cutoff = kth.unwrap_or(prune_sentinel);
+
         let x_view = self.scaled_coords.row(q_idx);
         let v1_view = self.v_matrix.row(q_idx);
         for &idx_2 in p_indices {
@@ -422,14 +453,14 @@ where
 
             let k_val = self.rbf_var * (self.neg_half * d2).exp();
 
-            let denom = (q_diag * self.p_diag[idx_2]).sqrt();
+            let denom = (self.p_diag[q_idx] * self.p_diag[idx_2]).sqrt();
 
             if denom < eps {
                 out.push(one);
                 continue;
             }
 
-            if kth_cutoff < prune_sentinel {
+            if kth.is_some() {
                 let cap = self.v_norms[q_idx] * self.v_norms[idx_2];
                 let max_abs_rho = ((k_val - cap).abs()).max((k_val + cap).abs()) / denom;
                 let min_dist = one - max_abs_rho.min(one);

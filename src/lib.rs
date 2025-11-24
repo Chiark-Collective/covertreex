@@ -399,15 +399,36 @@ impl CoverTreeWrapper {
                 let caps_f64: Option<HashMap<i32, f64>> =
                     scope_caps.map(|m| m.into_iter().map(|(k, v)| (k, v as f64)).collect());
 
-                let (indices, dists) = batch_residual_knn_query(
-                    data,
-                    query_indices.as_array(),
-                    &node_to_dataset,
-                    &metric,
-                    k,
-                    caps_f64.as_ref(),
-                    None,
-                );
+                let telemetry_enabled = std::env::var("COVERTREEX_RUST_QUERY_TELEMETRY")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let mut telemetry_rec: Option<ResidualQueryTelemetry> = None;
+
+                let (indices, dists) = if telemetry_enabled {
+                    let mut telem = ResidualQueryTelemetry::default();
+                    let res = batch_residual_knn_query(
+                        data,
+                        query_indices.as_array(),
+                        &node_to_dataset,
+                        &metric,
+                        k,
+                        caps_f64.as_ref(),
+                        Some(&mut telem),
+                    );
+                    telemetry_rec = Some(telem);
+                    res
+                } else {
+                    batch_residual_knn_query(
+                        data,
+                        query_indices.as_array(),
+                        &node_to_dataset,
+                        &metric,
+                        k,
+                        caps_f64.as_ref(),
+                        None,
+                    )
+                };
+                self.last_query_telemetry = telemetry_rec;
                 let (idx, dst) = to_py_arrays(py, indices, dists);
                 Ok((idx, dst.into_any().into()))
             }
@@ -682,8 +703,16 @@ fn build_pcct_residual_tree(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    let (v_matrix_f32, v_matrix_f64, p_diag_f32, p_diag_f64, coords_f32, coords_f64, rbf_ls_f32,
-        rbf_ls_f64) = if parity_mode {
+    let (
+        v_matrix_f32,
+        v_matrix_f64,
+        p_diag_f32,
+        p_diag_f64,
+        coords_f32,
+        coords_f64,
+        rbf_ls_f32,
+        rbf_ls_f64,
+    ) = if parity_mode {
         (
             None,
             Some(to_array2_f64(&v_matrix.bind(py))?),
@@ -715,10 +744,7 @@ fn build_pcct_residual_tree(
     let coords_for_order = if let Some(c) = coords_f32.as_ref() {
         c.view()
     } else {
-        let tmp: ndarray::Array2<f32> = coords_f64
-            .as_ref()
-            .unwrap()
-            .mapv(|v| v as f32);
+        let tmp: ndarray::Array2<f32> = coords_f64.as_ref().unwrap().mapv(|v| v as f32);
         coords_for_order_owned = Some(tmp);
         coords_for_order_owned.as_ref().unwrap().view()
     };
@@ -780,22 +806,26 @@ fn build_pcct_residual_tree(
         }
     };
 
-    let metric_f32 = v_matrix_f32.as_ref().map(|v| ResidualMetric::new(
-        v.view(),
-        p_diag_f32.as_ref().unwrap().as_slice().unwrap(),
-        coords_f32.as_ref().unwrap().view(),
-        rbf_var as f32,
-        rbf_ls_f32.as_ref().unwrap().as_slice().unwrap(),
-        None,
-    ));
-    let metric_f64 = v_matrix_f64.as_ref().map(|v| ResidualMetric::new(
-        v.view(),
-        p_diag_f64.as_ref().unwrap().as_slice().unwrap(),
-        coords_f64.as_ref().unwrap().view(),
-        rbf_var,
-        rbf_ls_f64.as_ref().unwrap().as_slice().unwrap(),
-        None,
-    ));
+    let metric_f32 = v_matrix_f32.as_ref().map(|v| {
+        ResidualMetric::new(
+            v.view(),
+            p_diag_f32.as_ref().unwrap().as_slice().unwrap(),
+            coords_f32.as_ref().unwrap().view(),
+            rbf_var as f32,
+            rbf_ls_f32.as_ref().unwrap().as_slice().unwrap(),
+            None,
+        )
+    });
+    let metric_f64 = v_matrix_f64.as_ref().map(|v| {
+        ResidualMetric::new(
+            v.view(),
+            p_diag_f64.as_ref().unwrap().as_slice().unwrap(),
+            coords_f64.as_ref().unwrap().view(),
+            rbf_var,
+            rbf_ls_f64.as_ref().unwrap().as_slice().unwrap(),
+            None,
+        )
+    });
     let chunk = chunk_size.unwrap_or_else(|| {
         if parity_mode {
             indices_arr_f64.as_ref().unwrap().nrows()
@@ -805,11 +835,13 @@ fn build_pcct_residual_tree(
     });
     let mut start = 0;
     let mut survivors: Vec<i64> = Vec::new();
-    while start < if parity_mode {
-        indices_arr_f64.as_ref().unwrap().nrows()
-    } else {
-        indices_arr_f32.as_ref().unwrap().nrows()
-    } {
+    while start
+        < if parity_mode {
+            indices_arr_f64.as_ref().unwrap().nrows()
+        } else {
+            indices_arr_f32.as_ref().unwrap().nrows()
+        }
+    {
         let end = std::cmp::min(
             start + chunk,
             if parity_mode {
@@ -820,7 +852,10 @@ fn build_pcct_residual_tree(
         );
 
         if parity_mode {
-            let view = indices_arr_f64.as_ref().unwrap().slice(ndarray::s![start..end, ..]);
+            let view = indices_arr_f64
+                .as_ref()
+                .unwrap()
+                .slice(ndarray::s![start..end, ..]);
             let telemetry = batch_insert_with_telemetry(
                 match &mut tree.inner {
                     CoverTreeInner::F64(data) => data,
@@ -843,7 +878,10 @@ fn build_pcct_residual_tree(
                 survivors.push((telemetry.batch_start_index + *sel) as i64);
             }
         } else {
-            let view = indices_arr_f32.as_ref().unwrap().slice(ndarray::s![start..end, ..]);
+            let view = indices_arr_f32
+                .as_ref()
+                .unwrap()
+                .slice(ndarray::s![start..end, ..]);
             let telemetry = batch_insert_with_telemetry(
                 match &mut tree.inner {
                     CoverTreeInner::F32(data) => data,
