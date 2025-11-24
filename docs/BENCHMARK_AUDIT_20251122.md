@@ -22,7 +22,7 @@ This script is the definitive source for the **24.20s build / 0.046s query** res
     *   **Metric**: Residual
     *   **Batch Order**: Natural
     *   **Chunking/Sparse**: DISABLED (Explicitly unsets sparse traversal and chunking).
-*   **Key Insight:** This script targets the Python/Numba path (or mixed path if environment variables allow) but strictly controls the environment to match the conditions of the original result.
+*   **Key Insight:** The script now hard-disables the Rust backend (`COVERTREEX_ENABLE_RUST=0`) to guarantee the Python/Numba traversal for the gold run. A separate optional comparison run can be enabled via `COMP_ENGINE` (default: `rust-hilbert`).
 
 ## 2. Automated Regression Suite
 **File:** `tools/run_reference_benchmarks.py`
@@ -59,19 +59,15 @@ These ad-hoc scripts reveal a critical architectural divergence between the Pyth
 ## 5. Latest runs (2025-11-24)
 Commands (32,768 points, d=3, 1,024 queries, k=50):
 ```
-# Python/Numba gold
-ENGINE=python-numba ./benchmarks/run_residual_gold_standard.sh bench_residual_python_numba_rerun.log
+# Gold run (Python/Numba enforced)
+./benchmarks/run_residual_gold_standard.sh bench_residual_gold.log
 
-# Rust Hilbert (current Rust residual impl)
-ENGINE=rust-hilbert COVERTREEX_ENABLE_RUST=1 COVERTREEX_RUST_PCCT2_SGEMM=auto COVERTREEX_BATCH_ORDER=natural \
-  ./benchmarks/run_residual_gold_standard.sh bench_residual_rust_hilbert.log
+# Optional comparison (default rust-hilbert); skip with COMP_ENGINE=none
+COMP_ENGINE=rust-hilbert ./benchmarks/run_residual_gold_standard.sh bench_residual_gold.log
 ```
-Results:
-- python-numba: build **7.104 s**, query **0.0247 s** (~41,519 q/s).
-- rust-hilbert: build **2.509 s**, query **3.195 s** (~320 q/s).
-- gpboost baseline (from same runs): build ~1.36–1.67 s, query ~3.70 s (~275 q/s).
-Artifacts:
-- `bench_residual_python_numba_rerun.log`, telemetry `artifacts/benchmarks/queries_pcct-20251124-111128-698165_20251124-111128.jsonl`
-- `bench_residual_rust_hilbert.log`, telemetry `artifacts/benchmarks/queries_pcct-20251124-111050-c01f7d_20251124-111050.jsonl`
+Latest local results (2025-11-24):
+- python-numba (gold): build **7.38 s**, query **0.0250 s** (~41,0k q/s).
+- rust-hilbert (comparison): build **3.34 s**, query **0.164 s** (~6.26k q/s).
+- gpboost baseline (same runs): build ~1.42 s, query ~3.59 s (~278 q/s).
 
-Note: the previous rust-pcct2 runs (2025-11-23) are superseded; rust-hilbert is the active Rust residual engine.
+Note: rust-hilbert is the current default comparison engine; adjust `COMP_ENGINE` to test alternatives or set `COMP_ENGINE=none` to suppress the comparison pass.

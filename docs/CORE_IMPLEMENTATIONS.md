@@ -120,7 +120,7 @@ These runs supersede the historical **56.09 s / 0.229 s (4 469 q/s)** re
 ./benchmarks/run_residual_gold_standard.sh [optional_log_path]
 ```
 
-By default the script writes `bench_residual.log` in the repo root and sets `COVERTREEX_ENABLE_NUMBA=1`, `COVERTREEX_BATCH_ORDER=natural`, `COVERTREEX_PREFIX_SCHEDULE=doubling`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`, and `COVERTREEX_ENABLE_DIAGNOSTICS=0` so the output stays comparable across machines. Treat this log as the reference artefact when auditing regressions or publishing updated numbers (refer back to the 2025‑11‑06 56.09 s run when you need the historical pre-grid baseline).
+By default the script writes `bench_residual.log` in the repo root, **forces the Python/Numba path** (`COVERTREEX_ENABLE_RUST=0`) and sets `COVERTREEX_ENABLE_NUMBA=1`, `COVERTREEX_BATCH_ORDER=natural`, `COVERTREEX_PREFIX_SCHEDULE=doubling`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`, and `COVERTREEX_ENABLE_DIAGNOSTICS=0` so the output stays comparable across machines. An optional comparison pass runs after the gold run with `COMP_ENGINE` (default: `rust-hilbert`); set `COMP_ENGINE=none` to skip. Treat the gold log as the reference artefact when auditing regressions or publishing updated numbers (refer back to the 2025‑11‑06 56.09 s run when you need the historical pre-grid baseline).
 
 To reproduce the clamped adjacency run captured on 2025‑11‑07 (matching `benchmark_residual_clamped_20251107_fix_run2.jsonl`), invoke:
 
