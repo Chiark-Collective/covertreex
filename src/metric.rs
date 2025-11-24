@@ -1,5 +1,6 @@
 use ndarray::{Array2, ArrayView2};
 use num_traits::{Float, NumCast};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use wide::{f32x8, f64x4};
 
@@ -48,6 +49,7 @@ pub struct ResidualMetric<'a, T> {
     pub scaled_norms: Vec<T>,
     pub v_norms: Vec<T>,
     pub neg_half: T,
+    pub cap_default: T,
 }
 
 impl<'a, T> ResidualMetric<'a, T>
@@ -60,6 +62,7 @@ where
         coords: ArrayView2<'a, T>,
         rbf_var: T,
         rbf_ls: &'a [T],
+        cap_default: Option<T>,
     ) -> Self {
         let dim = coords.ncols();
         let eps = T::from(1e-6).unwrap();
@@ -91,6 +94,7 @@ where
         }
 
         let neg_half = T::from(-0.5).unwrap();
+        let cap_default = cap_default.unwrap_or_else(|| T::from(2.0).unwrap());
 
         ResidualMetric {
             v_matrix,
@@ -100,7 +104,28 @@ where
             scaled_norms,
             v_norms,
             neg_half,
+            cap_default,
         }
+    }
+
+    #[inline(always)]
+    pub fn max_distance_hint(&self) -> T {
+        // Residual correlation distance is bounded in [0, 2].
+        T::from(2.0).unwrap()
+    }
+
+    #[inline(always)]
+    pub fn apply_level_cap(&self, level: i32, caps: Option<&HashMap<i32, T>>, radius: T) -> T {
+        if let Some(map) = caps {
+            if let Some(&cap) = map.get(&level) {
+                return if cap < radius { cap } else { radius };
+            }
+        }
+        let default_cap = self.cap_default;
+        if default_cap > T::zero() && default_cap < radius {
+            return default_cap;
+        }
+        radius
     }
 
     #[inline(always)]

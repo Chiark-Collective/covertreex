@@ -5,6 +5,7 @@ use crate::algo::{
 };
 use crate::metric::{Euclidean, ResidualMetric};
 use crate::pcct::hilbert_like_order;
+use crate::telemetry::ResidualQueryTelemetry;
 use crate::tree::CoverTreeData;
 use ndarray::{Array1, Array2};
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2};
@@ -16,6 +17,7 @@ use std::collections::HashMap;
 mod algo;
 mod metric;
 mod pcct;
+mod telemetry;
 mod tree;
 
 fn load_scope_caps(py: Python<'_>) -> Option<HashMap<i32, f32>> {
@@ -26,21 +28,21 @@ fn load_scope_caps(py: Python<'_>) -> Option<HashMap<i32, f32>> {
 
     let module = PyModule::import(py, "covertreex.metrics.residual.scope_caps").ok()?;
     let caps_obj = module.call_method1("get_scope_cap_table", (path,)).ok()?;
-    
+
     if caps_obj.is_none() {
         return None;
     }
 
     let level_caps_attr = caps_obj.getattr("level_caps").ok()?;
     let dict: Bound<'_, PyDict> = level_caps_attr.downcast().ok()?.clone();
-    
+
     let mut caps = HashMap::new();
     for (k, v) in dict.iter() {
         if let (Ok(level), Ok(cap)) = (k.extract::<i32>(), v.extract::<f32>()) {
             caps.insert(level, cap);
         }
     }
-    
+
     if !caps.is_empty() {
         Some(caps)
     } else {
@@ -53,6 +55,7 @@ fn load_scope_caps(py: Python<'_>) -> Option<HashMap<i32, f32>> {
 struct CoverTreeWrapper {
     inner: CoverTreeInner,
     survivors: Vec<i64>,
+    last_query_telemetry: Option<ResidualQueryTelemetry>,
 }
 
 enum CoverTreeInner {
@@ -108,6 +111,25 @@ fn to_array1_f64(obj: &Bound<'_, PyAny>) -> PyResult<ndarray::Array1<f64>> {
     ))
 }
 
+fn telemetry_to_pydict(py: Python<'_>, telem: &ResidualQueryTelemetry) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("frontier_levels", &telem.frontier_levels)?;
+    dict.set_item("frontier_expanded", &telem.frontier_expanded)?;
+    dict.set_item("yields", &telem.yields)?;
+    dict.set_item("caps_applied", telem.caps_applied)?;
+    dict.set_item("prunes_lower_bound", telem.prunes_lower_bound)?;
+    dict.set_item("prunes_lower_bound_chunks", telem.prunes_lower_bound_chunks)?;
+    dict.set_item("prunes_cap", telem.prunes_cap)?;
+    dict.set_item("masked_dedup", telem.masked_dedup)?;
+    dict.set_item("distance_evals", telem.distance_evals)?;
+    dict.set_item("budget_escalations", telem.budget_escalations)?;
+    dict.set_item("budget_early_terminate", telem.budget_early_terminate)?;
+    dict.set_item("level_cache_hits", telem.level_cache_hits)?;
+    dict.set_item("level_cache_misses", telem.level_cache_misses)?;
+    dict.set_item("block_sizes", &telem.block_sizes)?;
+    Ok(dict.into_any().into())
+}
+
 #[pymethods]
 impl CoverTreeWrapper {
     #[new]
@@ -135,6 +157,7 @@ impl CoverTreeWrapper {
             return Ok(CoverTreeWrapper {
                 inner: CoverTreeInner::F32(data),
                 survivors: Vec::new(),
+                last_query_telemetry: None,
             });
         }
 
@@ -152,6 +175,7 @@ impl CoverTreeWrapper {
             return Ok(CoverTreeWrapper {
                 inner: CoverTreeInner::F64(data),
                 survivors: Vec::new(),
+                last_query_telemetry: None,
             });
         }
 
@@ -205,6 +229,7 @@ impl CoverTreeWrapper {
                     coords_arr.view(),
                     rbf_var as f32,
                     rbf_ls_arr.as_slice().unwrap(),
+                    None,
                 );
                 let chunk = chunk_size.unwrap_or_else(|| batch_arr.nrows());
                 let mut start = 0;
@@ -228,6 +253,7 @@ impl CoverTreeWrapper {
                     coords_arr.view(),
                     rbf_var,
                     rbf_ls_arr.as_slice().unwrap(),
+                    None,
                 );
                 let chunk = chunk_size.unwrap_or_else(|| batch_arr.nrows());
                 let mut start = 0;
@@ -273,9 +299,21 @@ impl CoverTreeWrapper {
         }
     }
 
+    fn last_query_telemetry<'py>(&self, py: Python<'py>) -> PyResult<Option<PyObject>> {
+        if let Some(t) = &self.last_query_telemetry {
+            Ok(Some(telemetry_to_pydict(py, t)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn clear_last_query_telemetry(&mut self) {
+        self.last_query_telemetry = None;
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn knn_query_residual<'py>(
-        &self,
+        &mut self,
         py: Python<'py>,
         query_indices: numpy::PyReadonlyArray1<i64>,
         node_to_dataset: Vec<i64>,
@@ -299,18 +337,40 @@ impl CoverTreeWrapper {
                     coords_arr.view(),
                     rbf_var as f32,
                     rbf_ls_arr.as_slice().unwrap(),
+                    None,
                 );
 
                 let scope_caps = load_scope_caps(py);
+                let telemetry_enabled = std::env::var("COVERTREEX_RUST_QUERY_TELEMETRY")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let mut telemetry_rec: Option<ResidualQueryTelemetry> = None;
 
-                let (indices, dists) = batch_residual_knn_query(
-                    data,
-                    query_indices.as_array(),
-                    &node_to_dataset,
-                    &metric,
-                    k,
-                    scope_caps.as_ref(),
-                );
+                let (indices, dists) = if telemetry_enabled {
+                    let mut telem = ResidualQueryTelemetry::default();
+                    let res = batch_residual_knn_query(
+                        data,
+                        query_indices.as_array(),
+                        &node_to_dataset,
+                        &metric,
+                        k,
+                        scope_caps.as_ref(),
+                        Some(&mut telem),
+                    );
+                    telemetry_rec = Some(telem);
+                    res
+                } else {
+                    batch_residual_knn_query(
+                        data,
+                        query_indices.as_array(),
+                        &node_to_dataset,
+                        &metric,
+                        k,
+                        scope_caps.as_ref(),
+                        None,
+                    )
+                };
+                self.last_query_telemetry = telemetry_rec;
                 let (idx, dst) = to_py_arrays(py, indices, dists);
                 Ok((idx, dst.into_any().into()))
             }
@@ -326,6 +386,7 @@ impl CoverTreeWrapper {
                     coords_arr.view(),
                     rbf_var,
                     rbf_ls_arr.as_slice().unwrap(),
+                    None,
                 );
 
                 let scope_caps = load_scope_caps(py);
@@ -335,9 +396,8 @@ impl CoverTreeWrapper {
                 // But scope_caps map is f32.
                 // We need to convert it or make it generic?
                 // Simpler: just map it for f64 case.
-                let caps_f64: Option<HashMap<i32, f64>> = scope_caps.map(|m| {
-                    m.into_iter().map(|(k, v)| (k, v as f64)).collect()
-                });
+                let caps_f64: Option<HashMap<i32, f64>> =
+                    scope_caps.map(|m| m.into_iter().map(|(k, v)| (k, v as f64)).collect());
 
                 let (indices, dists) = batch_residual_knn_query(
                     data,
@@ -346,6 +406,7 @@ impl CoverTreeWrapper {
                     &metric,
                     k,
                     caps_f64.as_ref(),
+                    None,
                 );
                 let (idx, dst) = to_py_arrays(py, indices, dists);
                 Ok((idx, dst.into_any().into()))
@@ -379,6 +440,7 @@ impl CoverTreeWrapper {
                     coords_arr.view(),
                     rbf_var as f32,
                     rbf_ls_arr.as_slice().unwrap(),
+                    None,
                 );
 
                 let scope_caps = load_scope_caps(py);
@@ -432,6 +494,7 @@ impl CoverTreeWrapper {
                             &metric,
                             k,
                             scope_caps.as_ref(),
+                            None,
                         );
                         if !survivors.is_empty() {
                             batch_residual_knn_query_block_sgemm(
@@ -455,6 +518,7 @@ impl CoverTreeWrapper {
                         &metric,
                         k,
                         scope_caps.as_ref(),
+                        None,
                     ),
                 };
                 let (idx, dst) = to_py_arrays(py, indices, dists);
@@ -651,6 +715,7 @@ fn build_pcct_residual_tree(
             20,
         )),
         survivors: Vec::new(),
+        last_query_telemetry: None,
     };
 
     let metric = ResidualMetric::new(
@@ -659,6 +724,7 @@ fn build_pcct_residual_tree(
         coords_arr.view(),
         rbf_var as f32,
         rbf_ls_arr.as_slice().unwrap(),
+        None,
     );
     let chunk = chunk_size.unwrap_or_else(|| indices_arr.nrows());
     let mut start = 0;
@@ -674,6 +740,8 @@ fn build_pcct_residual_tree(
             view,
             None,
             &metric,
+            None,
+            None,
             None,
             None,
             None,
@@ -794,7 +862,7 @@ fn emit_rust_batch(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[pyfunction(signature = (v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size=None, batch_order=None, log_writer=None, grid_whiten_scale=None, scope_chunk_target=None, conflict_degree_cap=None, scope_budget_schedule=None, scope_budget_up=None, scope_budget_down=None, masked_scope_append=None))]
+#[pyfunction(signature = (v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size=None, batch_order=None, log_writer=None, grid_whiten_scale=None, scope_chunk_target=None, conflict_degree_cap=None, scope_budget_schedule=None, scope_budget_up=None, scope_budget_down=None, masked_scope_append=None, scope_chunk_max_segments=None, scope_chunk_pair_merge=None))]
 fn build_pcct2_residual_tree(
     py: Python<'_>,
     v_matrix: PyObject,
@@ -812,6 +880,8 @@ fn build_pcct2_residual_tree(
     scope_budget_up: Option<f64>,
     scope_budget_down: Option<f64>,
     masked_scope_append: Option<bool>,
+    scope_chunk_max_segments: Option<usize>,
+    scope_chunk_pair_merge: Option<bool>,
 ) -> PyResult<(CoverTreeWrapper, Vec<i64>)> {
     // Force float32 payloads to mirror python-numba fast path.
     let v_matrix_arr = to_array2_f32(&v_matrix.bind(py))?;
@@ -835,6 +905,33 @@ fn build_pcct2_residual_tree(
     let indices_arr =
         Array2::from_shape_vec((order.len(), 1), indices_f32).expect("shape for indices");
 
+    let parse_bool_env = |key: &str, default: Option<bool>| -> Option<bool> {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| {
+                let norm = v.to_lowercase();
+                if norm == "1" || norm == "true" || norm == "yes" || norm == "on" {
+                    Some(true)
+                } else if norm == "0" || norm == "false" || norm == "no" || norm == "off" {
+                    Some(false)
+                } else {
+                    default
+                }
+            })
+            .or(default)
+    };
+
+    let scope_chunk_pair_merge = scope_chunk_pair_merge
+        .or_else(|| parse_bool_env("COVERTREEX_SCOPE_CHUNK_PAIR_MERGE", None))
+        .unwrap_or(true);
+    let masked_scope_append = masked_scope_append
+        .or_else(|| parse_bool_env("COVERTREEX_RESIDUAL_MASKED_SCOPE_APPEND", None));
+    let scope_chunk_max_segments = scope_chunk_max_segments.or_else(|| {
+        std::env::var("COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+    });
+
     let dummy = Array2::<f32>::zeros((0, 1));
     let empty_i64 = Array1::<i64>::zeros(0);
     let empty_i32 = Array1::<i32>::zeros(0);
@@ -849,6 +946,7 @@ fn build_pcct2_residual_tree(
             20,
         )),
         survivors: Vec::new(),
+        last_query_telemetry: None,
     };
 
     let metric = ResidualMetric::new(
@@ -857,6 +955,7 @@ fn build_pcct2_residual_tree(
         coords_arr.view(),
         rbf_var as f32,
         rbf_ls_arr.as_slice().unwrap(),
+        None,
     );
 
     // Reorder coords to match insertion permutation
@@ -888,6 +987,8 @@ fn build_pcct2_residual_tree(
             scope_budget_up,
             scope_budget_down,
             masked_scope_append,
+            scope_chunk_max_segments,
+            Some(scope_chunk_pair_merge),
         );
 
         for sel in telemetry.selected.iter() {

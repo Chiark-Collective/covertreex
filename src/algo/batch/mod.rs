@@ -21,6 +21,8 @@ fn build_scopes_from_edges(
     budget_up: Option<f64>,
     budget_down: Option<f64>,
     masked_scope_append: bool,
+    max_segments: Option<usize>,
+    pair_merge: bool,
 ) -> (
     Vec<i64>, // scope_indptr
     Vec<i64>, // scope_indices
@@ -105,11 +107,17 @@ fn build_scopes_from_edges(
     let mut budget_escalations_total = 0i64;
     let mut budget_early_total = 0i64;
     let mut budget_final_max = base_limit as i64;
+    let max_segments_limit = max_segments.unwrap_or(usize::MAX);
 
     // Scratch mask reused per owner to avoid allocations when batch sizes are moderate.
     let mut mask = vec![false; batch_len];
 
     for owners in adjacency.into_iter() {
+        if emitted as usize >= max_segments_limit {
+            saturated_count += 1;
+            break;
+        }
+
         scan_count += owners.len() as i64;
         let mut members: Vec<usize> = if masked_scope_append {
             for &t in owners.iter() {
@@ -157,7 +165,13 @@ fn build_scopes_from_edges(
         emitted += 1;
         max_members = max_members.max(members.len() as i64);
         total_points += members.len() as i64;
-        pairs_after_acc += ((members.len() as i64) * ((members.len() as i64) - 1)) / 2;
+        let mut pairs_here = ((members.len() as i64) * ((members.len() as i64) - 1)) / 2;
+        if pair_merge {
+            // clamp to avoid quadratic blow-up when members grow unexpectedly
+            let cap_here = (limit as i64).saturating_mul(limit as i64);
+            pairs_here = pairs_here.min(cap_here);
+        }
+        pairs_after_acc += pairs_here;
         dedupe_total += (owners.len().saturating_sub(members.len())) as i64;
 
         for m in members {
@@ -390,7 +404,7 @@ where
     T: Float + Debug + Send + Sync + std::iter::Sum + 'static,
 {
     let _ = batch_insert_collect(
-        tree, batch, None, metric, None, None, None, None, None, None, None, false,
+        tree, batch, None, metric, None, None, None, None, None, None, None, None, None, false,
     );
 }
 
@@ -406,6 +420,8 @@ pub fn batch_insert_with_telemetry<T>(
     scope_budget_up: Option<f64>,
     scope_budget_down: Option<f64>,
     masked_scope_append: Option<bool>,
+    scope_chunk_max_segments: Option<usize>,
+    scope_chunk_pair_merge: Option<bool>,
 ) -> BatchInsertTelemetry
 where
     T: Float + Debug + Send + Sync + std::iter::Sum + 'static,
@@ -422,6 +438,8 @@ where
         scope_budget_up,
         scope_budget_down,
         masked_scope_append,
+        scope_chunk_max_segments,
+        scope_chunk_pair_merge,
         true,
     )
 }
@@ -438,6 +456,8 @@ fn batch_insert_collect<T>(
     scope_budget_up: Option<f64>,
     scope_budget_down: Option<f64>,
     masked_scope_append: Option<bool>,
+    scope_chunk_max_segments: Option<usize>,
+    scope_chunk_pair_merge: Option<bool>,
     collect_stats: bool,
 ) -> BatchInsertTelemetry
 where
@@ -882,6 +902,8 @@ where
             scope_budget_up,
             scope_budget_down,
             masked_scope_append.unwrap_or(true),
+            scope_chunk_max_segments,
+            scope_chunk_pair_merge.unwrap_or(true),
         );
 
         (

@@ -1007,7 +1007,8 @@ class RustHilbertEngine:
         if queries.dtype.kind not in {"i", "u"}:
             raise ValueError("rust-hilbert engine expects integer query payloads representing dataset indices.")
         query_indices = np.asarray(queries, dtype=np.int64).reshape(-1)
-        indices, distances = handle.tree.knn_query_residual_block(
+
+        indices, distances = handle.tree.knn_query_residual(
             query_indices,
             handle.node_to_dataset,
             handle.v_matrix,
@@ -1017,6 +1018,25 @@ class RustHilbertEngine:
             np.asarray(handle.rbf_lengthscale, dtype=handle.dtype),
             int(k),
         )
+
+        # Pull telemetry when enabled so it lands in op logs.
+        try:
+            telem = handle.tree.last_query_telemetry()
+        except Exception:
+            telem = None
+        if telem is not None:
+            try:
+                # Attach to the active op log if present
+                op_log = getattr(context, "op_log", None)
+                if op_log is not None and hasattr(op_log, "add_metadata"):
+                    op_log.add_metadata(rust_query_telemetry=telem)
+            except Exception:
+                pass
+            try:
+                handle.tree.clear_last_query_telemetry()
+            except Exception:
+                pass
+
         sorted_indices = np.asarray(indices, dtype=np.int64)
         sorted_distances = np.asarray(distances, dtype=handle.dtype)
         return _format_knn_output(sorted_indices, sorted_distances, return_distances=return_distances)

@@ -1,4 +1,5 @@
 use crate::metric::{Euclidean, Metric, ResidualMetric};
+use crate::telemetry::ResidualQueryTelemetry;
 use crate::tree::CoverTreeData;
 use ndarray::parallel::prelude::*;
 use num_traits::Float;
@@ -242,23 +243,45 @@ pub fn batch_residual_knn_query<'a, T>(
     metric: &ResidualMetric<'a, T>,
     k: usize,
     scope_caps: Option<&HashMap<i32, T>>,
+    telemetry: Option<&mut ResidualQueryTelemetry>,
 ) -> (Vec<Vec<i64>>, Vec<Vec<T>>)
 where
     T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
 {
-    let results: Vec<(Vec<i64>, Vec<T>)> = query_indices
-        .into_par_iter()
-        .map(|&q_idx| {
-            single_residual_knn_query(
+    // Opt-in telemetry: disable parallelism to aggregate counts deterministically
+    let results: Vec<(Vec<i64>, Vec<T>)> = if let Some(tele) = telemetry {
+        let mut out = Vec::with_capacity(query_indices.len());
+        for &q_idx in query_indices.iter() {
+            let mut local = ResidualQueryTelemetry::default();
+            let res = single_residual_knn_query(
                 tree,
                 node_to_dataset,
                 metric,
                 q_idx as usize,
                 k,
                 scope_caps,
-            )
-        })
-        .collect();
+                Some(&mut local),
+            );
+            tele.add_from(&local);
+            out.push(res);
+        }
+        out
+    } else {
+        query_indices
+            .into_par_iter()
+            .map(|&q_idx| {
+                single_residual_knn_query(
+                    tree,
+                    node_to_dataset,
+                    metric,
+                    q_idx as usize,
+                    k,
+                    scope_caps,
+                    None,
+                )
+            })
+            .collect()
+    };
 
     let mut indices = Vec::with_capacity(results.len());
     let mut dists = Vec::with_capacity(results.len());
@@ -490,11 +513,11 @@ fn single_residual_knn_query<'a, T>(
     q_dataset_idx: usize,
     k: usize,
     scope_caps: Option<&HashMap<i32, T>>,
+    mut telemetry: Option<&mut ResidualQueryTelemetry>,
 ) -> (Vec<i64>, Vec<T>)
 where
     T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
 {
-    let mut candidate_heap = BinaryHeap::new();
     let mut result_heap: BinaryHeap<Neighbor<T>> = BinaryHeap::new();
 
     if tree.len() == 0 {
@@ -508,14 +531,15 @@ where
     } else {
         vec![32, 64, 96]
     };
+    // Match Python defaults (scope_budget_up_thresh/down_thresh)
     let budget_up: f64 = std::env::var("COVERTREEX_RESIDUAL_BUDGET_UP")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0.6);
+        .unwrap_or(0.015);
     let budget_down: f64 = std::env::var("COVERTREEX_RESIDUAL_BUDGET_DOWN")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0.01);
+        .unwrap_or(0.002);
 
     let mut budget_idx = 0;
     let mut budget_limit = if !budget_schedule.is_empty() {
@@ -526,263 +550,350 @@ where
     let mut survivors_count = 0;
     let mut low_yield_streak = 0;
 
-    // Push root (index 0) with its true distance
+    // Root distance and seed result heap
     let root_payload = tree.get_point_row(0);
     let root_dataset_idx = root_payload[0].to_usize().unwrap();
     let root_dist = metric.distance_idx(q_dataset_idx, root_dataset_idx);
-    candidate_heap.push(Candidate {
+    result_heap.push(Neighbor {
         dist: OrderedFloat(root_dist),
         node_idx: 0,
     });
-    HEAP_PUSHES.fetch_add(1, AtomicOrdering::Relaxed);
+    let mut kth_dist = if k > 0 { root_dist } else { T::max_value() };
     survivors_count += 1;
 
-    let mut kth_dist = T::max_value();
-    const BATCH_SIZE: usize = 64;
-    let mut batch_nodes: Vec<(i64, T)> = Vec::with_capacity(BATCH_SIZE);
-
-    // Child buffers
+    // Buffers and frontier
     let stream_tile = std::env::var("COVERTREEX_RESIDUAL_STREAM_TILE")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&v| v > 0)
         .unwrap_or(64);
-
-    let mut child_nodes = Vec::with_capacity(stream_tile);
-    let mut child_dataset_indices = Vec::with_capacity(stream_tile);
-    let mut child_distance_buffer: Vec<T> = Vec::with_capacity(stream_tile);
-
+    let use_masked_append = std::env::var("COVERTREEX_RESIDUAL_MASKED_SCOPE_APPEND")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let scope_member_limit_env = std::env::var("COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<isize>().ok())
+        .unwrap_or(0);
+    let scope_limit: usize = if scope_member_limit_env > 0 {
+        scope_member_limit_env as usize
+    } else {
+        let scope_limit_env = std::env::var("COVERTREEX_SCOPE_CHUNK_TARGET")
+            .ok()
+            .and_then(|v| v.parse::<isize>().ok())
+            .unwrap_or(0);
+        if scope_limit_env > 0 {
+            scope_limit_env as usize
+        } else {
+            usize::MAX
+        }
+    };
+    let dynamic_query_block = std::env::var("COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let level_cache_batching = std::env::var("COVERTREEX_RESIDUAL_LEVEL_CACHE_BATCHING")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
     let emit_stats = EMIT_STATS.load(AtomicOrdering::Relaxed);
     let prune_sentinel = T::max_value();
     let use_pruning =
         std::env::var("COVERTREEX_RUST_PRUNE_BOUNDS").map_or(false, |v| v == "1" || v == "true");
-    let scope_limit_env = std::env::var("COVERTREEX_SCOPE_CHUNK_TARGET")
-        .ok()
-        .and_then(|v| v.parse::<isize>().ok())
-        .unwrap_or(0);
-    let scope_limit: usize = if scope_limit_env > 0 {
-        scope_limit_env as usize
-    } else {
-        16_384
-    };
     let radius_floor: T = std::env::var("COVERTREEX_RESIDUAL_RADIUS_FLOOR")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .map(|v| T::from(v).unwrap_or(T::zero()))
-        .unwrap_or_else(T::zero);
-    let mut processed_targets: usize = 0;
+        .unwrap_or_else(|| T::from(1e-3).unwrap()); // match gold Numba floor
+    let _max_hint = metric.max_distance_hint();
+    let two = T::from(2.0).unwrap();
 
-    while !candidate_heap.is_empty() {
-        if survivors_count >= budget_limit && budget_limit != usize::MAX {
-            break;
+    let mut frontier: Vec<(usize, T)> = vec![(0usize, root_dist)];
+    let mut next_frontier: Vec<(usize, T)> = Vec::with_capacity(stream_tile);
+    let mut children_nodes: Vec<usize> = Vec::with_capacity(stream_tile);
+    let mut children_ds_idx: Vec<usize> = Vec::with_capacity(stream_tile);
+    let mut children_parent_lb: Vec<T> = Vec::with_capacity(stream_tile);
+    let mut distance_buffer: Vec<T> = Vec::with_capacity(stream_tile);
+    // Level cache mask persists across levels to avoid re-emitting the same dataset index.
+    let mut seen_mask: Vec<bool> = if use_masked_append {
+        vec![false; node_to_dataset.len()]
+    } else {
+        Vec::new()
+    };
+    // Cached per-dataset lower bounds carried across levels (Numba-style level cache)
+    let mut cached_lb: Vec<T> = vec![T::max_value(); node_to_dataset.len()];
+
+    while !frontier.is_empty() && survivors_count < budget_limit {
+        if let Some(t) = telemetry.as_mut() {
+            t.record_frontier(frontier.len(), children_nodes.len());
         }
+        children_nodes.clear();
+        children_ds_idx.clear();
+        children_parent_lb.clear();
 
-        batch_nodes.clear();
+        // Gather children of the current frontier (level cache: process once per level)
+        for &(parent, parent_dist) in frontier.iter() {
+            let parent_level = tree.levels[parent];
+            let mut parent_radius = two.powi(parent_level + 1);
+            let capped_parent = metric.apply_level_cap(parent_level, scope_caps, parent_radius);
+            if let Some(t) = telemetry.as_mut() {
+                if capped_parent < parent_radius {
+                    t.caps_applied += 1;
+                }
+            }
+            parent_radius = capped_parent;
+            if parent_radius < radius_floor {
+                parent_radius = radius_floor;
+            }
+            let parent_lb = parent_dist - parent_radius;
+            if result_heap.len() == k && parent_lb > kth_dist {
+                if let Some(t) = telemetry.as_mut() {
+                    t.prunes_lower_bound += 1;
+                }
+                continue;
+            }
 
-        // 1. Collect Batch
-        while batch_nodes.len() < BATCH_SIZE {
-            if let Some(cand) = candidate_heap.pop() {
-                batch_nodes.push((cand.node_idx, cand.dist.0));
-            } else {
-                break;
+            // Level cache batching: prefetch child distances in blocks to tighten kth early
+            let mut child = tree.children[parent];
+            let mut parent_children: Vec<usize> = Vec::new();
+            while child != -1 {
+                parent_children.push(child as usize);
+                let next = tree.next_node[child as usize];
+                if next == child {
+                    break;
+                }
+                child = next;
+                if child == tree.children[parent] {
+                    break;
+                }
+            }
+            if level_cache_batching && !parent_children.is_empty() {
+                // order by dataset distance to parent to prioritize closer children
+                parent_children.sort_by_key(|&c| node_to_dataset[c]);
+            }
+            for child_idx in parent_children.into_iter() {
+                let ds_idx = node_to_dataset[child_idx] as usize;
+                if use_masked_append {
+                    if ds_idx < seen_mask.len() && !seen_mask[ds_idx] {
+                        seen_mask[ds_idx] = true;
+                        children_nodes.push(child_idx);
+                        children_ds_idx.push(ds_idx);
+                        children_parent_lb.push(parent_lb);
+                        if let Some(t) = telemetry.as_mut() {
+                            t.level_cache_misses += 1;
+                        }
+                    } else {
+                        if let Some(t) = telemetry.as_mut() {
+                            t.masked_dedup += 1;
+                            t.level_cache_hits += 1;
+                        }
+                        continue;
+                    }
+                } else {
+                    children_nodes.push(child_idx);
+                    children_ds_idx.push(ds_idx);
+                    children_parent_lb.push(parent_lb);
+                }
+                if ds_idx < cached_lb.len() && cached_lb[ds_idx] > parent_lb {
+                    cached_lb[ds_idx] = parent_lb;
+                }
             }
         }
 
-        if batch_nodes.is_empty() {
-            break;
-        }
-        if processed_targets >= scope_limit {
-            break;
-        }
+        // Process children in tiles
+        let mut start = 0;
+        while start < children_nodes.len() && survivors_count < budget_limit {
+            let active = children_nodes.len().saturating_sub(start);
+            let mut tile = if dynamic_query_block {
+                // Adaptive tile: shrink when active set is small, grow when large.
+                // Use frontier size + remaining active to scale smoothly.
+                let wave = frontier.len().max(1);
+                let combined = active + wave;
+                let adaptive = if combined <= 32 {
+                    16
+                } else if combined <= 128 {
+                    32
+                } else if combined <= 512 {
+                    64
+                } else {
+                    128
+                };
+                adaptive.min(stream_tile)
+            } else {
+                stream_tile
+            };
+            if dynamic_query_block {
+                let remaining = scope_limit.saturating_sub(survivors_count);
+                tile = tile.min(remaining.max(1));
+            }
+            if let Some(t) = telemetry.as_mut() {
+                t.record_block(tile);
+            }
+            let end = usize::min(start + tile, children_nodes.len());
+            let nodes_chunk = &children_nodes[start..end];
+            let ds_chunk = &children_ds_idx[start..end];
+            let lb_chunk = &children_parent_lb[start..end];
 
-        // 2. Process Results (using exact distances from heap)
-        for &(node_idx, dist) in batch_nodes.iter() {
-            // Update k-NN
-            if result_heap.len() < k || dist < kth_dist {
+            // Pre-distance pruning: skip entire chunk if cached parent lower bounds exceed kth.
+            if result_heap.len() == k {
+                if let Some(&min_lb) = lb_chunk
+                    .iter()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                {
+                    if min_lb > kth_dist {
+                        if let Some(t) = telemetry.as_mut() {
+                            t.prunes_lower_bound_chunks += 1;
+                        }
+                        start = end;
+                        continue;
+                    }
+                }
+            }
+
+            distance_buffer.clear();
+            distance_buffer.resize(nodes_chunk.len(), prune_sentinel);
+            let mut eval_targets: Vec<usize> = Vec::with_capacity(nodes_chunk.len());
+            let mut eval_positions: Vec<usize> = Vec::with_capacity(nodes_chunk.len());
+            for (j, &ds_idx) in ds_chunk.iter().enumerate() {
+                if result_heap.len() == k
+                    && ds_idx < cached_lb.len()
+                    && cached_lb[ds_idx] > kth_dist
+                {
+                    if let Some(t) = telemetry.as_mut() {
+                        t.prunes_lower_bound += 1;
+                        t.level_cache_hits += 1;
+                    }
+                    continue;
+                }
+                eval_targets.push(ds_idx);
+                eval_positions.push(j);
+            }
+            let mut tmp: Vec<T> = Vec::with_capacity(eval_targets.len());
+            metric.distances_sq_batch_idx_into_with_kth(
+                q_dataset_idx,
+                &eval_targets,
+                if use_pruning { Some(kth_dist) } else { None },
+                &mut tmp,
+            );
+            for (val, pos) in tmp.into_iter().zip(eval_positions.into_iter()) {
+                distance_buffer[pos] = val;
+            }
+
+            if emit_stats {
+                let evals = distance_buffer
+                    .iter()
+                    .filter(|&&d| d != prune_sentinel)
+                    .count();
+                DIST_EVALS.fetch_add(evals, AtomicOrdering::Relaxed);
+            }
+            if let Some(t) = telemetry.as_mut() {
+                t.distance_evals += distance_buffer
+                    .iter()
+                    .filter(|&&d| d != prune_sentinel)
+                    .count();
+            }
+
+            let mut added_in_chunk = 0;
+            // Process closer children first to tighten kth early
+            let mut ordered: Vec<(T, usize, T)> = nodes_chunk
+                .iter()
+                .enumerate()
+                .map(|(j, &idx)| (distance_buffer[j], idx, lb_chunk[j]))
+                .filter(|(d, _, _)| *d != prune_sentinel)
+                .collect();
+            ordered.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            for (dist, child_idx, parent_lb_cached) in ordered.into_iter() {
+                let child_level = tree.levels[child_idx];
+                let mut child_radius = two.powi(child_level + 1);
+                let capped_child = metric.apply_level_cap(child_level, scope_caps, child_radius);
+                if let Some(t) = telemetry.as_mut() {
+                    if capped_child < child_radius {
+                        t.caps_applied += 1;
+                    }
+                }
+                child_radius = capped_child;
+                if child_radius < radius_floor {
+                    child_radius = radius_floor;
+                }
+
+                if result_heap.len() == k {
+                    let mut lb = parent_lb_cached.min(dist - child_radius);
+                    if let Some(stored) =
+                        cached_lb.get(node_to_dataset[child_idx] as usize).copied()
+                    {
+                        lb = lb.min(stored);
+                    }
+                    if lb > kth_dist {
+                        if let Some(t) = telemetry.as_mut() {
+                            t.prunes_cap += 1;
+                        }
+                        continue;
+                    }
+                }
+
+                if let Some(slot) = cached_lb.get_mut(node_to_dataset[child_idx] as usize) {
+                    let new_lb = dist - child_radius;
+                    if new_lb < *slot {
+                        *slot = new_lb;
+                    }
+                }
+
                 result_heap.push(Neighbor {
                     dist: OrderedFloat(dist),
-                    node_idx,
+                    node_idx: child_idx as i64,
                 });
                 if result_heap.len() > k {
                     result_heap.pop();
                 }
-                if result_heap.len() == k {
-                    if let Some(peek) = result_heap.peek() {
-                        kth_dist = peek.dist.0;
-                    }
-                }
-            }
-
-            // Expand Children
-            // Pruning: d(q, u) - 2^{level+1} > kth_dist
-            let two = T::from(2.0).unwrap();
-            let level = tree.levels[node_idx as usize];
-            let mut radius = two.powi(level + 1);
-
-            // Apply Scope Cap
-            if let Some(caps) = scope_caps {
-                if let Some(&cap) = caps.get(&level) {
-                    let cap_t = cap; // Cap is now T
-                    if cap_t < radius {
-                        radius = cap_t;
-                    }
-                }
-            }
-
-            // Apply Radius Floor
-            if radius < radius_floor {
-                radius = radius_floor;
-            }
-            
-            let lower_bound = dist - radius;
-
-            if result_heap.len() == k && lower_bound > kth_dist {
-                continue;
-            }
-
-            // Collect children for batched distance evaluation
-            let mut child = tree.children[node_idx as usize];
-
-            // Streamer Loop over Tiles
-            while child != -1 {
-                child_nodes.clear();
-                child_dataset_indices.clear();
-
-                // Collect Tile
-                while child != -1 && child_nodes.len() < stream_tile {
-                    // Pruning (Insertion Check)
-                    let child_level = tree.levels[child as usize];
-                    let mut child_radius = two.powi(child_level + 1);
-
-                    // Apply Scope Cap to Child
-                    if let Some(caps) = scope_caps {
-                        if let Some(&cap) = caps.get(&child_level) {
-                            let cap_t = cap; // Cap is now T
-                            if cap_t < child_radius {
-                                child_radius = cap_t;
-                            }
-                        }
-                    }
-
-                    // Apply Radius Floor
-                    if child_radius < radius_floor {
-                        child_radius = radius_floor;
-                    }
-
-                    let lb_child = dist - child_radius;
-
-                    if result_heap.len() < k || lb_child <= kth_dist {
-                        child_nodes.push(child);
-                        child_dataset_indices.push(node_to_dataset[child as usize] as usize);
-                    }
-
-                    let next = tree.next_node[child as usize];
-                    if next == child {
-                        child = -1; // Signal end of children
-                    } else {
-                        child = next;
-                        if child == tree.children[node_idx as usize] {
-                            child = -1;
-                        }
-                    }
+                if let Some(peek) = result_heap.peek() {
+                    kth_dist = peek.dist.0;
                 }
 
-                if child_nodes.is_empty() {
-                    break;
-                }
+                survivors_count += 1;
+                added_in_chunk += 1;
 
-                // Compute Dists
-                child_distance_buffer.clear();
-                metric.distances_sq_batch_idx_into_with_kth(
-                    q_dataset_idx,
-                    &child_dataset_indices,
-                    if use_pruning { Some(kth_dist) } else { None },
-                    &mut child_distance_buffer,
-                );
-
-                if emit_stats {
-                    let evals = child_distance_buffer
-                        .iter()
-                        .filter(|&&d| d != prune_sentinel)
-                        .count();
-                    DIST_EVALS.fetch_add(evals, AtomicOrdering::Relaxed);
-                }
-                processed_targets = processed_targets.saturating_add(child_dataset_indices.len());
-
-                // Masked Append & Budget Update
-                let mut added_in_tile = 0;
-                for (j, &child_node) in child_nodes.iter().enumerate() {
-                    let child_dist = child_distance_buffer[j];
-                    if child_dist == prune_sentinel {
-                        continue;
-                    }
-
-                    // Post-Distance Pruning
-                    if result_heap.len() == k {
-                        let child_level = tree.levels[child_node as usize];
-                        let mut child_radius = two.powi(child_level + 1);
-
-                        // Apply Scope Cap to Child
-                        if let Some(caps) = scope_caps {
-                            if let Some(&cap) = caps.get(&child_level) {
-                                let cap_t = cap; // Cap is now T
-                                if cap_t < child_radius {
-                                    child_radius = cap_t;
-                                }
-                            }
-                        }
-
-                        // Apply Radius Floor
-                        if child_radius < radius_floor {
-                            child_radius = radius_floor;
-                        }
-                        
-                        let lb_child = child_dist - child_radius;
-                        if lb_child > kth_dist {
-                            continue;
-                        }
-                    }
-
-                    candidate_heap.push(Candidate {
-                        dist: OrderedFloat(child_dist),
-                        node_idx: child_node,
-                    });
-                    if emit_stats {
-                        HEAP_PUSHES.fetch_add(1, AtomicOrdering::Relaxed);
-                    }
-                    added_in_tile += 1;
-                }
-
-                survivors_count += added_in_tile;
-
-                // Budget Update
-                if !budget_schedule.is_empty() {
-                    let ratio = if !child_nodes.is_empty() {
-                        added_in_tile as f64 / child_nodes.len() as f64
-                    } else {
-                        0.0
-                    };
-                    if ratio >= budget_up {
-                        if budget_idx + 1 < budget_schedule.len() {
-                            budget_idx += 1;
-                            budget_limit = budget_schedule[budget_idx];
-                        }
-                        low_yield_streak = 0;
-                    } else if ratio < budget_down {
-                        low_yield_streak += 1;
-                        if low_yield_streak >= 2 {
-                            break;
-                        }
-                    } else {
-                        low_yield_streak = 0;
-                    }
-                }
-
-                if survivors_count >= budget_limit && budget_limit != usize::MAX {
+                if survivors_count < budget_limit {
+                    next_frontier.push((child_idx, dist));
+                } else {
                     break;
                 }
             }
+
+            // Budget ladder update (yield-based)
+            if !budget_schedule.is_empty() && !nodes_chunk.is_empty() {
+                let ratio = added_in_chunk as f64 / nodes_chunk.len() as f64;
+                if let Some(t) = telemetry.as_mut() {
+                    t.record_yield(ratio as f32);
+                }
+                if ratio >= budget_up {
+                    if budget_idx + 1 < budget_schedule.len() {
+                        budget_idx += 1;
+                        budget_limit = budget_schedule[budget_idx];
+                        if let Some(t) = telemetry.as_mut() {
+                            t.budget_escalations += 1;
+                        }
+                    }
+                    low_yield_streak = 0;
+                } else if ratio < budget_down {
+                    low_yield_streak += 1;
+                    if low_yield_streak >= 2 {
+                        if let Some(t) = telemetry.as_mut() {
+                            t.budget_early_terminate += 1;
+                        }
+                        break;
+                    }
+                } else {
+                    low_yield_streak = 0;
+                }
+            }
+
+            start = end;
         }
+
+        frontier.clear();
+        std::mem::swap(&mut frontier, &mut next_frontier);
+    }
+    if let Some(t) = telemetry {
+        // final frontier expansion count (expanded = children processed)
+        t.record_frontier(0, children_nodes.len());
     }
 
     let sorted_results = result_heap.into_sorted_vec();

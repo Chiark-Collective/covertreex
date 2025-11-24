@@ -193,12 +193,13 @@ def _knn_impl(
     if runtime.enable_rust:
         try:
             return _rust_knn_query(
-                tree, 
-                batch, 
-                k=k, 
-                return_distances=return_distances, 
-                backend=backend, 
-                context=context
+                tree,
+                batch,
+                k=k,
+                return_distances=return_distances,
+                backend=backend,
+                context=context,
+                op_log=op_log,
             )
         except ImportError:
             pass
@@ -297,6 +298,7 @@ def _rust_knn_query(
     return_distances: bool,
     backend: TreeBackend,
     context: cx_config.RuntimeContext,
+    op_log: Any | None = None,
 ) -> Any:
     import covertreex_backend
     from covertreex.metrics.residual.core import get_residual_backend, decode_indices
@@ -363,7 +365,22 @@ def _rust_knn_query(
         )
     else:
         indices, dists = wrapper.knn_query(queries_np, k)
-        
+
+    rust_telemetry = None
+    if hasattr(wrapper, "last_query_telemetry"):
+        try:
+            rust_telemetry = wrapper.last_query_telemetry()
+        except Exception:
+            rust_telemetry = None
+    if op_log is not None and rust_telemetry is not None:
+        op_log.add_metadata(rust_query_telemetry=rust_telemetry)
+        # clear to avoid accidental reuse
+        if hasattr(wrapper, "clear_last_query_telemetry"):
+            try:
+                wrapper.clear_last_query_telemetry()
+            except Exception:
+                pass
+
     sorted_indices = backend.asarray(indices, dtype=backend.default_int)
     sorted_distances = backend.asarray(dists, dtype=backend.default_float)
     

@@ -726,6 +726,7 @@ class RuntimeModel(BaseModel):
             engine=engine,
             devices=devices,
             enable_numba=enable_numba,
+            enable_rust=enable_rust,
             enable_sparse_traversal=enable_sparse_traversal,
             conflict_graph_impl=conflict_graph_impl,
             scope_segment_dedupe=scope_segment_dedupe,
