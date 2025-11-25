@@ -83,7 +83,7 @@ where
                 }
 
                 let next = tree.next_node[c];
-                if next == child {
+                if next == -1 || next == child {
                     break;
                 }
                 child = next;
