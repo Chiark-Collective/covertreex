@@ -173,23 +173,59 @@ def batch_insert(
         )
 
 def _create_dummy_plan(backend: TreeBackend) -> BatchInsertPlan:
-    from covertreex.algo.types import BatchInsertPlan, BatchInsertTimings
+    from covertreex.algo.batch.types import BatchInsertPlan, BatchInsertTimings
     from covertreex.algo.traverse import TraversalResult, TraversalTimings
     from covertreex.algo.conflict import ConflictGraph, ConflictGraphTimings
-    from covertreex.algo.mis import MISResult, MISTimings
-    
-    empty = backend.asarray([])
+    from covertreex.algo.mis import MISResult
+
+    xp = backend.xp
+    empty_int = backend.asarray(xp.asarray([], dtype=backend.default_int))
+    empty_float = backend.asarray(xp.asarray([], dtype=backend.default_float))
+    indptr = backend.asarray(xp.asarray([0], dtype=backend.default_int))
+
     timings = BatchInsertTimings(0.0, 0.0, 0.0)
-    t_timings = TraversalTimings(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    c_timings = ConflictGraphTimings(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    m_timings = MISTimings(0.0, 0.0, 0.0, 0.0)
-    
+    t_timings = TraversalTimings(
+        pairwise_seconds=0.0,
+        mask_seconds=0.0,
+        semisort_seconds=0.0,
+    )
+    c_timings = ConflictGraphTimings(
+        pairwise_seconds=0.0,
+        scope_group_seconds=0.0,
+        adjacency_seconds=0.0,
+        annulus_seconds=0.0,
+    )
+
+    traversal = TraversalResult(
+        parents=empty_int,
+        levels=empty_int,
+        conflict_scopes=tuple(),
+        scope_indptr=indptr,
+        scope_indices=empty_int,
+        timings=t_timings,
+    )
+
+    conflict_graph = ConflictGraph(
+        indptr=indptr,
+        indices=empty_int,
+        pairwise_distances=empty_float,
+        scope_indptr=indptr,
+        scope_indices=empty_int,
+        radii=empty_float,
+        annulus_bounds=empty_float,
+        annulus_bins=indptr,
+        annulus_bin_indptr=indptr,
+        annulus_bin_indices=empty_int,
+        annulus_bin_ids=empty_int,
+        timings=c_timings,
+    )
+
     return BatchInsertPlan(
-        traversal=TraversalResult(empty, empty, empty, empty, empty, t_timings),
-        conflict_graph=ConflictGraph(empty, empty, empty, empty, None, None, c_timings),
-        mis_result=MISResult(empty, 0, m_timings),
-        selected_indices=empty,
-        dominated_indices=empty,
+        traversal=traversal,
+        conflict_graph=conflict_graph,
+        mis_result=MISResult(empty_int, 0),
+        selected_indices=empty_int,
+        dominated_indices=empty_int,
         level_summaries=(),
         timings=timings,
         batch_permutation=None,
@@ -224,13 +260,10 @@ def _rust_batch_insert(
     
     if context.config.metric == "residual_correlation":
         host_backend = get_residual_backend()
-        
+
         # Rust backend for Residual Metric expects INDICES, not coordinates.
-        # We must decode the batch coordinates into dataset indices.
+        # Decode batch payload to dataset indices.
         batch_indices = decode_indices(host_backend, batch_np)
-        # Convert indices to float32 for the wrapper (which expects f32 or f64 arrays)
-        batch_indices_f32 = batch_indices.astype(np.float32).reshape(-1, 1)
-        
         v_matrix = host_backend.v_matrix
         p_diag = host_backend.p_diag
         coords = host_backend.kernel_points_f32
@@ -243,10 +276,34 @@ def _rust_batch_insert(
             rbf_ls = np.asarray(rbf_ls, dtype=np.float32)
 
         chunk_size = int(getattr(context.config, "residual_chunk_size", batch_indices.shape[0]))
-        wrapper.insert_residual(batch_indices_f32, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size)
+
+        # Fresh build: reuse the PCCT2 rust builder so si_cache and survivors are populated.
+        if int(tree.num_points) == 0:
+            batch_order = getattr(context.config, "batch_order_strategy", "hilbert") or "hilbert"
+            wrapper, _node_to_dataset = covertreex_backend.build_pcct2_residual_tree(  # type: ignore
+                v_matrix,
+                p_diag,
+                coords,
+                rbf_var,
+                rbf_ls,
+                chunk_size,
+                batch_order,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        else:
+            # Incremental insert into the existing wrapper.
+            batch_indices_f32 = batch_indices.astype(np.float32).reshape(-1, 1)
+            wrapper.insert_residual(batch_indices_f32, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size)
     else:
         wrapper.insert(batch_np)
-        
+
     new_points = wrapper.get_points()
     new_parents = wrapper.get_parents()
     new_children = wrapper.get_children()

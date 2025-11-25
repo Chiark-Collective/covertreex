@@ -121,6 +121,18 @@ def execute_query_benchmark(options: "QueryCLIOptions", run: BenchmarkRun) -> Qu
         runtime_snapshot.setdefault("runtime_traversal_engine", engine_label)
         runtime_snapshot.setdefault("runtime_gate_active", gate_flag)
 
+    if (
+        options.metric == "residual"
+        and residual_backend is None
+        and np.issubdtype(points_np.dtype, np.integer)
+        and points_np.ndim == 2
+        and points_np.shape[1] == 1
+    ):
+        raise RuntimeError(
+            "Residual benchmark received integer-valued 1D points without a configured residual backend; "
+            "this would degrade to Euclidean-on-indices. Provide float coordinates or configure the residual backend."
+        )
+
     tree, result = benchmark_knn_latency(
         dimension=options.dimension,
         tree_points=options.tree_points,

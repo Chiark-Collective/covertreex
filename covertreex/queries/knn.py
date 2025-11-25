@@ -308,6 +308,8 @@ def _rust_knn_query(
     children_np = to_numpy_array(backend, tree.children, dtype=np.int64)
     next_np = to_numpy_array(backend, tree.next_cache, dtype=np.int64)
     levels_np = to_numpy_array(backend, tree.top_levels, dtype=np.int32)
+    dtype_float = np.float32 if backend.default_float == np.float32 else np.float64
+    points_np = points_np.astype(dtype_float, copy=False)
     
     min_level = int(tree.min_scale) if tree.min_scale is not None else -100
     max_level = int(tree.max_scale) if tree.max_scale is not None else 100
@@ -315,6 +317,16 @@ def _rust_knn_query(
     wrapper = covertreex_backend.CoverTreeWrapper(
         points_np, parents_np, children_np, next_np, levels_np, min_level, max_level
     )
+    
+    # Preserve separation-invariant cache when available so Rust traversal uses
+    # the same radii as the Python tree.
+    try:
+        si_np = to_numpy_array(backend, tree.si_cache, dtype=dtype_float)
+        if hasattr(wrapper, "set_si_cache"):
+            wrapper.set_si_cache(si_np)
+    except Exception:
+        # If cache injection fails, fall back to the wrapper defaults.
+        pass
     
     queries_np = to_numpy_array(backend, batch, dtype=np.float32)
     
@@ -352,6 +364,12 @@ def _rust_knn_query(
             rbf_ls = np.full(dim, float(rbf_ls), dtype=np.float32)
         else:
             rbf_ls = np.asarray(rbf_ls, dtype=np.float32)
+        
+        # Align precision with the active backend to minimise parity drift.
+        v_matrix = np.asarray(v_matrix, dtype=dtype_float)
+        p_diag = np.asarray(p_diag, dtype=dtype_float)
+        coords = np.asarray(coords, dtype=dtype_float)
+        rbf_ls = np.asarray(rbf_ls, dtype=dtype_float)
             
         indices, dists = wrapper.knn_query_residual(
             query_indices,

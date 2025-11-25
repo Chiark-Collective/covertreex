@@ -2,6 +2,8 @@
 
 We’re at a fork: finish correctness parity, then chase performance along two axes (Numba + Rust). This doc tracks three epics to keep scope clear and benchmarkable.
 
+**Baseline correction (2025-11-25):** The previously cited ~40k q/s Python “gold” run was invalid (it measured Euclidean distance over 1D indices and returned sequential IDs). The current trustworthy baseline for *correct* residual queries is the Rust parity path at ~8k q/s on the 32k/1k/k=50 suite. Update future tables against this baseline until the Numba pruning patch lands.
+
 ---
 
 ## Epic 1 — Parity Lock & Cross-Engine Correctness

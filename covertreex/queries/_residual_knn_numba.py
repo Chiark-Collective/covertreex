@@ -165,6 +165,7 @@ def residual_knn_search_numba(
     children: np.ndarray,
     next_node: np.ndarray,
     parents: np.ndarray,
+    si_cache: np.ndarray,
     node_to_dataset: np.ndarray,
     v_matrix: np.ndarray,
     p_diag: np.ndarray,
@@ -174,6 +175,7 @@ def residual_knn_search_numba(
     lengthscales_sq: np.ndarray,
     q_dataset_idx: int,
     k: int,
+    radius_floor: float,
     root_indices: np.ndarray,
     heap_keys: np.ndarray,
     heap_vals: np.ndarray,
@@ -232,11 +234,23 @@ def residual_knn_search_numba(
             node_idx = batch_nodes[i]
             knn_size = _update_knn_sorted(knn_keys, knn_indices, k, knn_size, dist, node_idx)
             n_children = _get_children(node_idx, children, next_node, child_buf)
+            # Lower bound pruning (triangle inequality heuristic)
+            parent_radius = 0.0
+            if node_idx < si_cache.shape[0]:
+                parent_radius = si_cache[node_idx]
+            if parent_radius < radius_floor:
+                parent_radius = radius_floor
+            lb = dist - parent_radius
+            kth = knn_keys[k - 1] if knn_size == k else 1e30
             for c in range(n_children):
                 child_idx = child_buf[c]
                 word_idx = child_idx >> 6
                 bit_idx = child_idx & 63
-                if not (visited_bitset[word_idx] & (1 << bit_idx)):
-                    heap_size = _push_min_heap(heap_keys, heap_vals, heap_extras, heap_size, dist, child_idx, 0)
+                if visited_bitset[word_idx] & (1 << bit_idx):
+                    continue
+                if lb > kth:
+                    # Cannot beat current kth; skip enqueuing this branch.
+                    continue
+                heap_size = _push_min_heap(heap_keys, heap_vals, heap_extras, heap_size, dist, child_idx, 0)
 
     return knn_indices[:k], knn_keys[:k]

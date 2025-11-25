@@ -202,6 +202,34 @@ impl CoverTreeWrapper {
         Ok(())
     }
 
+    fn set_si_cache(&mut self, py: Python<'_>, cache: PyObject) -> PyResult<()> {
+        if let Ok(arr) = cache.extract::<PyReadonlyArray1<f32>>(py) {
+            match &mut self.inner {
+                CoverTreeInner::F32(data) => {
+                    data.set_si_cache(arr.as_slice()?.to_vec());
+                    return Ok(());
+                }
+                CoverTreeInner::F64(_) => { /* fall through */ }
+            }
+        }
+        if let Ok(arr) = cache.extract::<PyReadonlyArray1<f64>>(py) {
+            match &mut self.inner {
+                CoverTreeInner::F64(data) => {
+                    data.set_si_cache(arr.as_slice()?.to_vec());
+                    return Ok(());
+                }
+                CoverTreeInner::F32(data) => {
+                    let cache_f32: Vec<f32> = arr.as_slice()?.iter().map(|v| *v as f32).collect();
+                    data.set_si_cache(cache_f32);
+                    return Ok(());
+                }
+            }
+        }
+        Err(PyTypeError::new_err(
+            "si_cache must be a float32 or float64 1D array",
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (batch_indices, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size=None))]
     fn insert_residual(
@@ -740,13 +768,13 @@ fn build_pcct_residual_tree(
         .as_ref()
         .map(|c| c.nrows())
         .unwrap_or_else(|| coords_f64.as_ref().unwrap().nrows());
-    let mut coords_for_order_owned: Option<ndarray::Array2<f32>> = None;
+    let mut _coords_for_order_owned: Option<ndarray::Array2<f32>> = None;
     let coords_for_order = if let Some(c) = coords_f32.as_ref() {
         c.view()
     } else {
         let tmp: ndarray::Array2<f32> = coords_f64.as_ref().unwrap().mapv(|v| v as f32);
-        coords_for_order_owned = Some(tmp);
-        coords_for_order_owned.as_ref().unwrap().view()
+        _coords_for_order_owned = Some(tmp);
+        _coords_for_order_owned.as_ref().unwrap().view()
     };
     let order = match batch_order.as_deref() {
         Some(s) if s.eq_ignore_ascii_case("natural") => (0..n_rows).collect(),

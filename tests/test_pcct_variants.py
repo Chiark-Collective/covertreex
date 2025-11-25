@@ -7,10 +7,12 @@ import pytest
 
 from covertreex import config as cx_config, reset_residual_metric
 from covertreex.api import PCCT, Runtime
+from covertreex.core.tree import PCCTree
 from covertreex.metrics import (
     build_residual_backend,
     configure_residual_correlation,
 )
+from covertreex.queries.residual_knn import residual_knn_query
 
 POINTS = np.array([[float(i), float(i) * 0.5] for i in range(10)], dtype=np.float64)
 QUERIES = np.array([[0.1, 0.05], [4.9, 2.45], [8.05, 4.025]], dtype=np.float64)
@@ -141,6 +143,64 @@ def test_knn_consistency_residual_scope_member_limit() -> None:
     idx_b, dist_b = _knn_result(uncapped)
 
     _assert_knn_equal(idx_a, dist_a, idx_b, dist_b)
+
+
+@pytest.mark.usefixtures("residual_backend_config")
+def test_residual_numba_matches_python_baseline() -> None:
+    # Small manual tree to avoid batch-insert variability.
+    runtime_numba = Runtime(
+        backend="numpy",
+        precision="float64",
+        metric="residual_correlation",
+        enable_numba=True,
+        enable_sparse_traversal=True,
+    )
+    runtime_py = runtime_numba.with_updates(enable_numba=False)
+
+    ctx_numba = runtime_numba.activate()
+    backend = ctx_numba.get_backend()
+
+    points = np.array([[0.0], [1.0], [2.0]], dtype=np.float64)
+    backend_state = build_residual_backend(
+        points,
+        seed=11,
+        inducing_count=8,
+        variance=1.0,
+        lengthscale=1.0,
+        chunk_size=8,
+    )
+    configure_residual_correlation(backend_state, context=ctx_numba)
+
+    points_b = backend.asarray(points, dtype=backend.default_float)
+    top_levels = backend.asarray([1, 0, 0], dtype=backend.default_int)
+    parents = backend.asarray([-1, 0, 0], dtype=backend.default_int)
+    children = backend.asarray([1, 2, -1], dtype=backend.default_int)
+    level_offsets = backend.asarray([0, 1, 3, 3], dtype=backend.default_int)
+    si_cache = backend.asarray([0.0, 0.0, 0.0], dtype=backend.default_float)
+    next_cache = backend.asarray([1, 2, -1], dtype=backend.default_int)
+
+    tree = PCCTree(
+        points=points_b,
+        top_levels=top_levels,
+        parents=parents,
+        children=children,
+        level_offsets=level_offsets,
+        si_cache=si_cache,
+        next_cache=next_cache,
+        backend=backend,
+    )
+
+    queries = np.array([[0], [2]], dtype=np.int64)
+
+    idx_numba, dist_numba = residual_knn_query(
+        tree, queries, k=2, return_distances=True, context=ctx_numba
+    )
+    ctx_py = runtime_py.activate()
+    idx_py, dist_py = residual_knn_query(
+        tree, queries, k=2, return_distances=True, context=ctx_py
+    )
+
+    _assert_knn_equal(np.asarray(idx_numba), np.asarray(dist_numba), np.asarray(idx_py), np.asarray(dist_py))
 
 
 def _residual_runtime(**overrides: Any) -> Runtime:

@@ -158,11 +158,7 @@ where
         }
     }
 
-    #[inline(always)]
-    pub fn max_distance_hint(&self) -> T {
-        // Residual correlation distance is bounded in [0, 1].
-        T::one()
-    }
+
 
     #[inline(always)]
     pub fn apply_level_cap(&self, level: i32, caps: Option<&HashMap<i32, T>>, radius: T) -> T {

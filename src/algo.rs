@@ -308,34 +308,6 @@ pub fn batch_residual_knn_query<'a, T>(
 where
     T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
 {
-    let use_heap = std::env::var("COVERTREEX_RUST_RESIDUAL_HEAP")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    if use_heap {
-        let results: Vec<(Vec<i64>, Vec<T>)> = query_indices
-            .into_par_iter()
-            .map(|&q_idx| {
-                single_residual_knn_query_heap(
-                    tree,
-                    node_to_dataset,
-                    metric,
-                    q_idx as usize,
-                    k,
-                    scope_caps,
-                )
-            })
-            .collect();
-
-        let mut indices = Vec::with_capacity(results.len());
-        let mut dists = Vec::with_capacity(results.len());
-        for (idx, dst) in results {
-            indices.push(idx);
-            dists.push(dst);
-        }
-        return (indices, dists);
-    }
-
     // Opt-in telemetry: disable parallelism to aggregate counts deterministically
     let results: Vec<(Vec<i64>, Vec<T>)> = if let Some(tele) = telemetry {
         let mut out = Vec::with_capacity(query_indices.len());
@@ -380,83 +352,7 @@ where
     (indices, dists)
 }
 
-/// Brute-force block-scanned residual k-NN over all dataset indices.
-/// This bypasses the cover tree and is intended as a stopgap PCCT-style query
-/// until a full conflict-graph/streamer port lands.
-pub fn batch_residual_knn_query_block<'a, T>(
-    query_indices: ndarray::ArrayView1<i64>,
-    node_to_dataset: &[i64],
-    metric: &ResidualMetric<'a, T>,
-    k: usize,
-) -> (Vec<Vec<i64>>, Vec<Vec<T>>)
-where
-    T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
-{
-    let n = node_to_dataset.len();
-    let mut indices_out: Vec<Vec<i64>> = Vec::with_capacity(query_indices.len());
-    let mut dists_out: Vec<Vec<T>> = Vec::with_capacity(query_indices.len());
 
-    const BLOCK: usize = 256;
-    let emit_stats = EMIT_STATS.load(AtomicOrdering::Relaxed);
-    let prune_sentinel = T::max_value();
-    for &q_idx_i64 in query_indices.iter() {
-        let q_idx = q_idx_i64 as usize;
-        let mut result_heap: BinaryHeap<Neighbor<T>> = BinaryHeap::new();
-        let mut kth_dist = T::max_value();
-        let mut buffer: Vec<T> = Vec::with_capacity(BLOCK);
-        let mut block_indices: Vec<usize> = Vec::with_capacity(BLOCK);
-
-        let mut start = 0;
-        while start < n {
-            let end = usize::min(start + BLOCK, n);
-            block_indices.clear();
-            block_indices.extend(start..end);
-            metric.distances_sq_batch_idx_into_with_kth(
-                q_idx,
-                &block_indices,
-                Some(kth_dist),
-                &mut buffer,
-            );
-            if emit_stats {
-                let evals = buffer.iter().filter(|&&d| d != prune_sentinel).count();
-                DIST_EVALS.fetch_add(evals, AtomicOrdering::Relaxed);
-            }
-            for (j, &dist) in buffer.iter().enumerate() {
-                if dist == prune_sentinel {
-                    continue;
-                }
-                let node_idx = block_indices[j] as i64;
-                if result_heap.len() < k || dist < kth_dist {
-                    result_heap.push(Neighbor {
-                        dist: OrderedFloat(dist),
-                        node_idx,
-                    });
-                    if result_heap.len() > k {
-                        result_heap.pop();
-                    }
-                    if result_heap.len() == k {
-                        if let Some(peek) = result_heap.peek() {
-                            kth_dist = peek.dist.0;
-                        }
-                    }
-                }
-            }
-            start = end;
-        }
-
-        let sorted_results = result_heap.into_sorted_vec();
-        let mut idxs = Vec::with_capacity(k);
-        let mut dsts = Vec::with_capacity(k);
-        for nbh in sorted_results {
-            idxs.push(node_to_dataset[nbh.node_idx as usize]);
-            dsts.push(nbh.dist.0);
-        }
-        indices_out.push(idxs);
-        dists_out.push(dsts);
-    }
-
-    (indices_out, dists_out)
-}
 
 /// Blocked residual k-NN using per-query heaps and batched distance evaluation.
 /// Optimised for float32; falls back to the scalar/block path otherwise.
@@ -682,13 +578,11 @@ where
             .filter(|&v| v > 0)
             .unwrap_or(64)
     };
-    let use_masked_append = if parity_mode {
-        false
-    } else {
-        std::env::var("COVERTREEX_RESIDUAL_MASKED_SCOPE_APPEND")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(true)
-    };
+    
+    // Optimization: Removed per-query O(N) allocations (seen_mask, cached_lb)
+    // Assuming tree structure guarantees unique visits per level.
+    let _use_masked_append = false;
+
     let use_visited = parity_mode
         || std::env::var("COVERTREEX_RESIDUAL_VISITED_SET")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -744,12 +638,9 @@ where
     let mut children_ds_idx: Vec<usize> = Vec::with_capacity(stream_tile);
     let mut children_parent_lb: Vec<T> = Vec::with_capacity(stream_tile);
     let mut distance_buffer: Vec<T> = Vec::with_capacity(stream_tile);
-    // Level cache mask persists across levels to avoid re-emitting the same dataset index.
-    let mut seen_mask: Vec<bool> = if use_masked_append {
-        vec![false; node_to_dataset.len()]
-    } else {
-        Vec::new()
-    };
+    
+    // Optimization: Removed per-query O(N) allocations (seen_mask, cached_lb)
+    // Assuming tree structure guarantees unique visits per level.
     let mut visited_nodes: Vec<bool> = if use_visited {
         vec![false; tree.len()]
     } else {
@@ -758,8 +649,6 @@ where
     if use_visited && !visited_nodes.is_empty() {
         visited_nodes[0] = true;
     }
-    // Cached per-dataset lower bounds carried across levels (Numba-style level cache)
-    let mut cached_lb: Vec<T> = vec![T::max_value(); node_to_dataset.len()];
 
     while !frontier.is_empty() && survivors_count < budget_limit {
         if parity_mode && result_heap.len() == k {
@@ -853,41 +742,14 @@ where
                             continue;
                         }
                     }
-                }
-                if use_masked_append {
-                    if ds_idx < seen_mask.len() && !seen_mask[ds_idx] {
-                        seen_mask[ds_idx] = true;
-                        if use_visited {
-                            if let Some(slot) = visited_nodes.get_mut(child_idx) {
-                                *slot = true;
-                            }
-                        }
-                        children_nodes.push(child_idx);
-                        children_ds_idx.push(ds_idx);
-                        children_parent_lb.push(parent_lb);
-                        if let Some(t) = telemetry.as_mut() {
-                            t.level_cache_misses += 1;
-                        }
-                    } else {
-                        if let Some(t) = telemetry.as_mut() {
-                            t.masked_dedup += 1;
-                            t.level_cache_hits += 1;
-                        }
-                        continue;
+                    if let Some(slot) = visited_nodes.get_mut(child_idx) {
+                        *slot = true;
                     }
-                } else {
-                    if use_visited {
-                        if let Some(slot) = visited_nodes.get_mut(child_idx) {
-                            *slot = true;
-                        }
-                    }
-                    children_nodes.push(child_idx);
-                    children_ds_idx.push(ds_idx);
-                    children_parent_lb.push(parent_lb);
                 }
-                if ds_idx < cached_lb.len() && cached_lb[ds_idx] > parent_lb {
-                    cached_lb[ds_idx] = parent_lb;
-                }
+                
+                children_nodes.push(child_idx);
+                children_ds_idx.push(ds_idx);
+                children_parent_lb.push(parent_lb);
             }
         }
 
@@ -946,16 +808,6 @@ where
             let mut eval_targets: Vec<usize> = Vec::with_capacity(nodes_chunk.len());
             let mut eval_positions: Vec<usize> = Vec::with_capacity(nodes_chunk.len());
             for (j, &ds_idx) in ds_chunk.iter().enumerate() {
-                if result_heap.len() == k
-                    && ds_idx < cached_lb.len()
-                    && cached_lb[ds_idx] > kth_dist
-                {
-                    if let Some(t) = telemetry.as_mut() {
-                        t.prunes_lower_bound += 1;
-                        t.level_cache_hits += 1;
-                    }
-                    continue;
-                }
                 eval_targets.push(ds_idx);
                 eval_positions.push(j);
             }
@@ -1018,24 +870,12 @@ where
                 }
 
                 if result_heap.len() == k {
-                    let mut lb = parent_lb_cached.min(dist - child_radius);
-                    if let Some(stored) =
-                        cached_lb.get(node_to_dataset[child_idx] as usize).copied()
-                    {
-                        lb = lb.min(stored);
-                    }
+                    let lb = parent_lb_cached.min(dist - child_radius);
                     if lb > kth_dist {
                         if let Some(t) = telemetry.as_mut() {
                             t.prunes_cap += 1;
                         }
                         continue;
-                    }
-                }
-
-                if let Some(slot) = cached_lb.get_mut(node_to_dataset[child_idx] as usize) {
-                    let new_lb = dist - child_radius;
-                    if new_lb < *slot {
-                        *slot = new_lb;
                     }
                 }
 
@@ -1110,305 +950,4 @@ where
     (indices, dists)
 }
 
-// -----------------------------------------------------------------------------
-// Legacy heap-style residual query (parity with Python/Numba path)
-// -----------------------------------------------------------------------------
 
-fn single_residual_knn_query_heap<'a, T>(
-    tree: &'a CoverTreeData<T>,
-    node_to_dataset: &[i64],
-    metric: &ResidualMetric<'a, T>,
-    q_dataset_idx: usize,
-    k: usize,
-    scope_caps: Option<&HashMap<i32, T>>,
-) -> (Vec<i64>, Vec<T>)
-where
-    T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
-{
-    let mut candidate_heap = BinaryHeap::new();
-    let mut result_heap: BinaryHeap<Neighbor<T>> = BinaryHeap::new();
-
-    if tree.len() == 0 {
-        return (vec![], vec![]);
-    }
-
-    // Budget Configuration (mirrors prior heap implementation)
-    let budget_schedule_str = std::env::var("COVERTREEX_RESIDUAL_BUDGET_SCHEDULE").ok();
-    let budget_schedule: Vec<usize> = if let Some(s) = budget_schedule_str {
-        s.split(',').filter_map(|v| v.parse().ok()).collect()
-    } else {
-        vec![32, 64, 96]
-    };
-    let budget_up: f64 = std::env::var("COVERTREEX_RESIDUAL_BUDGET_UP")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.6);
-    let budget_down: f64 = std::env::var("COVERTREEX_RESIDUAL_BUDGET_DOWN")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.01);
-
-    let mut budget_idx = 0;
-    let mut budget_limit = if !budget_schedule.is_empty() {
-        budget_schedule[0]
-    } else {
-        usize::MAX
-    };
-    let mut survivors_count = 0;
-    let mut low_yield_streak = 0;
-
-    // Push root (index 0) with its true distance
-    let root_payload = tree.get_point_row(0);
-    let root_dataset_idx = root_payload[0].to_usize().unwrap();
-    let root_dist = metric.distance_idx(q_dataset_idx, root_dataset_idx);
-    candidate_heap.push(Candidate {
-        dist: OrderedFloat(root_dist),
-        node_idx: 0,
-    });
-    HEAP_PUSHES.fetch_add(1, AtomicOrdering::Relaxed);
-    survivors_count += 1;
-
-    let mut kth_dist = T::max_value();
-    const BATCH_SIZE: usize = 64;
-    let mut batch_nodes: Vec<(i64, T)> = Vec::with_capacity(BATCH_SIZE);
-
-    // Child buffers
-    let stream_tile = std::env::var("COVERTREEX_RESIDUAL_STREAM_TILE")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(64);
-
-    let mut child_nodes = Vec::with_capacity(stream_tile);
-    let mut child_dataset_indices = Vec::with_capacity(stream_tile);
-    let mut child_distance_buffer: Vec<T> = Vec::with_capacity(stream_tile);
-
-    let emit_stats = EMIT_STATS.load(AtomicOrdering::Relaxed);
-    let prune_sentinel = T::max_value();
-    let use_pruning =
-        std::env::var("COVERTREEX_RUST_PRUNE_BOUNDS").map_or(false, |v| v == "1" || v == "true");
-    let scope_limit_env = std::env::var("COVERTREEX_SCOPE_CHUNK_TARGET")
-        .ok()
-        .and_then(|v| v.parse::<isize>().ok())
-        .unwrap_or(0);
-    let scope_limit: usize = if scope_limit_env > 0 {
-        scope_limit_env as usize
-    } else {
-        16_384
-    };
-    let radius_floor: T = std::env::var("COVERTREEX_RESIDUAL_RADIUS_FLOOR")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .map(|v| T::from(v).unwrap_or(T::zero()))
-        .unwrap_or_else(|| T::from(1e-3).unwrap());
-    let two = T::from(2.0).unwrap();
-
-    while !candidate_heap.is_empty() {
-        if survivors_count >= budget_limit && budget_limit != usize::MAX {
-            break;
-        }
-
-        batch_nodes.clear();
-
-        // 1. Collect Batch
-        while batch_nodes.len() < BATCH_SIZE {
-            if let Some(cand) = candidate_heap.pop() {
-                batch_nodes.push((cand.node_idx, cand.dist.0));
-            } else {
-                break;
-            }
-        }
-
-        if batch_nodes.is_empty() {
-            break;
-        }
-        if survivors_count >= scope_limit {
-            break;
-        }
-
-        // 2. Process Results (using exact distances from heap)
-        for &(node_idx, dist) in batch_nodes.iter() {
-            // Update k-NN
-            if result_heap.len() < k || dist < kth_dist {
-                result_heap.push(Neighbor {
-                    dist: OrderedFloat(dist),
-                    node_idx,
-                });
-                if result_heap.len() > k {
-                    result_heap.pop();
-                }
-                if result_heap.len() == k {
-                    if let Some(peek) = result_heap.peek() {
-                        kth_dist = peek.dist.0;
-                    }
-                }
-            }
-
-            // Expand Children
-            let level = tree.levels[node_idx as usize];
-            let mut radius = two.powi(level + 1);
-
-            // Apply Scope Cap
-            if let Some(caps) = scope_caps {
-                if let Some(&cap) = caps.get(&level) {
-                    let cap_t = cap;
-                    if cap_t < radius {
-                        radius = cap_t;
-                    }
-                }
-            }
-
-            // Apply Radius Floor
-            if radius < radius_floor {
-                radius = radius_floor;
-            }
-
-            let lower_bound = dist - radius;
-
-            if result_heap.len() == k && lower_bound > kth_dist {
-                continue;
-            }
-
-            // Collect children for batched distance evaluation
-            let mut child = tree.children[node_idx as usize];
-
-            while child != -1 {
-                child_nodes.clear();
-                child_dataset_indices.clear();
-
-                // Collect Tile
-                while child != -1 && child_nodes.len() < stream_tile {
-                    let child_level = tree.levels[child as usize];
-                    let mut child_radius = two.powi(child_level + 1);
-
-                    if let Some(caps) = scope_caps {
-                        if let Some(&cap) = caps.get(&child_level) {
-                            let cap_t = cap;
-                            if cap_t < child_radius {
-                                child_radius = cap_t;
-                            }
-                        }
-                    }
-
-                    if child_radius < radius_floor {
-                        child_radius = radius_floor;
-                    }
-
-                    let lb_child = dist - child_radius;
-
-                    if result_heap.len() < k || lb_child <= kth_dist {
-                        child_nodes.push(child);
-                        child_dataset_indices.push(node_to_dataset[child as usize] as usize);
-                    }
-
-                    let next = tree.next_node[child as usize];
-                    if next == child {
-                        child = -1;
-                    } else {
-                        child = next;
-                        if child == tree.children[node_idx as usize] {
-                            child = -1;
-                        }
-                    }
-                }
-
-                if child_nodes.is_empty() {
-                    break;
-                }
-
-                // Compute Dists
-                child_distance_buffer.clear();
-                metric.distances_sq_batch_idx_into_with_kth(
-                    q_dataset_idx,
-                    &child_dataset_indices,
-                    if use_pruning { Some(kth_dist) } else { None },
-                    &mut child_distance_buffer,
-                );
-
-                if emit_stats {
-                    let evals = child_distance_buffer
-                        .iter()
-                        .filter(|&&d| d != prune_sentinel)
-                        .count();
-                    DIST_EVALS.fetch_add(evals, AtomicOrdering::Relaxed);
-                }
-
-                let mut added_in_tile = 0;
-                for (j, &child_node) in child_nodes.iter().enumerate() {
-                    let child_dist = child_distance_buffer[j];
-                    if child_dist == prune_sentinel {
-                        continue;
-                    }
-
-                    if result_heap.len() == k {
-                        let child_level = tree.levels[child_node as usize];
-                        let mut child_radius = two.powi(child_level + 1);
-                        if let Some(caps) = scope_caps {
-                            if let Some(&cap) = caps.get(&child_level) {
-                                let cap_t = cap;
-                                if cap_t < child_radius {
-                                    child_radius = cap_t;
-                                }
-                            }
-                        }
-                        if child_radius < radius_floor {
-                            child_radius = radius_floor;
-                        }
-
-                        let lb_child = child_dist - child_radius;
-                        if lb_child > kth_dist {
-                            continue;
-                        }
-                    }
-
-                    candidate_heap.push(Candidate {
-                        dist: OrderedFloat(child_dist),
-                        node_idx: child_node,
-                    });
-                    if emit_stats {
-                        HEAP_PUSHES.fetch_add(1, AtomicOrdering::Relaxed);
-                    }
-                    added_in_tile += 1;
-                }
-
-                survivors_count += added_in_tile;
-
-                if !budget_schedule.is_empty() {
-                    let ratio = if !child_nodes.is_empty() {
-                        added_in_tile as f64 / child_nodes.len() as f64
-                    } else {
-                        0.0
-                    };
-                    if ratio >= budget_up {
-                        if budget_idx + 1 < budget_schedule.len() {
-                            budget_idx += 1;
-                            budget_limit = budget_schedule[budget_idx];
-                        }
-                        low_yield_streak = 0;
-                    } else if ratio < budget_down {
-                        low_yield_streak += 1;
-                        if low_yield_streak >= 2 {
-                            break;
-                        }
-                    } else {
-                        low_yield_streak = 0;
-                    }
-                }
-
-                if survivors_count >= budget_limit && budget_limit != usize::MAX {
-                    break;
-                }
-            }
-        }
-    }
-
-    let sorted_results = result_heap.into_sorted_vec();
-    let mut indices = Vec::with_capacity(k);
-    let mut dists = Vec::with_capacity(k);
-    for n in sorted_results {
-        indices.push(n.node_idx);
-        dists.push(n.dist.0);
-    }
-
-    (indices, dists)
-}
