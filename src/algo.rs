@@ -2,6 +2,7 @@ use crate::metric::{Euclidean, Metric, ResidualMetric};
 use crate::telemetry::ResidualQueryTelemetry;
 use crate::tree::CoverTreeData;
 use ndarray::parallel::prelude::*;
+use rayon::prelude::ParallelSlice;
 use num_traits::{Float, NumCast};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -308,11 +309,19 @@ pub fn batch_residual_knn_query<'a, T>(
 where
     T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
 {
+    let n_points = node_to_dataset.len();
+    let max_val = T::max_value();
+
     // Opt-in telemetry: disable parallelism to aggregate counts deterministically
     let results: Vec<(Vec<i64>, Vec<T>)> = if let Some(tele) = telemetry {
         let mut out = Vec::with_capacity(query_indices.len());
+        let mut cached_lb = vec![max_val; n_points];
+        
         for &q_idx in query_indices.iter() {
             let mut local = ResidualQueryTelemetry::default();
+            // Reset buffer
+            cached_lb.fill(max_val);
+            
             let res = single_residual_knn_query(
                 tree,
                 node_to_dataset,
@@ -321,24 +330,37 @@ where
                 k,
                 scope_caps,
                 Some(&mut local),
+                &mut cached_lb,
             );
             tele.add_from(&local);
             out.push(res);
         }
         out
     } else {
-        query_indices
-            .into_par_iter()
-            .map(|&q_idx| {
-                single_residual_knn_query(
-                    tree,
-                    node_to_dataset,
-                    metric,
-                    q_idx as usize,
-                    k,
-                    scope_caps,
-                    None,
-                )
+        // Parallel chunk processing to reuse buffer
+        let q_slice = query_indices.as_slice().expect("contiguous query indices");
+        let chunk_size = 64; // Match stream_tile default
+        
+        q_slice.par_chunks(chunk_size)
+            .flat_map(|chunk| {
+                let mut cached_lb = vec![max_val; n_points];
+                let mut chunk_results = Vec::with_capacity(chunk.len());
+                
+                for &q_idx in chunk {
+                    cached_lb.fill(max_val);
+                    let res = single_residual_knn_query(
+                        tree,
+                        node_to_dataset,
+                        metric,
+                        q_idx as usize,
+                        k,
+                        scope_caps,
+                        None,
+                        &mut cached_lb,
+                    );
+                    chunk_results.push(res);
+                }
+                chunk_results
             })
             .collect()
     };
@@ -503,6 +525,7 @@ fn single_residual_knn_query<'a, T>(
     k: usize,
     scope_caps: Option<&HashMap<i32, T>>,
     mut telemetry: Option<&mut ResidualQueryTelemetry>,
+    cached_lb: &mut [T],
 ) -> (Vec<i64>, Vec<T>)
 where
     T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
@@ -736,11 +759,17 @@ where
                                 children_nodes.push(child_idx);
                                 children_ds_idx.push(ds_idx);
                                 children_parent_lb.push(parent_lb);
+                                if ds_idx < cached_lb.len() && cached_lb[ds_idx] > parent_lb {
+                                    cached_lb[ds_idx] = parent_lb;
+                                }
                             }
                         } else {
                             children_nodes.push(child_idx);
                             children_ds_idx.push(ds_idx);
                             children_parent_lb.push(parent_lb);
+                            if ds_idx < cached_lb.len() && cached_lb[ds_idx] > parent_lb {
+                                cached_lb[ds_idx] = parent_lb;
+                            }
                         }
         
                         let next = tree.next_node[child_idx];
@@ -808,6 +837,16 @@ where
             let mut eval_targets: Vec<usize> = Vec::with_capacity(nodes_chunk.len());
             let mut eval_positions: Vec<usize> = Vec::with_capacity(nodes_chunk.len());
             for (j, &ds_idx) in ds_chunk.iter().enumerate() {
+                if result_heap.len() == k
+                    && ds_idx < cached_lb.len()
+                    && cached_lb[ds_idx] > kth_dist
+                {
+                    if let Some(t) = telemetry.as_mut() {
+                        t.prunes_lower_bound += 1;
+                        t.level_cache_hits += 1;
+                    }
+                    continue;
+                }
                 eval_targets.push(ds_idx);
                 eval_positions.push(j);
             }
@@ -876,6 +915,13 @@ where
                             t.prunes_cap += 1;
                         }
                         continue;
+                    }
+                }
+
+                if let Some(slot) = cached_lb.get_mut(node_to_dataset[child_idx] as usize) {
+                    let new_lb = dist - child_radius;
+                    if new_lb < *slot {
+                        *slot = new_lb;
                     }
                 }
 

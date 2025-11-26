@@ -947,7 +947,7 @@ where
 }
 
 #[inline(always)]
-fn dot_tile_f32(
+pub(crate) fn dot_tile_f32(
     q: &[f32],
     matrix_flat: &[f32],
     stride: usize,
@@ -989,7 +989,7 @@ fn dot_tile_f32(
 }
 
 #[inline(always)]
-fn dot_tile_f64(
+pub(crate) fn dot_tile_f64(
     q: &[f64],
     matrix_flat: &[f64],
     stride: usize,
