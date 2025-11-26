@@ -256,6 +256,10 @@ ResidualVarianceOption = Annotated[
     float,
     typer.Option("--residual-variance", help="Synthetic residual RBF variance.", rich_help_panel=RESIDUAL_PANEL),
 ]
+ResidualKernelTypeOption = Annotated[
+    Optional[int],
+    typer.Option("--residual-kernel-type", help="Kernel type (0=RBF, 1=Matern52).", rich_help_panel=RESIDUAL_PANEL),
+]
 ResidualInducingOption = Annotated[
     int,
     typer.Option("--residual-inducing", help="Number of inducing points in the synthetic residual backend.", rich_help_panel=RESIDUAL_PANEL),
@@ -447,6 +451,7 @@ __all__ = [
     "PrefixGrowthLargeOption",
     "ResidualLengthscaleOption",
     "ResidualVarianceOption",
+    "ResidualKernelTypeOption",
     "ResidualInducingOption",
     "ResidualChunkSizeOption",
     "ResidualStreamTileOption",

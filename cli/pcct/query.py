@@ -153,6 +153,7 @@ def execute_query_benchmark(options: "QueryCLIOptions", run: BenchmarkRun) -> Qu
             "lengthscale": options.residual_lengthscale,
             "inducing_count": options.residual_inducing,
             "chunk_size": options.residual_chunk_size,
+            "kernel_type": options.residual_kernel_type,
         },
     )
 

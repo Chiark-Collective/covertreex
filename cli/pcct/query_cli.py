@@ -57,6 +57,7 @@ def query(
     prefix_growth_large: opts.PrefixGrowthLargeOption = None,
     residual_lengthscale: opts.ResidualLengthscaleOption = 1.0,
     residual_variance: opts.ResidualVarianceOption = 1.0,
+    residual_kernel_type: opts.ResidualKernelTypeOption = 0,
     residual_inducing: opts.ResidualInducingOption = 512,
     residual_chunk_size: opts.ResidualChunkSizeOption = 512,
     residual_stream_tile: opts.ResidualStreamTileOption = 64,

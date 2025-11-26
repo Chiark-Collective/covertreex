@@ -49,6 +49,7 @@ class QueryCLIOptions:
     prefix_growth_large: float | None = None
     residual_lengthscale: float = 1.0
     residual_variance: float = 1.0
+    residual_kernel_type: int | None = 0
     residual_inducing: int = 512
     residual_chunk_size: int = 512
     residual_stream_tile: int | None = 64
