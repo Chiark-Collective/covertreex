@@ -614,6 +614,8 @@ class RustHybridResidualEngine:
             ),
             dtype=dtype,
         )
+        
+        kernel_type = int(residual_params.get("kernel_type", 0)) if residual_params else 0
 
         # Build tree on index payloads (same as python-numba residual path)
         indices = np.arange(coords.shape[0], dtype=dtype).reshape(-1, 1)
@@ -625,7 +627,9 @@ class RustHybridResidualEngine:
         tree_handle = backend_mod.CoverTreeWrapper(dummy, empty_i64, empty_i64, empty_i64, empty_i32, -20, 20)
 
         start = time.perf_counter()
-        tree_handle.insert_residual(indices, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size or batch_size)
+        tree_handle.insert_residual(
+            indices, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size or batch_size, kernel_type
+        )
         build_seconds = time.perf_counter() - start
 
         handle = RustHybridHandle(
@@ -645,6 +649,7 @@ class RustHybridResidualEngine:
             "node_to_dataset": handle.node_to_dataset,
             "backend_dtype": str(dtype),
             "chunk_size": chunk_size or batch_size,
+            "kernel_type": kernel_type,
         }
         return CoverTree(
             engine=self,
@@ -671,6 +676,9 @@ class RustHybridResidualEngine:
         if queries.dtype.kind not in {"i", "u"}:
             raise ValueError("rust-hybrid engine expects integer query payloads representing dataset indices.")
         query_indices = np.asarray(queries, dtype=np.int64).reshape(-1)
+        
+        kernel_type = int(tree.meta.get("kernel_type", 0))
+        
         indices, distances = handle.tree.knn_query_residual(
             query_indices,
             handle.node_to_dataset,
@@ -680,6 +688,7 @@ class RustHybridResidualEngine:
             float(handle.rbf_variance),
             np.asarray(handle.rbf_lengthscale, dtype=handle.dtype),
             int(k),
+            kernel_type,
         )
         sorted_indices = np.asarray(indices, dtype=np.int64)
         sorted_distances = np.asarray(distances, dtype=handle.dtype)
@@ -780,6 +789,8 @@ class RustPcctEngine:
             ),
             dtype=dtype,
         )
+        
+        kernel_type = int(residual_params.get("kernel_type", 0)) if residual_params else 0
 
         start = time.perf_counter()
         tree_handle, node_to_dataset = backend_mod.build_pcct_residual_tree(  # type: ignore
@@ -790,6 +801,7 @@ class RustPcctEngine:
             rbf_ls,
             chunk_size or batch_size,
             "hilbert",
+            kernel_type,
         )
         build_seconds = time.perf_counter() - start
 
@@ -810,6 +822,7 @@ class RustPcctEngine:
             "backend_dtype": str(dtype),
             "chunk_size": chunk_size or batch_size,
             "batch_order": "hilbert-morton",
+            "kernel_type": kernel_type,
         }
         backend_tag = TreeBackend.numpy(precision="float32")
         return CoverTree(
@@ -837,6 +850,9 @@ class RustPcctEngine:
         if queries.dtype.kind not in {"i", "u"}:
             raise ValueError("rust-pcct engine expects integer query payloads representing dataset indices.")
         query_indices = np.asarray(queries, dtype=np.int64).reshape(-1)
+        
+        kernel_type = int(tree.meta.get("kernel_type", 0))
+        
         # Block-scanned residual query; bypass cover tree traversal for now.
         indices, distances = handle.tree.knn_query_residual_block(
             query_indices,
@@ -847,6 +863,7 @@ class RustPcctEngine:
             float(handle.rbf_variance),
             np.asarray(handle.rbf_lengthscale, dtype=handle.dtype),
             int(k),
+            kernel_type,
         )
         sorted_indices = np.asarray(indices, dtype=np.int64)
         sorted_distances = np.asarray(distances, dtype=handle.dtype)
@@ -941,6 +958,8 @@ class RustHilbertEngine:
             ),
             dtype=dtype,
         )
+        
+        kernel_type = int(residual_params.get("kernel_type", 0)) if residual_params else 0
 
         start = time.perf_counter()
         batch_order = str(getattr(runtime, "batch_order_strategy", "hilbert") or "hilbert")
@@ -960,6 +979,9 @@ class RustHilbertEngine:
             float(runtime.scope_budget_up_thresh) if getattr(runtime, "scope_budget_schedule", ()) else None,
             float(runtime.scope_budget_down_thresh) if getattr(runtime, "scope_budget_schedule", ()) else None,
             bool(runtime.residual_masked_scope_append),
+            None, # scope_chunk_max_segments (optional)
+            None, # scope_chunk_pair_merge (optional)
+            kernel_type,
         )
         build_seconds = time.perf_counter() - start
 
@@ -980,6 +1002,7 @@ class RustHilbertEngine:
             "backend_dtype": str(dtype),
             "chunk_size": chunk_size or batch_size,
             "batch_order": "hilbert-morton",
+            "kernel_type": kernel_type,
         }
         backend_tag = TreeBackend.numpy(precision="float32")
         return CoverTree(
@@ -1007,6 +1030,8 @@ class RustHilbertEngine:
         if queries.dtype.kind not in {"i", "u"}:
             raise ValueError("rust-hilbert engine expects integer query payloads representing dataset indices.")
         query_indices = np.asarray(queries, dtype=np.int64).reshape(-1)
+        
+        kernel_type = int(tree.meta.get("kernel_type", 0))
 
         indices, distances = handle.tree.knn_query_residual(
             query_indices,
@@ -1017,6 +1042,7 @@ class RustHilbertEngine:
             float(handle.rbf_variance),
             np.asarray(handle.rbf_lengthscale, dtype=handle.dtype),
             int(k),
+            kernel_type,
         )
 
         # Pull telemetry when enabled so it lands in op logs.

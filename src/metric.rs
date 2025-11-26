@@ -40,11 +40,27 @@ where
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum ResidualKernelType {
+    RBF = 0,
+    Matern52 = 1,
+}
+
+impl From<i32> for ResidualKernelType {
+    fn from(val: i32) -> Self {
+        match val {
+            1 => ResidualKernelType::Matern52,
+            _ => ResidualKernelType::RBF,
+        }
+    }
+}
+
 // Residual Metric operates on INDICES into the V-Matrix and Coords
 pub struct ResidualMetric<'a, T> {
     pub(crate) v_matrix: ArrayView2<'a, T>,
     pub(crate) p_diag: &'a [T],
     pub(crate) rbf_var: T,
+    pub(crate) kernel_type: ResidualKernelType,
     pub(crate) scaled_coords: Array2<T>,
     pub(crate) scaled_norms: Vec<T>,
     pub(crate) v_norms: Vec<T>,
@@ -70,6 +86,7 @@ where
         coords: ArrayView2<'a, T>,
         rbf_var: T,
         rbf_ls: &'a [T],
+        kernel_type_int: i32,
         cap_default: Option<T>,
     ) -> Self {
         let dim = coords.ncols();
@@ -135,11 +152,13 @@ where
 
         let neg_half = T::from(-0.5).unwrap();
         let cap_default = cap_default.unwrap_or_else(|| T::from(2.0).unwrap());
+        let kernel_type = ResidualKernelType::from(kernel_type_int);
 
         ResidualMetric {
             v_matrix,
             p_diag,
             rbf_var,
+            kernel_type,
             scaled_coords,
             scaled_norms,
             v_norms,
@@ -156,7 +175,27 @@ where
         }
     }
 
-
+    #[inline(always)]
+    fn compute_kernel_value(&self, d2: T) -> T {
+        match self.kernel_type {
+            ResidualKernelType::RBF => {
+                self.rbf_var * (self.neg_half * d2).exp()
+            }
+            ResidualKernelType::Matern52 => {
+                 // d2 is squared distance in scaled space.
+                 // r = sqrt(d2)
+                 // a = sqrt(5) * r
+                 // K = var * (1 + a + a^2/3) * exp(-a)
+                 let r = if d2 > T::zero() { d2.sqrt() } else { T::zero() };
+                 let sqrt5 = T::from(2.2360679775).unwrap();
+                 let a = sqrt5 * r;
+                 let one = T::one();
+                 let three = T::from(3.0).unwrap();
+                 let term_poly = one + a + (a * a) / three;
+                 self.rbf_var * term_poly * (-a).exp()
+            }
+        }
+    }
 
     #[inline(always)]
     pub fn apply_level_cap(&self, level: i32, caps: Option<&HashMap<i32, T>>, radius: T) -> T {
@@ -192,7 +231,7 @@ where
             d2 = T::zero();
         }
 
-        let k_val = self.rbf_var * (self.neg_half * d2).exp();
+        let k_val = self.compute_kernel_value(d2);
 
         // V-Matrix dot product (hot loop)
         let v1_view = self.v_matrix.row(idx_1);
@@ -289,7 +328,7 @@ where
                 d2 = T::zero();
             }
 
-            let k_val = self.rbf_var * (self.neg_half * d2).exp();
+            let k_val = self.compute_kernel_value(d2);
 
             let denom = (self.p_diag[q_idx] * self.p_diag[idx_2]).sqrt();
 
@@ -377,6 +416,13 @@ where
         
         let rbf_var = self.rbf_var.to_f32().unwrap();
         let neg_half = self.neg_half.to_f32().unwrap();
+        let sqrt5 = 2.2360679775f32;
+        let inv_three = 0.3333333333f32;
+        
+        let kernel_id = match self.kernel_type {
+             ResidualKernelType::RBF => 0,
+             ResidualKernelType::Matern52 => 1,
+        };
 
         // Pre-fetch query vectors
         let q_coords = &coords[q_idx * dim_c..(q_idx + 1) * dim_c];
@@ -404,7 +450,17 @@ where
 
             let mut d2 = q_norm + scaled_norms[idx_2] - two * dot_c;
             if d2 < 0.0 { d2 = 0.0; }
-            let k_val = rbf_var * (neg_half * d2).exp();
+            
+            let k_val = if kernel_id == 0 {
+                // RBF
+                rbf_var * (neg_half * d2).exp()
+            } else {
+                // Matern 5/2
+                let r = d2.sqrt();
+                let a = sqrt5 * r;
+                let term_poly = one + a + (a * a) * inv_three;
+                rbf_var * term_poly * (-a).exp()
+            };
 
             let p_d = p_diag[idx_2];
             let denom = (q_diag * p_d).max(eps * eps).sqrt();
@@ -468,8 +524,19 @@ where
         if d2 < 0.0 {
             d2 = 0.0;
         }
-        let k_val =
-            self.rbf_var.to_f32().unwrap() * (self.neg_half.to_f32().unwrap() * d2).exp();
+        
+        let k_val = match self.kernel_type {
+            ResidualKernelType::RBF => {
+                self.rbf_var.to_f32().unwrap() * (self.neg_half.to_f32().unwrap() * d2).exp()
+            }
+            ResidualKernelType::Matern52 => {
+                let r = d2.sqrt();
+                let sqrt5 = 2.2360679775f32;
+                let a = sqrt5 * r;
+                let term_poly = 1.0 + a + (a * a) / 3.0;
+                self.rbf_var.to_f32().unwrap() * term_poly * (-a).exp()
+            }
+        };
 
         let denom_sq = (p_diag[idx_1] * p_diag[idx_2]).max(eps * eps);
         let denom = denom_sq.sqrt();

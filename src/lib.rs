@@ -56,6 +56,7 @@ struct CachedResidualData {
     coords: Array2<f32>,
     rbf_ls: Vec<f32>,
     rbf_var: f32,
+    kernel_type: i32,
 }
 
 /// A simple wrapper for the Cover Tree core logic
@@ -248,7 +249,7 @@ impl CoverTreeWrapper {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (batch_indices, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size=None))]
+    #[pyo3(signature = (batch_indices, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size=None, kernel_type=None))]
     fn insert_residual(
         &mut self,
         py: Python<'_>,
@@ -259,7 +260,9 @@ impl CoverTreeWrapper {
         rbf_var: f64,
         rbf_ls: PyObject,
         chunk_size: Option<usize>,
+        kernel_type: Option<i32>,
     ) -> PyResult<()> {
+        let k_type = kernel_type.unwrap_or(0);
         match &mut self.inner {
             CoverTreeInner::F32(data) => {
                 let batch_arr = to_array2_f32(&batch_indices.bind(py))?;
@@ -274,6 +277,7 @@ impl CoverTreeWrapper {
                     coords_arr.view(),
                     rbf_var as f32,
                     rbf_ls_arr.as_slice().unwrap(),
+                    k_type,
                     None,
                 );
                 let chunk = chunk_size.unwrap_or_else(|| batch_arr.nrows());
@@ -298,6 +302,7 @@ impl CoverTreeWrapper {
                     coords_arr.view(),
                     rbf_var,
                     rbf_ls_arr.as_slice().unwrap(),
+                    k_type,
                     None,
                 );
                 let chunk = chunk_size.unwrap_or_else(|| batch_arr.nrows());
@@ -357,6 +362,7 @@ impl CoverTreeWrapper {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (query_indices, node_to_dataset, v_matrix, p_diag, coords, rbf_var, rbf_ls, k, kernel_type=None))]
     fn knn_query_residual<'py>(
         &mut self,
         py: Python<'py>,
@@ -368,7 +374,9 @@ impl CoverTreeWrapper {
         rbf_var: f64,
         rbf_ls: PyObject,
         k: usize,
+        kernel_type: Option<i32>,
     ) -> PyResult<(Bound<'py, numpy::PyArray2<i64>>, PyObject)> {
+        let k_type = kernel_type.unwrap_or(0);
         // Reuse cached data if available (fast path)
         if let Some(cached) = &self.cached_data {
             match &self.inner {
@@ -379,6 +387,7 @@ impl CoverTreeWrapper {
                         cached.coords.view(),
                         cached.rbf_var,
                         &cached.rbf_ls,
+                        cached.kernel_type,
                         None,
                     );
 
@@ -479,6 +488,7 @@ impl CoverTreeWrapper {
                     coords_arr.view(),
                     rbf_var as f32,
                     rbf_ls_arr.as_slice().unwrap(),
+                    k_type,
                     None,
                 );
 
@@ -536,6 +546,7 @@ impl CoverTreeWrapper {
                     coords_arr.view(),
                     rbf_var,
                     rbf_ls_arr.as_slice().unwrap(),
+                    k_type,
                     None,
                 );
 
@@ -588,6 +599,7 @@ impl CoverTreeWrapper {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (query_indices, node_to_dataset, v_matrix, p_diag, coords, rbf_var, rbf_ls, k, kernel_type=None))]
     fn knn_query_residual_block<'py>(
         &self,
         py: Python<'py>,
@@ -599,7 +611,9 @@ impl CoverTreeWrapper {
         rbf_var: f64,
         rbf_ls: PyObject,
         k: usize,
+        kernel_type: Option<i32>,
     ) -> PyResult<(Bound<'py, numpy::PyArray2<i64>>, PyObject)> {
+        let k_type = kernel_type.unwrap_or(0);
         match &self.inner {
             CoverTreeInner::F32(_) => {
                 let v_matrix_arr = to_array2_f32(&v_matrix.bind(py))?;
@@ -613,6 +627,7 @@ impl CoverTreeWrapper {
                     coords_arr.view(),
                     rbf_var as f32,
                     rbf_ls_arr.as_slice().unwrap(),
+                    k_type,
                     None,
                 );
 
@@ -840,7 +855,7 @@ fn get_rust_debug_stats(reset: Option<bool>) -> (usize, usize) {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[pyfunction(signature = (v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size=None, batch_order=None))]
+#[pyfunction(signature = (v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size=None, batch_order=None, kernel_type=None))]
 fn build_pcct_residual_tree(
     py: Python<'_>,
     v_matrix: PyObject,
@@ -850,7 +865,9 @@ fn build_pcct_residual_tree(
     rbf_ls: PyObject,
     chunk_size: Option<usize>,
     batch_order: Option<String>,
+    kernel_type: Option<i32>,
 ) -> PyResult<(CoverTreeWrapper, Vec<i64>)> {
+    let k_type = kernel_type.unwrap_or(0);
     let parity_mode = std::env::var("COVERTREEX_RESIDUAL_PARITY")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -971,6 +988,7 @@ fn build_pcct_residual_tree(
             coords_f32.as_ref().unwrap().view(),
             rbf_var as f32,
             rbf_ls_f32.as_ref().unwrap().as_slice().unwrap(),
+            k_type,
             None,
         )
     });
@@ -981,6 +999,7 @@ fn build_pcct_residual_tree(
             coords_f64.as_ref().unwrap().view(),
             rbf_var,
             rbf_ls_f64.as_ref().unwrap().as_slice().unwrap(),
+            k_type,
             None,
         )
     });
@@ -1201,7 +1220,7 @@ fn emit_rust_batch(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[pyfunction(signature = (v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size=None, batch_order=None, log_writer=None, grid_whiten_scale=None, scope_chunk_target=None, conflict_degree_cap=None, scope_budget_schedule=None, scope_budget_up=None, scope_budget_down=None, masked_scope_append=None, scope_chunk_max_segments=None, scope_chunk_pair_merge=None))]
+#[pyfunction(signature = (v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size=None, batch_order=None, log_writer=None, grid_whiten_scale=None, scope_chunk_target=None, conflict_degree_cap=None, scope_budget_schedule=None, scope_budget_up=None, scope_budget_down=None, masked_scope_append=None, scope_chunk_max_segments=None, scope_chunk_pair_merge=None, kernel_type=None))]
 fn build_pcct2_residual_tree(
     py: Python<'_>,
     v_matrix: PyObject,
@@ -1221,12 +1240,15 @@ fn build_pcct2_residual_tree(
     masked_scope_append: Option<bool>,
     scope_chunk_max_segments: Option<usize>,
     scope_chunk_pair_merge: Option<bool>,
+    kernel_type: Option<i32>,
 ) -> PyResult<(CoverTreeWrapper, Vec<i64>)> {
     // Force float32 payloads to mirror python-numba fast path.
     let v_matrix_arr = to_array2_f32(&v_matrix.bind(py))?;
     let p_diag_arr = to_array1_f32(&p_diag.bind(py))?;
     let coords_arr = to_array2_f32(&coords.bind(py))?;
     let rbf_ls_arr = to_array1_f32(&rbf_ls.bind(py))?;
+
+    let k_type = kernel_type.unwrap_or(0);
 
     let order = match batch_order.as_deref() {
         Some(s) if s.eq_ignore_ascii_case("natural") => (0..coords_arr.nrows()).collect(),
@@ -1262,6 +1284,7 @@ fn build_pcct2_residual_tree(
         coords: c_ordered.clone(),
         rbf_ls: rbf_ls_arr.as_slice().unwrap().to_vec(),
         rbf_var: rbf_var as f32,
+        kernel_type: k_type,
     };
 
     // Indices array now contains 0..N (new indices), matching the reordered data
@@ -1321,6 +1344,7 @@ fn build_pcct2_residual_tree(
         c_ordered.view(),
         rbf_var as f32,
         rbf_ls_arr.as_slice().unwrap(),
+        k_type,
         None,
     );
 
@@ -1401,6 +1425,7 @@ fn knn_query_residual_block<'py>(
     rbf_var: f64,
     rbf_ls: PyObject,
     k: usize,
+    kernel_type: Option<i32>,
 ) -> PyResult<(Bound<'py, numpy::PyArray2<i64>>, PyObject)> {
     tree.knn_query_residual_block(
         py,
@@ -1412,5 +1437,6 @@ fn knn_query_residual_block<'py>(
         rbf_var,
         rbf_ls,
         k,
+        kernel_type,
     )
 }
