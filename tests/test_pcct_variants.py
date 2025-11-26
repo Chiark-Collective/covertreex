@@ -15,7 +15,7 @@ from covertreex.metrics import (
 from covertreex.queries.residual_knn import residual_knn_query
 
 POINTS = np.array([[float(i), float(i) * 0.5] for i in range(10)], dtype=np.float64)
-QUERIES = np.array([[0.1, 0.05], [4.9, 2.45], [8.05, 4.025]], dtype=np.float64)
+QUERIES = POINTS[[1, 5, 8]]
 K = 3
 
 

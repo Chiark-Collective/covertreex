@@ -172,7 +172,7 @@ def batch_insert(
             context=resolved_context,
         )
 
-def _create_dummy_plan(backend: TreeBackend) -> BatchInsertPlan:
+def _create_dummy_plan(backend: TreeBackend, batch_order_strategy: str = "rust") -> BatchInsertPlan:
     from covertreex.algo.batch.types import BatchInsertPlan, BatchInsertTimings
     from covertreex.algo.traverse import TraversalResult, TraversalTimings
     from covertreex.algo.conflict import ConflictGraph, ConflictGraphTimings
@@ -229,7 +229,7 @@ def _create_dummy_plan(backend: TreeBackend) -> BatchInsertPlan:
         level_summaries=(),
         timings=timings,
         batch_permutation=None,
-        batch_order_strategy="rust",
+        batch_order_strategy=batch_order_strategy,
         batch_order_metrics={},
     )
 
@@ -328,7 +328,8 @@ def _rust_batch_insert(
         stats=tree.stats, 
     )
     
-    return new_tree, _create_dummy_plan(backend)
+    strategy = getattr(context.config, "batch_order_strategy", "rust")
+    return new_tree, _create_dummy_plan(backend, batch_order_strategy=str(strategy))
 
 
 def _batch_insert_impl(

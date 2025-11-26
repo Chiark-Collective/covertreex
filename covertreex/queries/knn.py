@@ -328,8 +328,7 @@ def _rust_knn_query(
         # If cache injection fails, fall back to the wrapper defaults.
         pass
     
-    queries_np = to_numpy_array(backend, batch, dtype=np.float32)
-    
+    queries_np = to_numpy_array(backend, batch, dtype=dtype_float)
     is_residual = (
         context.config.metric == "residual_correlation" 
         or context.config.residual_use_static_euclidean_tree
