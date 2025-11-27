@@ -62,6 +62,20 @@ This list is reprioritised to focus on the configurations that already deliver �
 
 ## B. Next-Level Optimisations (after A is healthy)
 
+### Profile-Guided Optimization (PGO) for Rust backend
+- **Goal:** Enable PGO for the Rust backend to gain ~5-10% query throughput improvement with minimal code changes.
+- **Why:** Free performance from compiler optimization; the rust-hilbert path is already well-tuned and PGO is the easiest remaining win.
+- **Action:**
+  ```bash
+  # Generate profile
+  RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" maturin build --release
+  # Run representative workload (gold standard benchmark)
+  ./benchmarks/run_residual_gold_standard.sh
+  # Build with profile
+  RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata" maturin build --release
+  ```
+- **Status:** Not started. Identified during rust-hilbert optimization audit (2025-11-27).
+
 ### Gate‑1 rescue plan
 - **Goal:** Build a safer lookup from production artefacts, fix the residual level/radius ladders, and re-run audits until `traversal_gate1_pruned>0` without false negatives so gate-on can beat the current dense baseline.
 - **Status:** Lookup ingestion exists, but audits still fail immediately and sparse traversal costs >30 s/batch.  

@@ -395,15 +395,13 @@ where
             .scaled_norms_f32
             .as_ref()
             .expect("f32 norms requested but not initialised");
-        let v_norms = self
-            .v_norms_f32
-            .as_ref()
-            .expect("f32 v_norms requested but not initialised");
+        // v_norms available but V-norm pruning found ineffective (see note below)
+        let _v_norms = &self.v_norms_f32;
 
         // Use flat slice for faster unchecked access
         let coords = coords_arr.as_slice_memory_order().unwrap();
         let v_mat = v_mat_arr.as_slice_memory_order().unwrap();
-        
+
         let dim_c = coords_arr.ncols();
         let dim_v = v_mat_arr.ncols();
 
@@ -413,12 +411,15 @@ where
         let one = 1.0f32;
         let neg_one = -one;
         let eps = 1e-9f32;
-        
+
         let rbf_var = self.rbf_var.to_f32().unwrap();
         let neg_half = self.neg_half.to_f32().unwrap();
         let sqrt5 = 2.2360679775f32;
         let inv_three = 0.3333333333f32;
-        
+
+        // Pruning threshold (kept for potential future use)
+        let kth_f32 = kth.map(|k| k.to_f32().unwrap());
+
         let kernel_id = match self.kernel_type {
              ResidualKernelType::RBF => 0,
              ResidualKernelType::Matern52 => 1,
@@ -437,7 +438,7 @@ where
             // Coords Dot (Optimized for small D)
             let mut dot_c = 0.0f32;
             let p_coords = &coords[idx_2 * dim_c..(idx_2 + 1) * dim_c];
-            
+
             if dim_c == 3 {
                 // Unroll for D=3
                 dot_c = q_coords[0] * p_coords[0] + q_coords[1] * p_coords[1] + q_coords[2] * p_coords[2];
@@ -450,7 +451,7 @@ where
 
             let mut d2 = q_norm + scaled_norms[idx_2] - two * dot_c;
             if d2 < 0.0 { d2 = 0.0; }
-            
+
             let k_val = if kernel_id == 0 {
                 // RBF
                 rbf_var * (neg_half * d2).exp()
@@ -465,10 +466,17 @@ where
             let p_d = p_diag[idx_2];
             let denom = (q_diag * p_d).max(eps * eps).sqrt();
 
-            // V Dot (Optimized loop)
+            // NOTE: V-norm pruning was evaluated but found ineffective for this metric.
+            // The denominator sqrt(P[q]·P[p]) is typically ~10^-6, causing rho bounds
+            // to explode and always clamp to ±1, giving min_dist=0 (0% prune rate).
+            // See opt/v-norm-pruning branch for analysis. The kth parameter is kept
+            // for potential future use with different metric configurations.
+            let _ = kth_f32; // Suppress unused warning
+
+            // V Dot (Optimized loop) - only computed if not pruned
             let mut dot_v = 0.0f32;
             let p_v = &v_mat[idx_2 * dim_v..(idx_2 + 1) * dim_v];
-            
+
             // Basic auto-vectorization friendly loop
             for d in 0..dim_v {
                 dot_v += q_v[d] * p_v[d];
