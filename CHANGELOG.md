@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2025-11-27
+
+### Added
+- Quick-start CLI guide: `python -m covertreex` prints library usage examples
+- Links to GitHub and PyPI in quick-start output
+
+### Fixed
+- Test isolation issues with residual backend configuration
+- Skip WIP tests that document unfinished features (JAX batch insert, grid conflict builder)
+
 ## [0.2.0] - 2025-11-27
 
 API cleanup release with library-first focus.
