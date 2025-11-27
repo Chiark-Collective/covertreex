@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4] - 2025-11-27
+
+### Added
+- Explicit AVX2 SIMD (f32x8) optimization for V-matrix dot product in Rust backend (~5% query throughput improvement)
+
+### Changed
+- V-matrix dot product now uses hand-optimized SIMD with 2x loop unrolling instead of relying on auto-vectorization
+
 ## [0.0.3] - 2025-11-27
 
 ### Added
