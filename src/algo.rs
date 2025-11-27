@@ -1,4 +1,4 @@
-use crate::metric::{Euclidean, Metric, ResidualMetric};
+use crate::metric::{dot_f32_simd_inline, Euclidean, Metric, ResidualMetric};
 use crate::telemetry::ResidualQueryTelemetry;
 use crate::tree::CoverTreeData;
 use ndarray::parallel::prelude::*;
@@ -506,11 +506,8 @@ pub fn batch_residual_knn_query_block_sgemm(
                 }
                 let k_val = metric.rbf_var * (-0.5 * d2).exp();
 
-                // V dot
-                let mut dot_v = 0.0f32;
-                for d in 0..v_dim {
-                    dot_v += q_v[d] * t_v[d];
-                }
+                // V dot (SIMD)
+                let dot_v = dot_f32_simd_inline(q_v, t_v);
                 let rho = (k_val - dot_v) / denom;
                 let rho_clamped = rho.max(-1.0).min(1.0);
                 let dist_sq = 1.0 - rho_clamped.abs();

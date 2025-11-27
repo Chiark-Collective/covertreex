@@ -6,6 +6,23 @@ Historical benchmark results for covertreex. Each entry includes the exact comma
 
 The primary optimization target for Vecchia-style GP workloads.
 
+### 2025-11-27 (SIMD Optimization)
+
+Added explicit AVX2 SIMD (f32x8) for V-matrix dot product.
+Hardware: AMD Ryzen 9 9950X (16-core), 64GB RAM.
+
+| Optimization | Query Throughput (q/s) | Notes |
+|--------------|----------------------|-------|
+| Baseline (auto-vectorization) | 41-44k | Scalar loop |
+| AVX2 f32x8 SIMD | 43-47k | ~5% improvement (now default) |
+
+Also evaluated but not adopted:
+- AVX-512: No improvement over AVX2 (frequency throttling, small vectors)
+- PGO: No measurable benefit (SIMD-dominant hot path)
+- V-norm pruning: 0% prune rate (metric denominator ~10^-6)
+
+**Conclusion:** Workload is memory-bandwidth bound. Wider SIMD provides diminishing returns.
+
 ### 2025-11-26 (Rust Backend)
 
 | Engine | Build (s) | Query (s) | Total (s) |

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use wide::{f32x8, f64x4};
 
+
 pub trait Metric<T>: Sync + Send {
     fn distance(&self, p1: &[T], p2: &[T]) -> T;
     fn distance_sq(&self, p1: &[T], p2: &[T]) -> T;
@@ -473,14 +474,9 @@ where
             // for potential future use with different metric configurations.
             let _ = kth_f32; // Suppress unused warning
 
-            // V Dot (Optimized loop) - only computed if not pruned
-            let mut dot_v = 0.0f32;
+            // V Dot (SIMD f32x8) - only computed if not pruned
             let p_v = &v_mat[idx_2 * dim_v..(idx_2 + 1) * dim_v];
-
-            // Basic auto-vectorization friendly loop
-            for d in 0..dim_v {
-                dot_v += q_v[d] * p_v[d];
-            }
+            let dot_v = dot_f32_simd_inline(q_v, p_v);
 
             let rho = (k_val - dot_v) / denom;
             let rho_clamped = rho.max(neg_one).min(one);
@@ -592,6 +588,53 @@ where
         // Residual correlation distance is bounded by 1 (sqrt(1 - |rho|), |rho|<=1).
         Some(T::one())
     }
+}
+
+/// Optimized f32 dot product using SIMD (AVX2 f32x8).
+/// Uses 2x loop unrolling for better instruction-level parallelism.
+#[inline(always)]
+pub(crate) fn dot_f32_simd_inline(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len();
+    let chunks = len / 8;
+    let tail_start = chunks * 8;
+
+    let mut acc0 = f32x8::ZERO;
+    let mut acc1 = f32x8::ZERO;
+
+    // Process 16 elements per iteration (2x unroll for better ILP)
+    let double_chunks = chunks / 2;
+    let mut i = 0;
+    for _ in 0..double_chunks {
+        // First 8 elements
+        let va0 = f32x8::from(unsafe { *(a.as_ptr().add(i) as *const [f32; 8]) });
+        let vb0 = f32x8::from(unsafe { *(b.as_ptr().add(i) as *const [f32; 8]) });
+        acc0 = va0.mul_add(vb0, acc0);
+
+        // Second 8 elements
+        let va1 = f32x8::from(unsafe { *(a.as_ptr().add(i + 8) as *const [f32; 8]) });
+        let vb1 = f32x8::from(unsafe { *(b.as_ptr().add(i + 8) as *const [f32; 8]) });
+        acc1 = va1.mul_add(vb1, acc1);
+
+        i += 16;
+    }
+
+    // Handle remaining complete 8-element chunk
+    if chunks % 2 == 1 {
+        let va = f32x8::from(unsafe { *(a.as_ptr().add(i) as *const [f32; 8]) });
+        let vb = f32x8::from(unsafe { *(b.as_ptr().add(i) as *const [f32; 8]) });
+        acc0 = va.mul_add(vb, acc0);
+    }
+
+    // Combine accumulators and reduce
+    let combined = acc0 + acc1;
+    let mut result = combined.reduce_add();
+
+    // Handle tail elements
+    for j in tail_start..len {
+        result += a[j] * b[j];
+    }
+
+    result
 }
 
 #[inline(always)]

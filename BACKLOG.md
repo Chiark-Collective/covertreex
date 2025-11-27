@@ -74,7 +74,25 @@ This list is reprioritised to focus on the configurations that already deliver �
   # Build with profile
   RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata" maturin build --release
   ```
-- **Status:** Not started. Identified during rust-hilbert optimization audit (2025-11-27).
+- **Status:** ❌ **Evaluated (2025-11-27) - No measurable benefit.** Full experiment completed: instrumented build, 3 profiling runs generating 5MB merged profile data, PGO-optimized rebuild. Results showed no improvement (PGO: 40.3-42.3k q/s vs baseline: 41.0-44.2k q/s for rust-hilbert). Run-to-run variance (~10%) exceeded any potential PGO gain. Root cause: the hot path is SIMD-dominant (`wide::f32x8` dot products) and memory-bound (V-matrix fetches), leaving no room for branch prediction or code layout optimization. Already has `lto = true` and `opt-level = 3`.
+
+### V-norm Pruning for Residual Metric
+- **Goal:** Use Cauchy-Schwarz bounds on V-matrix dot products to skip full distance computation when the lower bound exceeds the k-th best distance.
+- **Why:** V-matrix dot product dominates distance computation (~75% of cost, ~50 dimensions). Pre-computing `||V[i]||` norms and using `|V[q]·V[p]| ≤ ||V[q]|| × ||V[p]||` could skip many expensive dot products.
+- **Action:** Implemented in `src/metric.rs:distances_f32_batch_idx_into_with_kth` with instrumentation to measure prune rate.
+- **Status:** ❌ **Evaluated (2025-11-27) - 0% prune rate, structurally ineffective.** The residual correlation formula `ρ = (K - V·V) / sqrt(P[q]·P[p])` has a denominator `sqrt(P[q]·P[p]) ≈ 10^-6` for typical GP configurations. This causes the Cauchy-Schwarz bounds on ρ to explode to ±10^5, which after clamping to [-1, 1] always gives `max_rho = 1.0` → `min_dist = 0`. The pruning condition `min_dist > kth_cutoff` is never satisfied. See branch `opt/v-norm-pruning` commit `c65c164` for analysis. Code comments preserved in `src/metric.rs:473-478` for future reference.
+
+### SIMD Optimization for V-matrix Dot Product
+- **Goal:** Improve V-matrix dot product performance using explicit SIMD.
+- **Why:** V-matrix dot product (~75% of distance computation cost) was using scalar loop relying on auto-vectorization.
+- **Action:** Implemented explicit SIMD with AVX2 f32x8 and 2x loop unrolling.
+- **Status:** ✅ **Implemented (2025-11-27) - ~5% improvement.** AVX2 SIMD provides ~5% improvement (43-47k q/s vs 41-44k baseline). AVX-512 was tested but removed (no additional benefit due to frequency throttling). The workload is memory-bandwidth bound, not compute bound. Code in `src/metric.rs:dot_f32_simd_inline`.
+
+### Product Quantization for V-matrix
+- **Goal:** Compress the V-matrix using Product Quantization (PQ) to reduce memory bandwidth and enable faster approximate dot products.
+- **Why:** V-matrix is `N × v_rank` floats (~50 dimensions). PQ can compress to ~16 bytes per row while maintaining >95% recall, potentially 3-4x speedup on memory-bound workloads.
+- **Action:** Implement PQ encoding at tree build time, PQ distance approximation in query hot path, with optional reranking using exact distances.
+- **Status:** Deprioritized. SIMD optimization investigation (2025-11-27) confirmed workload is memory-bandwidth bound, making PQ potentially valuable. However, PQ introduces approximation error that could affect GP accuracy and tree invariants. Requires careful validation before implementation.
 
 ### Gate‑1 rescue plan
 - **Goal:** Build a safer lookup from production artefacts, fix the residual level/radius ladders, and re-run audits until `traversal_gate1_pruned>0` without false negatives so gate-on can beat the current dense baseline.
