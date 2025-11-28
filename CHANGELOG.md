@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2025-11-28
+
 ### Added
 - **ResidualCoverTree**: Simplified high-level API for residual correlation k-NN queries (Vecchia GP). Replaces complex setup ceremony with a single class.
 

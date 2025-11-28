@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "covertreex"
-version = "0.3.0"
+version = "0.3.1"
 description = "Parallel compressed cover tree (PCCT) library targeting JAX-based Vecchia GP workloads."
 requires-python = ">=3.12"
 readme = "README.md"
