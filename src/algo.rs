@@ -654,49 +654,69 @@ where
     };
     let mut survivors_count = 0;
     let mut low_yield_streak = 0;
+    let mut kth_dist = T::max_value();
 
-    // Root distance and seed result heap
-    let root_payload = tree.get_point_row(0);
-    let root_metric_idx = root_payload[0].to_usize().unwrap();  // Index into metric arrays
-    let root_ds_idx = node_to_dataset[0] as usize;  // Dataset index for constraint check
+    // Find all roots (nodes with parent == -1) and seed result heap with valid ones
+    // This is critical for trees with multiple disconnected components (e.g., rust-hilbert at small N)
+    let mut all_roots_prunable = true;
+    let mut root_frontier_entries: Vec<(usize, T)> = Vec::new();
 
-    // Check predecessor constraint for root (uses dataset index)
-    let root_valid = match max_neighbor_idx {
-        Some(max_idx) => root_ds_idx < max_idx,
-        None => true,
-    };
+    for root_idx in 0..tree.len() {
+        if tree.parents[root_idx] != -1 {
+            continue;  // Not a root
+        }
 
-    let root_dist = metric.distance_idx(q_dataset_idx, root_metric_idx);
-    let mut kth_dist = if root_valid && k > 0 { root_dist } else { T::max_value() };
+        let root_payload = tree.get_point_row(root_idx);
+        let root_metric_idx = root_payload[0].to_usize().unwrap();
+        let root_ds_idx = node_to_dataset[root_idx] as usize;
 
-    if root_valid {
-        result_heap.push(Neighbor {
-            dist: OrderedFloat(root_dist),
-            node_idx: 0,
-        });
-        survivors_count += 1;
-    } else if let Some(t) = telemetry.as_mut() {
-        t.predecessor_filtered += 1;
+        // Check predecessor constraint for this root
+        let root_valid = match max_neighbor_idx {
+            Some(max_idx) => root_ds_idx < max_idx,
+            None => true,
+        };
+
+        let root_dist = metric.distance_idx(q_dataset_idx, root_metric_idx);
+
+        // Always add root to frontier (we need to explore its children)
+        root_frontier_entries.push((root_idx, root_dist));
+
+        if root_valid {
+            result_heap.push(Neighbor {
+                dist: OrderedFloat(root_dist),
+                node_idx: root_idx as i64,
+            });
+            survivors_count += 1;
+            if root_dist < kth_dist {
+                kth_dist = root_dist;
+            }
+        } else if let Some(t) = telemetry.as_mut() {
+            t.predecessor_filtered += 1;
+        }
+
+        // Check if this root's subtree could contain valid predecessors
+        if let (Some(max_idx), Some(bounds)) = (max_neighbor_idx, subtree_min_bounds) {
+            if root_idx < bounds.len() && (bounds[root_idx] as usize) < max_idx {
+                all_roots_prunable = false;  // At least one subtree has valid predecessors
+            }
+        } else {
+            all_roots_prunable = false;  // No bounds, assume some subtrees have valid nodes
+        }
     }
 
-    // Early exit: if entire tree's minimum dataset index >= max_neighbor_idx,
-    // no need to explore further (root was the only possible valid node)
-    if let (Some(max_idx), Some(bounds)) = (max_neighbor_idx, subtree_min_bounds) {
-        if !bounds.is_empty() && (bounds[0] as usize) >= max_idx {
-            // Entire tree has no valid predecessors beyond root (already checked)
-            if let Some(t) = telemetry.as_mut() {
-                t.subtrees_pruned += 1;
-            }
-            // Return what we have (possibly just root, or empty)
-            let sorted = result_heap.into_sorted_vec();
-            let mut indices = Vec::with_capacity(sorted.len());
-            let mut dists = Vec::with_capacity(sorted.len());
-            for n in sorted {
-                indices.push(node_to_dataset[n.node_idx as usize]);
-                dists.push(n.dist.0);
-            }
-            return (indices, dists);
+    // Early exit: if ALL roots' subtrees have no valid predecessors, return what we have
+    if all_roots_prunable && max_neighbor_idx.is_some() {
+        if let Some(t) = telemetry.as_mut() {
+            t.subtrees_pruned += 1;
         }
+        let sorted = result_heap.into_sorted_vec();
+        let mut indices = Vec::with_capacity(sorted.len());
+        let mut dists = Vec::with_capacity(sorted.len());
+        for n in sorted {
+            indices.push(node_to_dataset[n.node_idx as usize]);
+            dists.push(n.dist.0);
+        }
+        return (indices, dists);
     }
 
     // Buffers and frontier
@@ -717,7 +737,12 @@ where
             
     if use_visited {
         ctx.visited.fill(0);
-        bitset_set(&mut ctx.visited, 0);
+        // Mark all roots as visited (they were added to result_heap above)
+        for root_idx in 0..tree.len() {
+            if tree.parents[root_idx] == -1 {
+                bitset_set(&mut ctx.visited, root_idx);
+            }
+        }
     }
 
     let scope_member_limit_env = std::env::var("COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT")
@@ -765,7 +790,10 @@ where
     let two = T::from(2.0).unwrap();
 
     ctx.frontier.clear();
-    ctx.frontier.push((0usize, root_dist));
+    // Initialize frontier with ALL roots (critical for multi-root trees)
+    for (root_idx, root_dist) in root_frontier_entries {
+        ctx.frontier.push((root_idx, root_dist));
+    }
 
     // For predecessor_mode, continue searching until k valid neighbors found (ignore budget limit)
     while !ctx.frontier.is_empty()
