@@ -418,26 +418,41 @@ impl CoverTreeWrapper {
                     } else {
                         None
                     };
-                    
+
                     let q_input = if let Some(qm) = &q_mapped_owned {
                         qm.view()
                     } else {
                         queries
                     };
 
-                    // Tree nodes 0..N map to data indices 0..N (because we reordered data during build)
+                    // For predecessor mode with Hilbert ordering, we need to map node indices
+                    // to original dataset indices using self.order. Without predecessor mode,
+                    // identity_map is fine since we remap results at the end anyway.
                     let identity_map: Vec<i64> = (0..data.len() as i64).collect();
+                    let node_to_dataset_ref: &[i64] = if pred_mode && self.order.is_some() {
+                        // Use order mapping: hilbert_idx -> dataset_idx for predecessor checks
+                        self.order.as_ref().unwrap()
+                    } else {
+                        &identity_map
+                    };
+
+                    // For predecessor mode, use ORIGINAL dataset indices (not mapped Hilbert indices)
+                    let predecessor_indices: Option<Vec<i64>> = if pred_mode {
+                        Some(queries.as_slice().expect("contiguous queries").to_vec())
+                    } else {
+                        None
+                    };
 
                     let (mut indices, dists) = if telemetry_enabled {
                         let mut telem = ResidualQueryTelemetry::default();
                         let res = batch_residual_knn_query(
                             data,
                             q_input,
-                            &identity_map,
+                            node_to_dataset_ref,
                             &metric,
                             k,
                             scope_caps.as_ref(),
-                            pred_mode,
+                            predecessor_indices.as_deref(),
                             bounds_vec.as_deref(),
                             Some(&mut telem),
                         );
@@ -447,11 +462,11 @@ impl CoverTreeWrapper {
                         batch_residual_knn_query(
                             data,
                             q_input,
-                            &identity_map,
+                            node_to_dataset_ref,
                             &metric,
                             k,
                             scope_caps.as_ref(),
-                            pred_mode,
+                            predecessor_indices.as_deref(),
                             bounds_vec.as_deref(),
                             None,
                         )
@@ -508,16 +523,24 @@ impl CoverTreeWrapper {
                     .unwrap_or(false);
                 let mut telemetry_rec: Option<ResidualQueryTelemetry> = None;
 
+                // For predecessor mode, use query indices as max bounds
+                let query_arr = query_indices.as_array();
+                let predecessor_indices: Option<Vec<i64>> = if pred_mode {
+                    Some(query_arr.as_slice().expect("contiguous queries").to_vec())
+                } else {
+                    None
+                };
+
                 let (mut indices, dists) = if telemetry_enabled {
                     let mut telem = ResidualQueryTelemetry::default();
                     let res = batch_residual_knn_query(
                         data,
-                        query_indices.as_array(),
+                        query_arr,
                         &node_to_dataset,
                         &metric,
                         k,
                         scope_caps.as_ref(),
-                        pred_mode,
+                        predecessor_indices.as_deref(),
                         bounds_vec.as_deref(),
                         Some(&mut telem),
                     );
@@ -526,12 +549,12 @@ impl CoverTreeWrapper {
                 } else {
                     batch_residual_knn_query(
                         data,
-                        query_indices.as_array(),
+                        query_arr,
                         &node_to_dataset,
                         &metric,
                         k,
                         scope_caps.as_ref(),
-                        pred_mode,
+                        predecessor_indices.as_deref(),
                         bounds_vec.as_deref(),
                         None,
                     )
@@ -573,16 +596,24 @@ impl CoverTreeWrapper {
                     .unwrap_or(false);
                 let mut telemetry_rec: Option<ResidualQueryTelemetry> = None;
 
+                // For predecessor mode, use query indices as max bounds
+                let query_arr = query_indices.as_array();
+                let predecessor_indices: Option<Vec<i64>> = if pred_mode {
+                    Some(query_arr.as_slice().expect("contiguous queries").to_vec())
+                } else {
+                    None
+                };
+
                 let (mut indices, dists) = if telemetry_enabled {
                     let mut telem = ResidualQueryTelemetry::default();
                     let res = batch_residual_knn_query(
                         data,
-                        query_indices.as_array(),
+                        query_arr,
                         &node_to_dataset,
                         &metric,
                         k,
                         caps_f64.as_ref(),
-                        pred_mode,
+                        predecessor_indices.as_deref(),
                         bounds_vec.as_deref(),
                         Some(&mut telem),
                     );
@@ -591,12 +622,12 @@ impl CoverTreeWrapper {
                 } else {
                     batch_residual_knn_query(
                         data,
-                        query_indices.as_array(),
+                        query_arr,
                         &node_to_dataset,
                         &metric,
                         k,
                         caps_f64.as_ref(),
-                        pred_mode,
+                        predecessor_indices.as_deref(),
                         bounds_vec.as_deref(),
                         None,
                     )
@@ -700,8 +731,8 @@ impl CoverTreeWrapper {
                             &metric,
                             k,
                             scope_caps.as_ref(),
-                            false,  // predecessor_mode not supported in block path
-                            None,   // subtree_min_bounds
+                            None,  // predecessor_mode not supported in block path
+                            None,  // subtree_min_bounds
                             None,
                         );
                         if !survivors.is_empty() {
@@ -726,8 +757,8 @@ impl CoverTreeWrapper {
                         &metric,
                         k,
                         scope_caps.as_ref(),
-                        false,  // predecessor_mode not supported in block path
-                        None,   // subtree_min_bounds
+                        None,  // predecessor_mode not supported in block path
+                        None,  // subtree_min_bounds
                         None,
                     ),
                 };

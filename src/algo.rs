@@ -357,7 +357,7 @@ pub fn batch_residual_knn_query<'a, T>(
     metric: &ResidualMetric<'a, T>,
     k: usize,
     scope_caps: Option<&HashMap<i32, T>>,
-    predecessor_mode: bool,
+    predecessor_max_indices: Option<&[i64]>,  // Original dataset indices for predecessor constraint
     subtree_min_bounds: Option<&[i64]>,
     telemetry: Option<&mut ResidualQueryTelemetry>,
 ) -> (Vec<Vec<i64>>, Vec<Vec<T>>)
@@ -372,15 +372,11 @@ where
         let mut ctx = SearchContext::new(n_points, tree_len);
         let mut out = Vec::with_capacity(query_indices.len());
 
-        for &q_idx in query_indices.iter() {
+        for (i, &q_idx) in query_indices.iter().enumerate() {
             let mut local = ResidualQueryTelemetry::default();
 
-            // Predecessor mode: only neighbors with index < query index allowed
-            let max_neighbor = if predecessor_mode {
-                Some(q_idx as usize)
-            } else {
-                None
-            };
+            // Predecessor mode: only neighbors with dataset index < query's original dataset index
+            let max_neighbor = predecessor_max_indices.map(|arr| arr[i] as usize);
 
             let res = single_residual_knn_query(
                 tree,
@@ -403,17 +399,17 @@ where
         let q_slice = query_indices.as_slice().expect("contiguous query indices");
         let chunk_size = 64; // Match stream_tile default
 
+        // Enumerate chunks with their starting offset for predecessor index lookup
         q_slice.par_chunks(chunk_size)
+            .enumerate()
             .map_init(
                 || SearchContext::new(n_points, tree_len),
-                |ctx, chunk| {
+                |ctx, (chunk_idx, chunk)| {
+                    let chunk_start = chunk_idx * chunk_size;
                     let mut chunk_results = Vec::with_capacity(chunk.len());
-                    for &q_idx in chunk {
-                        let max_neighbor = if predecessor_mode {
-                            Some(q_idx as usize)
-                        } else {
-                            None
-                        };
+                    for (local_idx, &q_idx) in chunk.iter().enumerate() {
+                        // Use original dataset index for predecessor constraint
+                        let max_neighbor = predecessor_max_indices.map(|arr| arr[chunk_start + local_idx] as usize);
                         let res = single_residual_knn_query(
                             tree,
                             node_to_dataset,

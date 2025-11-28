@@ -323,6 +323,7 @@ class RustFastHandle:
     rbf_variance: float
     rbf_lengthscale: np.ndarray
     dtype: Any
+    subtree_min_bounds: np.ndarray | None = None
 
 
 class RustNaturalEngine:
@@ -344,11 +345,12 @@ class RustNaturalEngine:
         plan_callback: Callable[[Any, int, int], Mapping[str, Any] | None] | None = None,
         residual_backend: Any | None = None,
         residual_params: Mapping[str, Any] | None = None,
+        compute_predecessor_bounds: bool = False,
     ) -> CoverTree:
         if runtime.metric != "residual_correlation":
             raise ValueError("rust-natural engine only supports the residual_correlation metric.")
 
-        covertreex_backend = _enable_rust_debug_stats_if_requested()
+        backend_mod = _enable_rust_debug_stats_if_requested()
 
         params = dict(residual_params or {})
         variance = float(params.get("variance", 1.0))
@@ -385,6 +387,19 @@ class RustNaturalEngine:
             dtype=dtype,
         )
 
+        # Compute subtree index bounds for predecessor constraint pruning (opt-in)
+        subtree_min_bounds: np.ndarray | None = None
+        if compute_predecessor_bounds:
+            if backend_mod is None:
+                try:
+                    import covertreex_backend as backend_mod  # type: ignore
+                except ImportError:
+                    pass
+            if backend_mod is not None:
+                parents = tree_handle.get_parents()
+                n2d_arr = np.asarray(node_to_dataset, dtype=np.int64)
+                subtree_min_bounds, _ = backend_mod.compute_subtree_bounds_py(parents, n2d_arr)
+
         handle = RustFastHandle(
             tree=tree_handle,
             node_to_dataset=node_to_dataset,
@@ -394,12 +409,14 @@ class RustNaturalEngine:
             rbf_variance=rbf_var,
             rbf_lengthscale=rbf_ls,
             dtype=dtype,
+            subtree_min_bounds=subtree_min_bounds,
         )
         backend = TreeBackend.numpy(precision="float32" if dtype == np.float32 else "float64")
         meta = {
             "build_seconds": build_seconds,
             "dataset_size": len(node_to_dataset),
             "node_to_dataset": node_to_dataset,
+            "predecessor_bounds_computed": compute_predecessor_bounds,
         }
         return CoverTree(
             engine=self,
@@ -427,6 +444,14 @@ class RustNaturalEngine:
         if queries.dtype.kind not in {"i", "u"}:
             raise ValueError("rust-natural engine expects integer query payloads representing dataset indices.")
         query_indices = np.asarray(queries, dtype=np.int64).reshape(-1)
+
+        kernel_type = int(tree.meta.get("kernel_type", 0))
+
+        # Pass subtree bounds for aggressive pruning when predecessor_mode is enabled
+        subtree_bounds = None
+        if predecessor_mode and handle.subtree_min_bounds is not None:
+            subtree_bounds = handle.subtree_min_bounds
+
         indices, distances = handle.tree.knn_query_residual(
             query_indices,
             handle.node_to_dataset,
@@ -436,7 +461,9 @@ class RustNaturalEngine:
             float(handle.rbf_variance),
             np.asarray(handle.rbf_lengthscale, dtype=handle.dtype),
             int(k),
-            predecessor_mode=predecessor_mode,
+            kernel_type,
+            predecessor_mode,
+            subtree_bounds,
         )
         sorted_indices = np.asarray(indices, dtype=np.int64)
         sorted_distances = np.asarray(distances, dtype=handle.dtype)
