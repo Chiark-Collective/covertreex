@@ -425,18 +425,19 @@ impl CoverTreeWrapper {
                         queries
                     };
 
-                    // For predecessor mode with Hilbert ordering, we need to map node indices
-                    // to original dataset indices using self.order. Without predecessor mode,
-                    // identity_map is fine since we remap results at the end anyway.
+                    // For predecessor mode with Hilbert ordering:
+                    // - Use self.order as node_to_dataset so constraint checks use dataset indices
+                    // - Results will already be dataset indices (no remapping needed)
+                    // Without predecessor mode: use identity_map, remap results at end
                     let identity_map: Vec<i64> = (0..data.len() as i64).collect();
-                    let node_to_dataset_ref: &[i64] = if pred_mode && self.order.is_some() {
-                        // Use order mapping: hilbert_idx -> dataset_idx for predecessor checks
+                    let use_order_for_constraint = pred_mode && self.order.is_some();
+                    let node_to_dataset_ref: &[i64] = if use_order_for_constraint {
                         self.order.as_ref().unwrap()
                     } else {
                         &identity_map
                     };
 
-                    // For predecessor mode, use ORIGINAL dataset indices (not mapped Hilbert indices)
+                    // For predecessor mode, use original dataset indices as constraint bounds
                     let predecessor_indices: Option<Vec<i64>> = if pred_mode {
                         Some(queries.as_slice().expect("contiguous queries").to_vec())
                     } else {
@@ -472,21 +473,23 @@ impl CoverTreeWrapper {
                         )
                     };
 
-                    // Map results back: new_idx -> old_idx
-                    if let Some(order) = &self.order {
-                        for row in indices.iter_mut() {
-                            for idx in row.iter_mut() {
-                                if *idx >= 0 && (*idx as usize) < order.len() {
-                                    *idx = order[*idx as usize];
+                    // Map results back: Hilbert_idx -> dataset_idx
+                    // Skip if we used order for constraint (results are already dataset indices)
+                    if !use_order_for_constraint {
+                        if let Some(order) = &self.order {
+                            for row in indices.iter_mut() {
+                                for idx in row.iter_mut() {
+                                    if *idx >= 0 && (*idx as usize) < order.len() {
+                                        *idx = order[*idx as usize];
+                                    }
                                 }
                             }
-                        }
-                    } else {
-                        // Fallback if no order stored (should match node_to_dataset if natural)
-                        for row in indices.iter_mut() {
-                            for idx in row.iter_mut() {
-                                if *idx >= 0 && (*idx as usize) < node_to_dataset.len() {
-                                    *idx = node_to_dataset[*idx as usize];
+                        } else {
+                            for row in indices.iter_mut() {
+                                for idx in row.iter_mut() {
+                                    if *idx >= 0 && (*idx as usize) < node_to_dataset.len() {
+                                        *idx = node_to_dataset[*idx as usize];
+                                    }
                                 }
                             }
                         }
@@ -523,8 +526,29 @@ impl CoverTreeWrapper {
                     .unwrap_or(false);
                 let mut telemetry_rec: Option<ResidualQueryTelemetry> = None;
 
-                // For predecessor mode, use query indices as max bounds
+                // Query indices from Python are dataset indices.
+                // If tree has Hilbert ordering (inv_order available), map to tree node indices.
                 let query_arr = query_indices.as_array();
+                let query_mapped_owned: Option<ndarray::Array1<i64>> = if let Some(inv) = &self.inv_order {
+                    let mut mapped = Vec::with_capacity(query_arr.len());
+                    for &q in query_arr.iter() {
+                        if q >= 0 && (q as usize) < inv.len() {
+                            mapped.push(inv[q as usize]);
+                        } else {
+                            mapped.push(0);
+                        }
+                    }
+                    Some(ndarray::Array1::from_vec(mapped))
+                } else {
+                    None
+                };
+                let query_input = if let Some(qm) = &query_mapped_owned {
+                    qm.view()
+                } else {
+                    query_arr
+                };
+
+                // For predecessor mode, use ORIGINAL dataset indices (not mapped)
                 let predecessor_indices: Option<Vec<i64>> = if pred_mode {
                     Some(query_arr.as_slice().expect("contiguous queries").to_vec())
                 } else {
@@ -535,7 +559,7 @@ impl CoverTreeWrapper {
                     let mut telem = ResidualQueryTelemetry::default();
                     let res = batch_residual_knn_query(
                         data,
-                        query_arr,
+                        query_input,
                         &node_to_dataset,
                         &metric,
                         k,
@@ -549,7 +573,7 @@ impl CoverTreeWrapper {
                 } else {
                     batch_residual_knn_query(
                         data,
-                        query_arr,
+                        query_input,
                         &node_to_dataset,
                         &metric,
                         k,
@@ -596,8 +620,29 @@ impl CoverTreeWrapper {
                     .unwrap_or(false);
                 let mut telemetry_rec: Option<ResidualQueryTelemetry> = None;
 
-                // For predecessor mode, use query indices as max bounds
+                // Query indices from Python are dataset indices.
+                // If tree has Hilbert ordering (inv_order available), map to tree node indices.
                 let query_arr = query_indices.as_array();
+                let query_mapped_owned: Option<ndarray::Array1<i64>> = if let Some(inv) = &self.inv_order {
+                    let mut mapped = Vec::with_capacity(query_arr.len());
+                    for &q in query_arr.iter() {
+                        if q >= 0 && (q as usize) < inv.len() {
+                            mapped.push(inv[q as usize]);
+                        } else {
+                            mapped.push(0);
+                        }
+                    }
+                    Some(ndarray::Array1::from_vec(mapped))
+                } else {
+                    None
+                };
+                let query_input = if let Some(qm) = &query_mapped_owned {
+                    qm.view()
+                } else {
+                    query_arr
+                };
+
+                // For predecessor mode, use ORIGINAL dataset indices (not mapped)
                 let predecessor_indices: Option<Vec<i64>> = if pred_mode {
                     Some(query_arr.as_slice().expect("contiguous queries").to_vec())
                 } else {
@@ -608,7 +653,7 @@ impl CoverTreeWrapper {
                     let mut telem = ResidualQueryTelemetry::default();
                     let res = batch_residual_knn_query(
                         data,
-                        query_arr,
+                        query_input,
                         &node_to_dataset,
                         &metric,
                         k,
@@ -622,7 +667,7 @@ impl CoverTreeWrapper {
                 } else {
                     batch_residual_knn_query(
                         data,
-                        query_arr,
+                        query_input,
                         &node_to_dataset,
                         &metric,
                         k,

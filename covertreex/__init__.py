@@ -2,23 +2,28 @@
 
 Quick Start
 -----------
->>> from covertreex import CoverTree, Runtime, Residual
+>>> import numpy as np
+>>> from covertreex import CoverTree
 >>>
 >>> # Basic Euclidean k-NN
+>>> points = np.random.randn(10000, 3)
 >>> tree = CoverTree().fit(points)
->>> neighbors = tree.knn(query_points, k=10)
+>>> neighbors = tree.knn(points[:100], k=10)
+
+Residual Correlation (Vecchia GP)
+---------------------------------
+>>> from covertreex import ResidualCoverTree
 >>>
->>> # Residual correlation metric for Vecchia GP
->>> residual = Residual(v_matrix=V, p_diag=p_diag, coords=coords)
->>> runtime = Runtime(metric="residual", residual=residual)
->>> tree = CoverTree(runtime).fit(points)
->>> neighbors = tree.knn(points, k=50)
+>>> coords = np.random.randn(10000, 3).astype(np.float32)
+>>> tree = ResidualCoverTree(coords, variance=1.0, lengthscale=1.0)
+>>> neighbors = tree.knn(k=50)
+>>> neighbors = tree.knn(k=50, predecessor_mode=True)  # Vecchia constraint
 
 Classes
 -------
-CoverTree : Main interface for building trees and running k-NN queries.
+ResidualCoverTree : Simplified API for residual correlation k-NN (Vecchia GP).
+CoverTree : General-purpose cover tree for Euclidean and custom metrics.
 Runtime : Configuration for backend, metric, and engine selection.
-Residual : Configuration for residual correlation metric (Vecchia GP).
 """
 
 from importlib.metadata import version as _pkg_version
@@ -30,6 +35,7 @@ except Exception:  # pragma: no cover - best effort during local development
 
 # Primary user-facing API
 from .api import CoverTree, Runtime, Residual, PCCT
+from .residual_tree import ResidualCoverTree
 
 # Internal/advanced APIs
 from .engine import CoverTree as EngineCoverTree, build_tree, get_engine
@@ -60,6 +66,7 @@ from .baseline import (
 __all__ = [
     # Primary API
     "__version__",
+    "ResidualCoverTree",
     "CoverTree",
     "Runtime",
     "Residual",

@@ -657,15 +657,16 @@ where
 
     // Root distance and seed result heap
     let root_payload = tree.get_point_row(0);
-    let root_dataset_idx = root_payload[0].to_usize().unwrap();
+    let root_metric_idx = root_payload[0].to_usize().unwrap();  // Index into metric arrays
+    let root_ds_idx = node_to_dataset[0] as usize;  // Dataset index for constraint check
 
-    // Check predecessor constraint for root
+    // Check predecessor constraint for root (uses dataset index)
     let root_valid = match max_neighbor_idx {
-        Some(max_idx) => root_dataset_idx < max_idx,
+        Some(max_idx) => root_ds_idx < max_idx,
         None => true,
     };
 
-    let root_dist = metric.distance_idx(q_dataset_idx, root_dataset_idx);
+    let root_dist = metric.distance_idx(q_dataset_idx, root_metric_idx);
     let mut kth_dist = if root_valid && k > 0 { root_dist } else { T::max_value() };
 
     if root_valid {
@@ -854,12 +855,12 @@ where
                     }
                 }
 
-                let ds_idx = node_to_dataset[child_idx] as usize;
-
-                // Predecessor constraint: skip if ds_idx >= max_neighbor_idx
-                // But still need to traverse siblings (children are still in tree)
+                // Predecessor constraint: skip if dataset_idx >= max_neighbor_idx
+                // Note: node_to_dataset maps tree index to dataset index for constraint checks
+                // But we use child_idx directly for metric lookups (metric may be in tree order)
+                let constraint_ds_idx = node_to_dataset[child_idx] as usize;
                 let predecessor_ok = match max_neighbor_idx {
-                    Some(max_idx) => ds_idx < max_idx,
+                    Some(max_idx) => constraint_ds_idx < max_idx,
                     None => true,
                 };
 
@@ -879,6 +880,10 @@ where
                     continue;
                 }
 
+                // For metric lookups and caching, use tree index directly
+                // (cached data path has metric in tree order, not dataset order)
+                let metric_idx = child_idx;
+
                 // Visited check
                 if use_visited {
                     if bitset_check(&ctx.visited, child_idx) {
@@ -888,18 +893,18 @@ where
                     } else {
                         bitset_set(&mut ctx.visited, child_idx);
                         ctx.children_nodes.push(child_idx);
-                        ctx.children_ds_idx.push(ds_idx);
+                        ctx.children_ds_idx.push(metric_idx);
                         ctx.children_parent_lb.push(parent_lb);
-                        if ds_idx < ctx.cached_lb.len() && ctx.cached_lb[ds_idx] > parent_lb {
-                            ctx.cached_lb[ds_idx] = parent_lb;
+                        if metric_idx < ctx.cached_lb.len() && ctx.cached_lb[metric_idx] > parent_lb {
+                            ctx.cached_lb[metric_idx] = parent_lb;
                         }
                     }
                 } else {
                     ctx.children_nodes.push(child_idx);
-                    ctx.children_ds_idx.push(ds_idx);
+                    ctx.children_ds_idx.push(metric_idx);
                     ctx.children_parent_lb.push(parent_lb);
-                    if ds_idx < ctx.cached_lb.len() && ctx.cached_lb[ds_idx] > parent_lb {
-                        ctx.cached_lb[ds_idx] = parent_lb;
+                    if metric_idx < ctx.cached_lb.len() && ctx.cached_lb[metric_idx] > parent_lb {
+                        ctx.cached_lb[metric_idx] = parent_lb;
                     }
                 }
 
@@ -1059,7 +1064,8 @@ where
                     }
                 }
 
-                if let Some(slot) = ctx.cached_lb.get_mut(node_to_dataset[child_idx] as usize) {
+                // Use tree index for cached_lb (consistent with metric order)
+                if let Some(slot) = ctx.cached_lb.get_mut(child_idx) {
                     let new_lb = dist - child_radius;
                     if new_lb < *slot {
                         *slot = new_lb;
@@ -1144,7 +1150,8 @@ where
     let mut indices = Vec::with_capacity(k);
     let mut dists = Vec::with_capacity(k);
     for n in sorted_results {
-        indices.push(n.node_idx);
+        // Convert tree index to dataset index for final output
+        indices.push(node_to_dataset[n.node_idx as usize]);
         dists.push(n.dist.0);
     }
 

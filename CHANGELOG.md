@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **ResidualCoverTree**: Simplified high-level API for residual correlation k-NN queries (Vecchia GP). Replaces complex setup ceremony with a single class.
+
+### Fixed
+- rust-hilbert predecessor mode now correctly enforces constraints (was comparing Hilbert indices vs dataset indices)
+
 ## [0.3.0] - 2025-11-28
 
 Vecchia GP predecessor constraint release.
@@ -47,8 +53,8 @@ API cleanup release with library-first focus.
 First stable release with production-ready performance.
 
 ### Highlights
-- **170x faster** than GPBoost for residual correlation k-NN queries
-- **47,000 queries/second** on the gold standard benchmark (N=32k, D=3, k=50)
+- **44,000 queries/second** residual correlation k-NN on gold standard (N=32k, D=3, k=50)
+- Sub-second tree builds with Hilbert curve ordering
 - AVX2 SIMD optimized V-matrix dot products
 - Comprehensive documentation and benchmarks
 

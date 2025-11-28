@@ -7,7 +7,7 @@ High-performance cover tree library for k-NN queries, optimized for Vecchia-styl
 
 ## Features
 
-- **~170x faster** than GPBoost for residual correlation k-NN queries
+- **Very fast**, parallel implementation following [Parallel Cover Trees and their Applications](https://cs.ucr.edu/~ygu/papers/SPAA22/covertree.pdf)
 - **Hybrid Python/Numba + Rust** implementation
 - **AVX2 SIMD optimized** dot products in Rust backend
 - **Residual correlation metric** with RBF and Matérn 5/2 kernels
@@ -45,49 +45,33 @@ For Gaussian process applications with Vecchia approximations:
 
 ```python
 import numpy as np
-from covertreex import CoverTree, Runtime
-from covertreex.metrics.residual import build_residual_backend, configure_residual_correlation
+from covertreex import ResidualCoverTree
 
-# Your spatial coordinates
 coords = np.random.randn(10000, 3).astype(np.float32)
-
-# Build residual backend (computes V-matrix from inducing points)
-# V[i] = L_mm^{-1} @ K(x_i, inducing_points)
-# p_diag = diag(K) - ||V||^2  (residual variance)
-backend = build_residual_backend(
+tree = ResidualCoverTree(
     coords,
-    seed=42,
-    inducing_count=512,     # Number of inducing points
-    variance=1.0,           # Kernel variance
-    lengthscale=1.0,        # Kernel lengthscale
-    kernel_type=0,          # 0=RBF, 1=Matérn 5/2
+    variance=1.0,
+    lengthscale=1.0,
+    inducing_count=512,
 )
 
-# Configure and build tree
-runtime = Runtime(metric="residual_correlation", engine="rust-hilbert")
-ctx = runtime.activate()
-configure_residual_correlation(backend, context=ctx)
+# Query all points
+neighbors = tree.knn(k=50)
 
-# Query indices (residual metric uses point indices, not coordinates)
-query_indices = np.arange(1000, dtype=np.int64)
-tree = CoverTree(runtime).fit(query_indices.reshape(-1, 1))
-neighbors = tree.knn(query_indices.reshape(-1, 1), k=50)
+# Predecessor constraint (for Vecchia): neighbor j must have j < query i
+neighbors = tree.knn(k=50, predecessor_mode=True)
 ```
 
 ### Engine Selection
 
 ```python
-from covertreex import CoverTree, Runtime
+# ResidualCoverTree defaults to rust-hilbert (fastest)
+tree = ResidualCoverTree(coords, engine="rust-hilbert")
+tree = ResidualCoverTree(coords, engine="rust-natural")
 
-# Python/Numba reference implementation (full telemetry)
-runtime = Runtime(engine="python-numba")
-
-# Rust backend, natural order
-runtime = Runtime(engine="rust-natural")
-
-# Rust backend with Hilbert ordering (fastest)
+# For CoverTree, use Runtime
+from covertreex import Runtime
 runtime = Runtime(engine="rust-hilbert")
-
 tree = CoverTree(runtime).fit(points)
 ```
 
@@ -107,12 +91,12 @@ Available profiles: `default`, `residual-gold`, `residual-fast`, `residual-audit
 
 ## Performance
 
-Benchmark on AMD Ryzen 9 9950X (N=32k points, D=3, k=50 neighbors):
+Residual correlation k-NN benchmark (AMD Ryzen 9 9950X, N=32k, D=3, k=50):
 
-| Engine | Build Time | Query Throughput | vs GPBoost |
-|--------|------------|------------------|------------|
-| python-numba | 7.2s | 42,000 q/s | 154x faster |
-| **rust-hilbert** | **0.85s** | **47,000 q/s** | **170x faster** |
+| Engine | Build Time | Query Throughput |
+|--------|------------|------------------|
+| python-numba | 7.0s | 40,000 q/s |
+| **rust-hilbert** | **0.9s** | **44,000 q/s** |
 
 ## API Reference
 
