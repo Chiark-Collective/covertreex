@@ -193,3 +193,65 @@ def test_predecessor_mode_with_distances() -> None:
     for i, query_idx in enumerate(range(10, 20)):
         valid = neighbors[i][neighbors[i] >= 0]
         assert all(j < query_idx for j in valid), f"Query {query_idx} has invalid neighbor >= {query_idx}"
+
+
+def test_predecessor_mode_with_subtree_bounds() -> None:
+    """Test that subtree bounds optimization works correctly with rust-hilbert engine."""
+    np.random.seed(42)
+    n_points = 100
+    points = np.random.randn(n_points, 2).astype(np.float32)
+
+    # Build residual backend
+    backend_state = build_residual_backend(
+        points,
+        seed=99,
+        inducing_count=128,
+        variance=1.0,
+        lengthscale=1.0,
+        chunk_size=64,
+    )
+    configure_residual_correlation(backend_state)
+
+    from covertreex.engine import RustHilbertEngine, CoverTree as EngineCoverTree
+
+    engine = RustHilbertEngine()
+    runtime = Runtime(
+        backend="numpy",
+        precision="float32",
+        metric="residual_correlation",
+        enable_rust=True,
+        engine="rust-hilbert",
+        residual_use_static_euclidean_tree=True,
+    )
+
+    # Build tree WITH subtree bounds (opt-in)
+    tree = engine.build(
+        points,
+        runtime=runtime.to_config(),
+        residual_backend=backend_state,
+        residual_params={"variance": 1.0, "lengthscale": 1.0},
+        compute_predecessor_bounds=True,
+    )
+
+    # Verify bounds were computed
+    assert tree.meta.get("predecessor_bounds_computed") is True
+    assert tree.handle.subtree_min_bounds is not None
+
+    # Query with predecessor_mode
+    query_indices = np.arange(n_points, dtype=np.int64).reshape(-1, 1)
+    ctx = cx_config.runtime_context()
+    neighbors = engine.knn(
+        tree,
+        query_indices,
+        k=10,
+        return_distances=False,
+        predecessor_mode=True,
+        context=ctx,
+        runtime=runtime.to_config(),
+    )
+    neighbors = np.asarray(neighbors)
+
+    # Verify constraint: for each query i, all neighbors should have index < i
+    for i in range(n_points):
+        valid = neighbors[i][neighbors[i] >= 0]
+        assert all(j < i for j in valid), f"Query {i} has invalid neighbor >= {i}: {valid}"

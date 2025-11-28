@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Predecessor constraint** for Vecchia GP neighbor selection: `tree.knn(indices, k=10, predecessor_mode=True)` ensures query `i` only returns neighbors with index `j < i`
+- **Subtree index bounds** (opt-in): `compute_predecessor_bounds=True` on engine build enables aggressive subtree pruning for predecessor-constrained queries. Computes min/max dataset indices per subtree to skip entire branches when all descendants are invalid.
 - New `predecessor_filtered` telemetry counter tracks nodes filtered by the predecessor constraint
+- New `subtrees_pruned` telemetry counter tracks entire subtrees skipped by index bounds
 
 ## [0.2.1] - 2025-11-27
 

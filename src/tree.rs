@@ -123,3 +123,63 @@ where
         self.si_cache = cache;
     }
 }
+
+/// Compute subtree index bounds for predecessor constraint pruning.
+///
+/// For each tree node, computes the minimum and maximum dataset indices
+/// contained in that node's subtree (including the node itself).
+/// This enables aggressive subtree pruning during predecessor-constrained queries:
+/// if a subtree's minimum dataset index >= query's max_neighbor_idx, the entire
+/// subtree can be skipped.
+///
+/// Uses iterative propagation from children to parents until convergence.
+/// Converges in O(tree_height) iterations, typically O(log n) for cover trees.
+///
+/// # Arguments
+/// * `parents` - Parent index for each node (-1 for root)
+/// * `node_to_dataset` - Maps tree node index to dataset index
+///
+/// # Returns
+/// * `(min_bounds, max_bounds)` - Min/max dataset indices in each node's subtree
+pub fn compute_subtree_index_bounds(
+    parents: &[i64],
+    node_to_dataset: &[i64],
+) -> (Vec<i64>, Vec<i64>) {
+    let n = parents.len();
+    if n == 0 {
+        return (vec![], vec![]);
+    }
+
+    // Initialize each node with its own dataset index
+    let mut min_bounds: Vec<i64> = node_to_dataset.to_vec();
+    let mut max_bounds: Vec<i64> = node_to_dataset.to_vec();
+
+    // Propagate from children to parents until convergence
+    // Each iteration propagates bounds one level up the tree
+    // Converges in O(height) iterations
+    let mut changed = true;
+    let mut iterations = 0;
+    let max_iterations = n; // Safety bound (tree height <= n)
+
+    while changed && iterations < max_iterations {
+        changed = false;
+        iterations += 1;
+
+        for node in 0..n {
+            let parent = parents[node];
+            if parent >= 0 {
+                let p = parent as usize;
+                if min_bounds[node] < min_bounds[p] {
+                    min_bounds[p] = min_bounds[node];
+                    changed = true;
+                }
+                if max_bounds[node] > max_bounds[p] {
+                    max_bounds[p] = max_bounds[node];
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    (min_bounds, max_bounds)
+}

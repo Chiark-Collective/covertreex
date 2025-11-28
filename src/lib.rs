@@ -6,9 +6,9 @@ use crate::algo::{
 use crate::metric::{Euclidean, ResidualMetric};
 use crate::pcct::hilbert_like_order;
 use crate::telemetry::ResidualQueryTelemetry;
-use crate::tree::CoverTreeData;
+use crate::tree::{compute_subtree_index_bounds, CoverTreeData};
 use ndarray::{Array1, Array2};
-use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule};
@@ -139,6 +139,8 @@ fn telemetry_to_pydict(py: Python<'_>, telem: &ResidualQueryTelemetry) -> PyResu
     dict.set_item("level_cache_hits", telem.level_cache_hits)?;
     dict.set_item("level_cache_misses", telem.level_cache_misses)?;
     dict.set_item("block_sizes", &telem.block_sizes)?;
+    dict.set_item("predecessor_filtered", telem.predecessor_filtered)?;
+    dict.set_item("subtrees_pruned", telem.subtrees_pruned)?;
     Ok(dict.into_any().into())
 }
 
@@ -362,7 +364,7 @@ impl CoverTreeWrapper {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (query_indices, node_to_dataset, v_matrix, p_diag, coords, rbf_var, rbf_ls, k, kernel_type=None, predecessor_mode=None))]
+    #[pyo3(signature = (query_indices, node_to_dataset, v_matrix, p_diag, coords, rbf_var, rbf_ls, k, kernel_type=None, predecessor_mode=None, subtree_min_bounds=None))]
     fn knn_query_residual<'py>(
         &mut self,
         py: Python<'py>,
@@ -376,9 +378,11 @@ impl CoverTreeWrapper {
         k: usize,
         kernel_type: Option<i32>,
         predecessor_mode: Option<bool>,
+        subtree_min_bounds: Option<numpy::PyReadonlyArray1<'py, i64>>,
     ) -> PyResult<(Bound<'py, numpy::PyArray2<i64>>, PyObject)> {
         let pred_mode = predecessor_mode.unwrap_or(false);
         let k_type = kernel_type.unwrap_or(0);
+        let bounds_vec: Option<Vec<i64>> = subtree_min_bounds.map(|arr| arr.as_slice().unwrap().to_vec());
         // Reuse cached data if available (fast path)
         if let Some(cached) = &self.cached_data {
             match &self.inner {
@@ -434,6 +438,7 @@ impl CoverTreeWrapper {
                             k,
                             scope_caps.as_ref(),
                             pred_mode,
+                            bounds_vec.as_deref(),
                             Some(&mut telem),
                         );
                         telemetry_rec = Some(telem);
@@ -447,6 +452,7 @@ impl CoverTreeWrapper {
                             k,
                             scope_caps.as_ref(),
                             pred_mode,
+                            bounds_vec.as_deref(),
                             None,
                         )
                     };
@@ -512,6 +518,7 @@ impl CoverTreeWrapper {
                         k,
                         scope_caps.as_ref(),
                         pred_mode,
+                        bounds_vec.as_deref(),
                         Some(&mut telem),
                     );
                     telemetry_rec = Some(telem);
@@ -525,6 +532,7 @@ impl CoverTreeWrapper {
                         k,
                         scope_caps.as_ref(),
                         pred_mode,
+                        bounds_vec.as_deref(),
                         None,
                     )
                 };
@@ -575,6 +583,7 @@ impl CoverTreeWrapper {
                         k,
                         caps_f64.as_ref(),
                         pred_mode,
+                        bounds_vec.as_deref(),
                         Some(&mut telem),
                     );
                     telemetry_rec = Some(telem);
@@ -588,6 +597,7 @@ impl CoverTreeWrapper {
                         k,
                         caps_f64.as_ref(),
                         pred_mode,
+                        bounds_vec.as_deref(),
                         None,
                     )
                 };
@@ -691,6 +701,7 @@ impl CoverTreeWrapper {
                             k,
                             scope_caps.as_ref(),
                             false,  // predecessor_mode not supported in block path
+                            None,   // subtree_min_bounds
                             None,
                         );
                         if !survivors.is_empty() {
@@ -716,6 +727,7 @@ impl CoverTreeWrapper {
                         k,
                         scope_caps.as_ref(),
                         false,  // predecessor_mode not supported in block path
+                        None,   // subtree_min_bounds
                         None,
                     ),
                 };
@@ -848,6 +860,7 @@ fn covertreex_backend(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_pcct_residual_tree, m)?)?;
     m.add_function(wrap_pyfunction!(build_pcct2_residual_tree, m)?)?;
     m.add_function(wrap_pyfunction!(knn_query_residual_block, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_subtree_bounds_py, m)?)?;
     Ok(())
 }
 
@@ -864,6 +877,35 @@ fn get_rust_debug_stats(reset: Option<bool>) -> (usize, usize) {
     } else {
         debug_stats_snapshot()
     }
+}
+
+/// Compute subtree index bounds for predecessor constraint pruning.
+///
+/// For each tree node, computes the minimum and maximum dataset indices
+/// contained in that node's subtree. This enables aggressive subtree pruning
+/// during predecessor-constrained queries.
+///
+/// # Arguments
+/// * `parents` - Parent index for each node (-1 for root)
+/// * `node_to_dataset` - Maps tree node index to dataset index
+///
+/// # Returns
+/// * `(min_bounds, max_bounds)` - numpy arrays of min/max dataset indices per subtree
+#[pyfunction]
+fn compute_subtree_bounds_py<'py>(
+    py: Python<'py>,
+    parents: numpy::PyReadonlyArray1<'py, i64>,
+    node_to_dataset: numpy::PyReadonlyArray1<'py, i64>,
+) -> (Bound<'py, numpy::PyArray1<i64>>, Bound<'py, numpy::PyArray1<i64>>) {
+    let parents_slice = parents.as_slice().expect("contiguous parents array");
+    let n2d_slice = node_to_dataset.as_slice().expect("contiguous node_to_dataset array");
+
+    let (min_bounds, max_bounds) = compute_subtree_index_bounds(parents_slice, n2d_slice);
+
+    let min_arr = ndarray::Array1::from_vec(min_bounds);
+    let max_arr = ndarray::Array1::from_vec(max_bounds);
+
+    (min_arr.into_pyarray(py), max_arr.into_pyarray(py))
 }
 
 #[allow(clippy::too_many_arguments)]

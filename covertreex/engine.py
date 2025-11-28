@@ -530,6 +530,7 @@ class RustPcct2Handle:
     rbf_variance: float
     rbf_lengthscale: np.ndarray
     dtype: Any
+    subtree_min_bounds: np.ndarray | None = None
 
 
 class RustHybridResidualEngine:
@@ -934,6 +935,7 @@ class RustHilbertEngine:
         plan_callback: Callable[[Any, int, int], Mapping[str, Any] | None] | None = None,
         residual_backend: Any | None = None,
         residual_params: Mapping[str, Any] | None = None,
+        compute_predecessor_bounds: bool = False,
     ) -> CoverTree:
         if runtime.metric != "residual_correlation":
             raise ValueError("rust-hilbert engine only supports the residual_correlation metric.")
@@ -1002,6 +1004,13 @@ class RustHilbertEngine:
         )
         build_seconds = time.perf_counter() - start
 
+        # Compute subtree index bounds for predecessor constraint pruning (opt-in)
+        subtree_min_bounds: np.ndarray | None = None
+        if compute_predecessor_bounds:
+            parents = tree_handle.get_parents()
+            n2d_arr = np.asarray(node_to_dataset, dtype=np.int64)
+            subtree_min_bounds, _ = backend_mod.compute_subtree_bounds_py(parents, n2d_arr)
+
         handle = RustPcct2Handle(
             tree=tree_handle,
             node_to_dataset=list(map(int, node_to_dataset)),
@@ -1011,6 +1020,7 @@ class RustHilbertEngine:
             rbf_variance=rbf_var,
             rbf_lengthscale=rbf_ls,
             dtype=dtype,
+            subtree_min_bounds=subtree_min_bounds,
         )
         meta = {
             "build_seconds": build_seconds,
@@ -1020,6 +1030,7 @@ class RustHilbertEngine:
             "chunk_size": chunk_size or batch_size,
             "batch_order": "hilbert-morton",
             "kernel_type": kernel_type,
+            "predecessor_bounds_computed": compute_predecessor_bounds,
         }
         backend_tag = TreeBackend.numpy(precision="float32")
         return CoverTree(
@@ -1051,6 +1062,11 @@ class RustHilbertEngine:
 
         kernel_type = int(tree.meta.get("kernel_type", 0))
 
+        # Pass subtree bounds for aggressive pruning when predecessor_mode is enabled
+        subtree_bounds = None
+        if predecessor_mode and handle.subtree_min_bounds is not None:
+            subtree_bounds = handle.subtree_min_bounds
+
         indices, distances = handle.tree.knn_query_residual(
             query_indices,
             handle.node_to_dataset,
@@ -1062,6 +1078,7 @@ class RustHilbertEngine:
             int(k),
             kernel_type,
             predecessor_mode,
+            subtree_bounds,
         )
 
         # Pull telemetry when enabled so it lands in op logs.

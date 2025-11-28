@@ -358,6 +358,7 @@ pub fn batch_residual_knn_query<'a, T>(
     k: usize,
     scope_caps: Option<&HashMap<i32, T>>,
     predecessor_mode: bool,
+    subtree_min_bounds: Option<&[i64]>,
     telemetry: Option<&mut ResidualQueryTelemetry>,
 ) -> (Vec<Vec<i64>>, Vec<Vec<T>>)
 where
@@ -389,6 +390,7 @@ where
                 k,
                 scope_caps,
                 max_neighbor,
+                subtree_min_bounds,
                 Some(&mut local),
                 &mut ctx,
             );
@@ -420,6 +422,7 @@ where
                             k,
                             scope_caps,
                             max_neighbor,
+                            subtree_min_bounds,
                             None,
                             ctx,
                         );
@@ -589,6 +592,7 @@ fn single_residual_knn_query<'a, T>(
     k: usize,
     scope_caps: Option<&HashMap<i32, T>>,
     max_neighbor_idx: Option<usize>,
+    subtree_min_bounds: Option<&[i64]>,
     mut telemetry: Option<&mut ResidualQueryTelemetry>,
     ctx: &mut SearchContext<T>,
 ) -> (Vec<i64>, Vec<T>)
@@ -676,6 +680,26 @@ where
         survivors_count += 1;
     } else if let Some(t) = telemetry.as_mut() {
         t.predecessor_filtered += 1;
+    }
+
+    // Early exit: if entire tree's minimum dataset index >= max_neighbor_idx,
+    // no need to explore further (root was the only possible valid node)
+    if let (Some(max_idx), Some(bounds)) = (max_neighbor_idx, subtree_min_bounds) {
+        if !bounds.is_empty() && (bounds[0] as usize) >= max_idx {
+            // Entire tree has no valid predecessors beyond root (already checked)
+            if let Some(t) = telemetry.as_mut() {
+                t.subtrees_pruned += 1;
+            }
+            // Return what we have (possibly just root, or empty)
+            let sorted = result_heap.into_sorted_vec();
+            let mut indices = Vec::with_capacity(sorted.len());
+            let mut dists = Vec::with_capacity(sorted.len());
+            for n in sorted {
+                indices.push(node_to_dataset[n.node_idx as usize]);
+                dists.push(n.dist.0);
+            }
+            return (indices, dists);
+        }
     }
 
     // Buffers and frontier
@@ -811,6 +835,29 @@ where
             let mut child = tree.children[parent];
             while child != -1 {
                 let child_idx = child as usize;
+
+                // EARLY subtree pruning: if entire subtree has no valid predecessors,
+                // skip this child AND all its descendants (including distance computation)
+                // This is the key optimization: subtree_min includes the node itself,
+                // so if subtree_min >= max_idx, the node is also invalid.
+                if let (Some(max_idx), Some(bounds)) = (max_neighbor_idx, subtree_min_bounds) {
+                    if child_idx < bounds.len() && (bounds[child_idx] as usize) >= max_idx {
+                        if let Some(t) = telemetry.as_mut() {
+                            t.subtrees_pruned += 1;
+                        }
+                        // Skip to next sibling
+                        let next = tree.next_node[child_idx];
+                        if next == child || next == -1 {
+                            break;
+                        }
+                        child = next;
+                        if child == tree.children[parent] {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
                 let ds_idx = node_to_dataset[child_idx] as usize;
 
                 // Predecessor constraint: skip if ds_idx >= max_neighbor_idx
@@ -1038,7 +1085,21 @@ where
                 added_in_chunk += 1;
 
                 if survivors_count < budget_limit {
-                    ctx.next_frontier.push((child_idx, dist));
+                    // Subtree pruning: if all descendants have index >= max_neighbor_idx,
+                    // skip adding to frontier (no point exploring further)
+                    let subtree_valid = match (max_neighbor_idx, subtree_min_bounds) {
+                        (Some(max_idx), Some(bounds)) if child_idx < bounds.len() => {
+                            // If minimum dataset index in subtree < max_idx, subtree has valid nodes
+                            (bounds[child_idx] as usize) < max_idx
+                        }
+                        _ => true, // No bounds or no predecessor constraint, explore normally
+                    };
+
+                    if subtree_valid {
+                        ctx.next_frontier.push((child_idx, dist));
+                    } else if let Some(t) = telemetry.as_mut() {
+                        t.subtrees_pruned += 1;
+                    }
                 } else {
                     break;
                 }
