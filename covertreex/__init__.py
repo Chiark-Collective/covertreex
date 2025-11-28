@@ -3,27 +3,34 @@
 Quick Start
 -----------
 >>> import numpy as np
->>> from covertreex import CoverTree
+>>> from covertreex import cover_tree
 >>>
 >>> # Basic Euclidean k-NN
->>> points = np.random.randn(10000, 3)
->>> tree = CoverTree().fit(points)
->>> neighbors = tree.knn(points[:100], k=10)
+>>> tree = cover_tree(coords)
+>>> neighbors = tree.knn(k=10)
 
 Residual Correlation (Vecchia GP)
 ---------------------------------
->>> from covertreex import ResidualCoverTree
+>>> from covertreex import cover_tree
+>>> from covertreex.kernels import Matern52
 >>>
->>> coords = np.random.randn(10000, 3).astype(np.float32)
->>> tree = ResidualCoverTree(coords, variance=1.0, lengthscale=1.0)
+>>> # Option 1: Provide a kernel (we build V-matrix)
+>>> tree = cover_tree(coords, kernel=Matern52(lengthscale=1.0))
 >>> neighbors = tree.knn(k=50)
+>>>
+>>> # Option 2: Provide pre-computed V-matrix (from your GP)
+>>> tree = cover_tree(coords, v_matrix=V, p_diag=p_diag)
 >>> neighbors = tree.knn(k=50, predecessor_mode=True)  # Vecchia constraint
+
+Functions
+---------
+cover_tree : Build a cover tree (recommended entry point).
 
 Classes
 -------
-ResidualCoverTree : Simplified API for residual correlation k-NN (Vecchia GP).
 CoverTree : General-purpose cover tree for Euclidean and custom metrics.
 Runtime : Configuration for backend, metric, and engine selection.
+Matern52, RBF : GP kernel classes for residual correlation metric.
 """
 
 from importlib.metadata import version as _pkg_version
@@ -35,7 +42,9 @@ except Exception:  # pragma: no cover - best effort during local development
 
 # Primary user-facing API
 from .api import CoverTree, Runtime, Residual, PCCT
-from .residual_tree import ResidualCoverTree
+from .api.factory import cover_tree
+from .kernels import Kernel, RBF, Matern52
+from .residual_tree import ResidualCoverTree  # Deprecated, use cover_tree instead
 
 # Internal/advanced APIs
 from .engine import CoverTree as EngineCoverTree, build_tree, get_engine
@@ -66,11 +75,17 @@ from .baseline import (
 __all__ = [
     # Primary API
     "__version__",
-    "ResidualCoverTree",
+    "cover_tree",
     "CoverTree",
     "Runtime",
     "Residual",
-    "PCCT",  # Deprecated alias
+    # Kernels
+    "Kernel",
+    "RBF",
+    "Matern52",
+    # Deprecated
+    "ResidualCoverTree",  # Deprecated, use cover_tree instead
+    "PCCT",  # Deprecated alias for CoverTree
     # Engine-level API
     "build_tree",
     "get_engine",
