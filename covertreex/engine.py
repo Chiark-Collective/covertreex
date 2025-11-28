@@ -345,7 +345,7 @@ class RustNaturalEngine:
         plan_callback: Callable[[Any, int, int], Mapping[str, Any] | None] | None = None,
         residual_backend: Any | None = None,
         residual_params: Mapping[str, Any] | None = None,
-        compute_predecessor_bounds: bool = False,
+        compute_predecessor_bounds: bool = True,
     ) -> CoverTree:
         if runtime.metric != "residual_correlation":
             raise ValueError("rust-natural engine only supports the residual_correlation metric.")
@@ -966,7 +966,7 @@ class RustHilbertEngine:
         plan_callback: Callable[[Any, int, int], Mapping[str, Any] | None] | None = None,
         residual_backend: Any | None = None,
         residual_params: Mapping[str, Any] | None = None,
-        compute_predecessor_bounds: bool = False,
+        compute_predecessor_bounds: bool = True,
     ) -> CoverTree:
         if runtime.metric != "residual_correlation":
             raise ValueError("rust-hilbert engine only supports the residual_correlation metric.")

@@ -633,3 +633,54 @@ class TestPredecessorModeIntegration:
                 valid_neighbors = neighbors[i][neighbors[i] >= 0]
                 for j in valid_neighbors:
                     assert j < i, f"{engine_name} query {i} has invalid neighbor {j} >= {i}"
+
+
+def test_predecessor_mode_via_cover_tree_factory() -> None:
+    """Regression test: predecessor_mode must work via cover_tree() factory.
+
+    The cover_tree() factory is the recommended API for building trees.
+    It uses the Rust engine's build() method internally, which properly
+    computes subtree bounds needed for predecessor_mode.
+
+    Fixed in v0.4.3: compute_predecessor_bounds now defaults to True in both
+    RustNaturalEngine.build() and RustHilbertEngine.build().
+
+    Note: The critical invariant is zero violations (j >= i), not k-fulfillment.
+    The residual correlation metric may not always find exactly k neighbors
+    due to the structure of correlations in the V-matrix.
+    """
+    from covertreex import cover_tree
+    from covertreex.kernels import Matern52
+
+    np.random.seed(42)
+    n_points = 500  # Use larger dataset for rust-hilbert to work well
+    k = 30
+    points = np.random.randn(n_points, 3).astype(np.float32)
+
+    # Build via cover_tree() factory - the recommended API
+    kernel = Matern52(lengthscale=1.0)
+    tree = cover_tree(points, kernel=kernel, engine="rust-hilbert")
+
+    # Query with predecessor_mode
+    neighbors, distances = tree.knn(k=k, predecessor_mode=True, return_distances=True)
+    neighbors = np.asarray(neighbors)
+
+    # Verify the critical invariant: zero predecessor violations
+    # All returned neighbors j must satisfy j < query_index i
+    violations = 0
+    for i in range(n_points):
+        valid = neighbors[i][neighbors[i] >= 0]
+        for j in valid:
+            if j >= i:
+                violations += 1
+
+    assert violations == 0, (
+        f"predecessor_mode via cover_tree() failed: {violations} violations found. "
+        "All returned neighbors j must satisfy j < query_index i."
+    )
+
+    # Verify early queries have correct bounds (these are deterministic)
+    assert np.all(neighbors[0] == -1), "Query 0 should have no predecessors"
+    valid_1 = neighbors[1][neighbors[1] >= 0]
+    if len(valid_1) > 0:
+        assert valid_1[0] == 0, "Query 1's only valid predecessor is 0"

@@ -375,7 +375,15 @@ def _rust_knn_query(
         p_diag = np.asarray(p_diag, dtype=dtype_float)
         coords = np.asarray(coords, dtype=dtype_float)
         rbf_ls = np.asarray(rbf_ls, dtype=dtype_float)
-            
+
+        # Compute subtree bounds for predecessor_mode (critical for k-fulfillment)
+        subtree_min_bounds = None
+        if predecessor_mode:
+            n2d_arr = np.asarray(node_to_dataset, dtype=np.int64)
+            subtree_min_bounds, _ = covertreex_backend.compute_subtree_bounds_py(
+                parents_np, n2d_arr
+            )
+
         indices, dists = wrapper.knn_query_residual(
             query_indices,
             node_to_dataset,
@@ -386,6 +394,7 @@ def _rust_knn_query(
             rbf_ls,
             k,
             predecessor_mode=predecessor_mode,
+            subtree_min_bounds=subtree_min_bounds,
         )
     else:
         indices, dists = wrapper.knn_query(queries_np, k)

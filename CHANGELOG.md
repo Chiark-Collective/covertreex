@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2025-11-28
+
+### Fixed
+- **Engine build defaults**: `compute_predecessor_bounds` now defaults to `True` in both `RustNaturalEngine.build()` and `RustHilbertEngine.build()`, ensuring predecessor_mode works correctly out of the box
+- **`_rust_knn_query` subtree bounds**: When querying via the `CoverTree.knn()` API path with `predecessor_mode=True`, subtree bounds are now computed on-demand if not already available
+
+### Added
+- **Regression test**: Added `test_predecessor_mode_via_cover_tree_factory` to verify the recommended `cover_tree()` factory API works correctly with predecessor_mode
+
 ## [0.4.2] - 2025-11-28
 
 ### Added
