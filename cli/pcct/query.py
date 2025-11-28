@@ -156,6 +156,7 @@ def execute_query_benchmark(options: "QueryCLIOptions", run: BenchmarkRun) -> Qu
             "chunk_size": options.residual_chunk_size,
             "kernel_type": options.residual_kernel_type,
         },
+        predecessor_mode=options.predecessor_mode or False,
     )
 
     cpu_time = (result.cpu_user_seconds or 0.0) + (result.cpu_system_seconds or 0.0)

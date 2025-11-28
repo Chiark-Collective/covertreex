@@ -74,6 +74,7 @@ class QueryCLIOptions:
     log_file: str | None = None
     no_log_file: bool = False
     build_mode: str = "batch"
+    predecessor_mode: bool | None = None
 
     @classmethod
     def from_namespace(cls, namespace: Any) -> "QueryCLIOptions":

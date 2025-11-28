@@ -24,6 +24,8 @@ ENGINE="python-numba"  # hard lock to reference path
 # Optional comparison engine (runs after gold standard). Use COMP_ENGINE=none to skip.
 COMP_ENGINE="${COMP_ENGINE:-rust-hilbert}"
 RESIDUAL_CHUNK_SIZE="${RESIDUAL_CHUNK_SIZE:-512}"
+# Predecessor mode for Vecchia GP queries (neighbor j < query i)
+PREDECESSOR_MODE="${PREDECESSOR_MODE:-}"
 
 # Ensure we run with the default dense traversal / no chunking knobs, since
 # the reference result was captured before the sparse/Numba paths were enabled.
@@ -104,6 +106,9 @@ run_suite() {
         )
         if [[ -n "$RESIDUAL_KERNEL_TYPE" ]]; then
           CMD+=(--residual-kernel-type "$RESIDUAL_KERNEL_TYPE")
+        fi
+        if [[ -n "$PREDECESSOR_MODE" && "$PREDECESSOR_MODE" == "1" ]]; then
+          CMD+=(--predecessor-mode)
         fi
         "${CMD[@]}" | tee "$run_log" | tee -a "$summary_path"
   

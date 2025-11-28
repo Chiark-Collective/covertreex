@@ -767,7 +767,10 @@ where
     ctx.frontier.clear();
     ctx.frontier.push((0usize, root_dist));
 
-    while !ctx.frontier.is_empty() && survivors_count < budget_limit {
+    // For predecessor_mode, continue searching until k valid neighbors found (ignore budget limit)
+    while !ctx.frontier.is_empty()
+        && (survivors_count < budget_limit || (max_neighbor_idx.is_some() && result_heap.len() < k))
+    {
         if parity_mode && result_heap.len() == k {
             // Early stop if frontier cannot beat current kth
             let mut min_lb = T::max_value();
@@ -868,6 +871,21 @@ where
                     if let Some(t) = telemetry.as_mut() {
                         t.predecessor_filtered += 1;
                     }
+                    // Node fails constraint, but its subtree might have valid predecessors.
+                    // Add to frontier if subtree could contain valid nodes.
+                    let subtree_has_valid = match (max_neighbor_idx, subtree_min_bounds) {
+                        (Some(max_idx), Some(bounds)) if child_idx < bounds.len() => {
+                            (bounds[child_idx] as usize) < max_idx
+                        }
+                        (Some(_), None) => true, // No bounds, assume subtree might have valid nodes
+                        _ => false,
+                    };
+                    if subtree_has_valid {
+                        // We need the distance to add to frontier, compute it here
+                        // Use child_idx directly as metric index (consistent with rest of code)
+                        let dist = metric.distance_idx(q_dataset_idx, child_idx);
+                        ctx.next_frontier.push((child_idx, dist));
+                    }
                     // Still traverse to next sibling
                     let next = tree.next_node[child_idx];
                     if next == child || next == -1 {
@@ -920,7 +938,9 @@ where
         }
         // Process children in tiles
         let mut start = 0;
-        while start < ctx.children_nodes.len() && survivors_count < budget_limit {
+        while start < ctx.children_nodes.len()
+            && (survivors_count < budget_limit || (max_neighbor_idx.is_some() && result_heap.len() < k))
+        {
             let active = ctx.children_nodes.len().saturating_sub(start);
             let mut tile = if dynamic_query_block {
                 // Adaptive tile
@@ -1086,7 +1106,11 @@ where
                 survivors_count += 1;
                 added_in_chunk += 1;
 
-                if survivors_count < budget_limit {
+                // Continue adding to frontier if under budget OR need more predecessors
+                let continue_search = survivors_count < budget_limit
+                    || (max_neighbor_idx.is_some() && result_heap.len() < k);
+
+                if continue_search {
                     // Subtree pruning: if all descendants have index >= max_neighbor_idx,
                     // skip adding to frontier (no point exploring further)
                     let subtree_valid = match (max_neighbor_idx, subtree_min_bounds) {
@@ -1124,7 +1148,9 @@ where
                     low_yield_streak = 0;
                 } else if ratio < budget_down {
                     low_yield_streak += 1;
-                    if low_yield_streak >= 2 {
+                    // Don't early terminate if we still need more predecessors
+                    let need_more = max_neighbor_idx.is_some() && result_heap.len() < k;
+                    if low_yield_streak >= 2 && !need_more {
                         if let Some(t) = telemetry.as_mut() {
                             t.budget_early_terminate += 1;
                         }

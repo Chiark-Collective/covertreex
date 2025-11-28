@@ -8,7 +8,7 @@ use crate::pcct::hilbert_like_order;
 use crate::telemetry::ResidualQueryTelemetry;
 use crate::tree::{compute_subtree_index_bounds, CoverTreeData};
 use ndarray::{Array1, Array2};
-use numpy::{IntoPyArray, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule};
@@ -338,14 +338,14 @@ impl CoverTreeWrapper {
                 let q_obj = queries.extract::<PyReadonlyArray2<f32>>(py)?;
                 let q_view = q_obj.as_array();
                 let (indices, dists) = batch_knn_query(data, q_view, k);
-                let (idx, dst) = to_py_arrays(py, indices, dists);
+                let (idx, dst) = to_py_arrays(py, indices, dists, k);
                 Ok((idx, dst.into_any().into()))
             }
             CoverTreeInner::F64(data) => {
                 let q_obj = queries.extract::<PyReadonlyArray2<f64>>(py)?;
                 let q_view = q_obj.as_array();
                 let (indices, dists) = batch_knn_query(data, q_view, k);
-                let (idx, dst) = to_py_arrays(py, indices, dists);
+                let (idx, dst) = to_py_arrays(py, indices, dists, k);
                 Ok((idx, dst.into_any().into()))
             }
         }
@@ -496,7 +496,7 @@ impl CoverTreeWrapper {
                     }
 
                     self.last_query_telemetry = telemetry_rec;
-                    let (idx, dst) = to_py_arrays(py, indices, dists);
+                    let (idx, dst) = to_py_arrays(py, indices, dists, k);
                     return Ok((idx, dst.into_any().into()));
                 }
                 _ => return Err(PyTypeError::new_err("Cached data only supported for F32 tree")),
@@ -592,7 +592,7 @@ impl CoverTreeWrapper {
                 }
 
                 self.last_query_telemetry = telemetry_rec;
-                let (idx, dst) = to_py_arrays(py, indices, dists);
+                let (idx, dst) = to_py_arrays(py, indices, dists, k);
                 Ok((idx, dst.into_any().into()))
             }
             CoverTreeInner::F64(data) => {
@@ -686,7 +686,7 @@ impl CoverTreeWrapper {
                 }
 
                 self.last_query_telemetry = telemetry_rec;
-                let (idx, dst) = to_py_arrays(py, indices, dists);
+                let (idx, dst) = to_py_arrays(py, indices, dists, k);
                 Ok((idx, dst.into_any().into()))
             }
         }
@@ -807,7 +807,7 @@ impl CoverTreeWrapper {
                         None,
                     ),
                 };
-                let (idx, dst) = to_py_arrays(py, indices, dists);
+                let (idx, dst) = to_py_arrays(py, indices, dists, k);
                 Ok((idx, dst.into_any().into()))
             }
             CoverTreeInner::F64(_) => {
@@ -905,20 +905,27 @@ fn to_py_arrays<'py, T: numpy::Element + Copy + num_traits::Zero + num_traits::F
     py: Python<'py>,
     indices: Vec<Vec<i64>>,
     dists: Vec<Vec<T>>,
+    requested_k: usize,
 ) -> (
     Bound<'py, numpy::PyArray2<i64>>,
     Bound<'py, numpy::PyArray2<T>>,
 ) {
     let n_queries = indices.len();
-    // Find maximum row length (needed for predecessor_mode where early queries have fewer results)
-    let dim_k = indices.iter().map(|v| v.len()).max().unwrap_or(0);
+    // Use requested_k for output dimension, ensuring consistent shape (n, k)
+    // even when some queries return fewer results (e.g., predecessor_mode)
+    let dim_k = if requested_k > 0 {
+        requested_k
+    } else {
+        // Fallback: find maximum row length
+        indices.iter().map(|v| v.len()).max().unwrap_or(0)
+    };
 
     // Initialize with padding values: -1 for indices, max value for distances
     let mut idx_array = ndarray::Array2::<i64>::from_elem((n_queries, dim_k), -1);
     let mut dst_array = ndarray::Array2::<T>::from_elem((n_queries, dim_k), T::max_value());
 
     for i in 0..n_queries {
-        for j in 0..indices[i].len() {
+        for j in 0..indices[i].len().min(dim_k) {
             idx_array[[i, j]] = indices[i][j];
             dst_array[[i, j]] = dists[i][j];
         }
@@ -937,7 +944,18 @@ fn covertreex_backend(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_pcct2_residual_tree, m)?)?;
     m.add_function(wrap_pyfunction!(knn_query_residual_block, m)?)?;
     m.add_function(wrap_pyfunction!(compute_subtree_bounds_py, m)?)?;
+    m.add_function(wrap_pyfunction!(hilbert_order, m)?)?;
     Ok(())
+}
+
+/// Compute Hilbert-curve-like ordering for spatial locality.
+/// Returns indices that sort points by their Hilbert curve position.
+#[pyfunction]
+fn hilbert_order(py: Python<'_>, coords: PyObject) -> PyResult<Py<PyArray1<i64>>> {
+    let coords_arr = to_array2_f32(&coords.bind(py))?;
+    let order = hilbert_like_order(coords_arr.view());
+    let order_i64: Vec<i64> = order.into_iter().map(|i| i as i64).collect();
+    Ok(PyArray1::from_vec(py, order_i64).into())
 }
 
 #[pyfunction]

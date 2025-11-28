@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2025-11-28
+
+### Added
+- **CLI `--predecessor-mode` flag**: Added support for `--predecessor-mode` in the CLI query command and benchmark scripts
+- **`hilbert_order()` Rust function**: Exposed Hilbert curve ordering via `covertreex_backend.hilbert_order(coords)` for pre-sorting datasets
+- **Comprehensive predecessor mode tests**: Added integration tests covering both `rust-natural` and `rust-hilbert` engines at gold standard scale (N=32768), verifying zero predecessor violations
+
+### Fixed
+- **rust-hilbert predecessor_mode correctness**: Both `rust-hilbert` and `rust-natural` engines now correctly maintain the predecessor constraint (neighbor index j < query index i) through proper `node_to_dataset` mapping
+- **Default `compute_predecessor_bounds=True`**: Engine builds now compute predecessor bounds by default, enabling subtree pruning for predecessor-constrained queries
+
+### Changed
+- **Benchmark script**: `run_residual_gold_standard.sh` now supports `PREDECESSOR_MODE=1` environment variable
+
+## [0.4.1] - 2025-11-28
+
+### Fixed
+- **predecessor_mode k-fulfillment**: Search now continues until k valid predecessors are found, ensuring query i returns exactly min(k, i) neighbors. Previously, budget-based termination caused early exit with fewer neighbors than requested.
+- **Subtree exploration**: When a node fails predecessor constraint but its subtree may contain valid predecessors, the search now explores the subtree instead of skipping it entirely.
+
+### Changed
+- **Default engine for factory**: `cover_tree()` now defaults to `rust-natural` engine instead of `rust-hilbert` for better predecessor_mode support. The rust-hilbert engine's sparse tree structure is not optimal for predecessor queries.
+
 ## [0.4.0] - 2025-11-28
 
 ### Added

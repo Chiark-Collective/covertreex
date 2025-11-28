@@ -37,6 +37,14 @@ BuildModeOption = Annotated[
     Literal["batch", "prefix"],
     typer.Option("--build-mode", help="Choose between batch or prefix-doubling construction.", rich_help_panel=SHAPE_PANEL),
 ]
+PredecessorModeOption = Annotated[
+    Optional[bool],
+    typer.Option(
+        "--predecessor-mode/--no-predecessor-mode",
+        help="Enable Vecchia constraint: neighbor j < query i.",
+        rich_help_panel=SHAPE_PANEL,
+    ),
+]
 
 # Telemetry
 RunIdOption = Annotated[
@@ -415,6 +423,7 @@ __all__ = [
     "KOption",
     "SeedOption",
     "BuildModeOption",
+    "PredecessorModeOption",
     "RunIdOption",
     "BaselineOption",
     "LogFileOption",

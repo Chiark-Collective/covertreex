@@ -117,6 +117,7 @@ def query(
     log_file: opts.LogFileOption = None,
     no_log_file: opts.NoLogFileOption = False,
     build_mode: opts.BuildModeOption = "batch",
+    predecessor_mode: opts.PredecessorModeOption = None,
 ) -> None:
     if set_override and not profile:
         raise typer.BadParameter("--set overrides require --profile.")

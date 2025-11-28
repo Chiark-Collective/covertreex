@@ -141,7 +141,7 @@ def cover_tree(
     seed: int = 42,
     chunk_size: int = 512,
     # Engine options
-    engine: str = "rust-hilbert",
+    engine: str = "rust-natural",
 ) -> EngineCoverTree:
     """Build a cover tree for k-NN queries.
 
@@ -179,9 +179,9 @@ def cover_tree(
     chunk_size : int, default=512
         Batch size for tree construction.
 
-    engine : str, default="rust-hilbert"
-        Execution engine. Options: "rust-hilbert" (fastest), "rust-natural",
-        "python-numba" (reference).
+    engine : str, default="rust-natural"
+        Execution engine. Options: "rust-natural" (default, best for predecessor_mode),
+        "rust-hilbert" (fastest builds), "python-numba" (reference).
 
     Returns
     -------

@@ -494,6 +494,7 @@ def build_tree(
     plan_callback: Callable[[Any, int, int], Mapping[str, Any] | None] | None = None,
     residual_backend: Any | None = None,
     residual_params: Mapping[str, Any] | None = None,
+    compute_predecessor_bounds: bool = True,
 ) -> CoverTree:
     if runtime is not None:
         runtime_cfg = runtime
@@ -504,8 +505,8 @@ def build_tree(
     engine_name = engine or getattr(runtime_cfg, "engine", DEFAULT_ENGINE) or DEFAULT_ENGINE
     engine_impl = get_engine(engine_name)
     resolved_context = context or cx_config.configure_runtime(runtime_cfg)
-    return engine_impl.build(
-        points,
+    # Pass compute_predecessor_bounds for engines that support it (rust-natural, rust-hilbert)
+    build_kwargs: Dict[str, Any] = dict(
         runtime=runtime_cfg,
         context=resolved_context,
         batch_size=batch_size,
@@ -517,6 +518,9 @@ def build_tree(
         residual_backend=residual_backend,
         residual_params=residual_params,
     )
+    if engine_name in ("rust-natural", "rust-hilbert"):
+        build_kwargs["compute_predecessor_bounds"] = compute_predecessor_bounds
+    return engine_impl.build(points, **build_kwargs)
 
 
 # -----------------------------------------------------------------------------

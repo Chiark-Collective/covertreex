@@ -255,3 +255,381 @@ def test_predecessor_mode_with_subtree_bounds() -> None:
     for i in range(n_points):
         valid = neighbors[i][neighbors[i] >= 0]
         assert all(j < i for j in valid), f"Query {i} has invalid neighbor >= {i}: {valid}"
+
+
+def test_predecessor_mode_k_fulfillment() -> None:
+    """Test that predecessor_mode finds min(k, i) neighbors for query i.
+
+    This is critical for Vecchia GP: early queries have fewer valid predecessors,
+    but later queries should find the full k neighbors.
+    """
+    np.random.seed(42)
+    n_points = 100
+    k = 8
+    points = np.random.randn(n_points, 2).astype(np.float32)
+
+    # Build residual backend
+    backend_state = build_residual_backend(
+        points,
+        seed=99,
+        inducing_count=128,
+        variance=1.0,
+        lengthscale=1.0,
+        chunk_size=64,
+    )
+    configure_residual_correlation(backend_state)
+
+    from covertreex.engine import RustNaturalEngine
+
+    engine = RustNaturalEngine()
+    runtime = Runtime(
+        backend="numpy",
+        precision="float32",
+        metric="residual_correlation",
+        enable_rust=True,
+        engine="rust-natural",
+        residual_use_static_euclidean_tree=True,
+    )
+
+    # Build tree WITH subtree bounds (critical for the fix)
+    tree = engine.build(
+        points,
+        runtime=runtime.to_config(),
+        residual_backend=backend_state,
+        residual_params={"variance": 1.0, "lengthscale": 1.0},
+        compute_predecessor_bounds=True,
+    )
+
+    # Query with predecessor_mode
+    query_indices = np.arange(n_points, dtype=np.int64).reshape(-1, 1)
+    ctx = cx_config.runtime_context()
+    neighbors = engine.knn(
+        tree,
+        query_indices,
+        k=k,
+        return_distances=False,
+        predecessor_mode=True,
+        context=ctx,
+        runtime=runtime.to_config(),
+    )
+    neighbors = np.asarray(neighbors)
+
+    # Verify k-fulfillment: query i should have exactly min(k, i) valid neighbors
+    for i in range(n_points):
+        valid_count = np.sum(neighbors[i] >= 0)
+        expected = min(k, i)
+        assert valid_count == expected, (
+            f"Query {i}: expected {expected} neighbors, got {valid_count}. "
+            f"neighbors={neighbors[i].tolist()}"
+        )
+
+
+class TestPredecessorModeIntegration:
+    """Integration tests for predecessor mode at production scale."""
+
+    @pytest.mark.parametrize("engine_name", ["rust-natural", "rust-hilbert"])
+    def test_predecessor_correctness_both_engines(self, engine_name: str) -> None:
+        """Both rust-natural and rust-hilbert should produce correct predecessor results.
+
+        This is the key integration test: regardless of internal ordering strategy,
+        the predecessor constraint must be satisfied.
+        """
+        np.random.seed(42)
+        n_points = 1000
+        k = 50
+        points = np.random.randn(n_points, 3).astype(np.float32)
+
+        backend_state = build_residual_backend(
+            points,
+            seed=99,
+            inducing_count=128,
+            variance=1.0,
+            lengthscale=1.0,
+            chunk_size=64,
+        )
+        configure_residual_correlation(backend_state)
+
+        from covertreex.engine import RustNaturalEngine, RustHilbertEngine
+
+        engine = RustNaturalEngine() if engine_name == "rust-natural" else RustHilbertEngine()
+        runtime = Runtime(
+            backend="numpy",
+            precision="float32",
+            metric="residual_correlation",
+            enable_rust=True,
+            engine=engine_name,
+            residual_use_static_euclidean_tree=True,
+        )
+
+        tree = engine.build(
+            points,
+            runtime=runtime.to_config(),
+            residual_backend=backend_state,
+            residual_params={"variance": 1.0, "lengthscale": 1.0},
+            compute_predecessor_bounds=True,
+        )
+
+        query_indices = np.arange(n_points, dtype=np.int64).reshape(-1, 1)
+        ctx = cx_config.runtime_context()
+        neighbors = engine.knn(
+            tree,
+            query_indices,
+            k=k,
+            return_distances=False,
+            predecessor_mode=True,
+            context=ctx,
+            runtime=runtime.to_config(),
+        )
+        neighbors = np.asarray(neighbors)
+
+        # Count violations
+        violations = 0
+        for i in range(n_points):
+            for j in neighbors[i]:
+                if j >= 0 and j >= i:
+                    violations += 1
+
+        assert violations == 0, (
+            f"Engine {engine_name}: {violations} predecessor violations found. "
+            "All returned neighbors j must satisfy j < query_index i."
+        )
+
+    def test_predecessor_filter_effectiveness(self) -> None:
+        """Confirm predecessor_mode actually filters: without it, violations would occur.
+
+        This is a control test proving the predecessor filter is doing something.
+        """
+        np.random.seed(42)
+        n_points = 200
+        k = 20
+        points = np.random.randn(n_points, 3).astype(np.float32)
+
+        backend_state = build_residual_backend(
+            points,
+            seed=99,
+            inducing_count=128,
+            variance=1.0,
+            lengthscale=1.0,
+            chunk_size=64,
+        )
+        configure_residual_correlation(backend_state)
+
+        from covertreex.engine import RustHilbertEngine
+
+        engine = RustHilbertEngine()
+        runtime = Runtime(
+            backend="numpy",
+            precision="float32",
+            metric="residual_correlation",
+            enable_rust=True,
+            engine="rust-hilbert",
+            residual_use_static_euclidean_tree=True,
+        )
+
+        tree = engine.build(
+            points,
+            runtime=runtime.to_config(),
+            residual_backend=backend_state,
+            residual_params={"variance": 1.0, "lengthscale": 1.0},
+            compute_predecessor_bounds=True,
+        )
+
+        query_indices = np.arange(n_points, dtype=np.int64).reshape(-1, 1)
+        ctx = cx_config.runtime_context()
+
+        # Query WITHOUT predecessor_mode
+        neighbors_no_pred = engine.knn(
+            tree,
+            query_indices,
+            k=k,
+            return_distances=False,
+            predecessor_mode=False,
+            context=ctx,
+            runtime=runtime.to_config(),
+        )
+        neighbors_no_pred = np.asarray(neighbors_no_pred)
+
+        # Count would-be violations (neighbors >= query index)
+        would_be_violations = 0
+        for i in range(n_points):
+            for j in neighbors_no_pred[i]:
+                if j >= 0 and j >= i:
+                    would_be_violations += 1
+
+        # Without predecessor mode, we expect MANY violations
+        # (roughly half of neighbors should have j >= i for random data)
+        assert would_be_violations > n_points * k * 0.3, (
+            f"Expected many would-be violations without predecessor filter, "
+            f"got only {would_be_violations}. This suggests the control test is invalid."
+        )
+
+        # Now query WITH predecessor_mode
+        neighbors_pred = engine.knn(
+            tree,
+            query_indices,
+            k=k,
+            return_distances=False,
+            predecessor_mode=True,
+            context=ctx,
+            runtime=runtime.to_config(),
+        )
+        neighbors_pred = np.asarray(neighbors_pred)
+
+        # Count actual violations with filter
+        actual_violations = 0
+        for i in range(n_points):
+            for j in neighbors_pred[i]:
+                if j >= 0 and j >= i:
+                    actual_violations += 1
+
+        assert actual_violations == 0, (
+            f"predecessor_mode=True should have 0 violations, got {actual_violations}"
+        )
+
+    @pytest.mark.parametrize("engine_name", ["rust-natural", "rust-hilbert"])
+    def test_predecessor_mode_gold_standard_scale(self, engine_name: str) -> None:
+        """Test at gold standard scale: N=32768, D=3, k=50.
+
+        This matches the production benchmark parameters.
+        """
+        np.random.seed(42)
+        n_points = 32768
+        k = 50
+        n_queries = 1024
+        points = np.random.randn(n_points, 3).astype(np.float32)
+
+        backend_state = build_residual_backend(
+            points,
+            seed=99,
+            inducing_count=512,
+            variance=1.0,
+            lengthscale=1.0,
+            chunk_size=512,
+        )
+        configure_residual_correlation(backend_state)
+
+        from covertreex.engine import RustNaturalEngine, RustHilbertEngine
+
+        engine = RustNaturalEngine() if engine_name == "rust-natural" else RustHilbertEngine()
+        runtime = Runtime(
+            backend="numpy",
+            precision="float32",
+            metric="residual_correlation",
+            enable_rust=True,
+            engine=engine_name,
+            residual_use_static_euclidean_tree=True,
+        )
+
+        tree = engine.build(
+            points,
+            runtime=runtime.to_config(),
+            residual_backend=backend_state,
+            residual_params={"variance": 1.0, "lengthscale": 1.0, "inducing_count": 512},
+            compute_predecessor_bounds=True,
+        )
+
+        # Sample random queries from middle of dataset
+        rng = np.random.default_rng(42)
+        query_indices = rng.choice(n_points, n_queries, replace=False).astype(np.int64).reshape(-1, 1)
+
+        ctx = cx_config.runtime_context()
+        neighbors = engine.knn(
+            tree,
+            query_indices,
+            k=k,
+            return_distances=False,
+            predecessor_mode=True,
+            context=ctx,
+            runtime=runtime.to_config(),
+        )
+        neighbors = np.asarray(neighbors)
+
+        # Verify all results satisfy predecessor constraint
+        violations = 0
+        for idx, qi in enumerate(query_indices.flatten()):
+            for j in neighbors[idx]:
+                if j >= 0 and j >= qi:
+                    violations += 1
+
+        assert violations == 0, (
+            f"Engine {engine_name} at gold standard scale: {violations} violations. "
+            f"N={n_points}, queries={n_queries}, k={k}"
+        )
+
+    def test_rust_hilbert_vs_rust_natural_consistency(self) -> None:
+        """Both engines should return valid predecessor results for the same data.
+
+        This test verifies that internal ordering differences don't affect correctness.
+        The key property: zero predecessor violations regardless of internal ordering.
+
+        Note: With residual correlation metric, not all queries may find exactly k neighbors
+        due to metric properties. We verify the critical constraint (no violations) holds.
+        """
+        np.random.seed(42)
+        n_points = 500
+        k = 30
+        points = np.random.randn(n_points, 3).astype(np.float32)
+
+        from covertreex.engine import RustNaturalEngine, RustHilbertEngine
+
+        results = {}
+        for engine_name, EngineClass in [("rust-natural", RustNaturalEngine), ("rust-hilbert", RustHilbertEngine)]:
+            # Build fresh backend for each engine to avoid state pollution
+            backend_state = build_residual_backend(
+                points,
+                seed=99,
+                inducing_count=128,
+                variance=1.0,
+                lengthscale=1.0,
+                chunk_size=64,
+            )
+            set_residual_backend(None)
+            configure_residual_correlation(backend_state)
+
+            engine = EngineClass()
+            runtime = Runtime(
+                backend="numpy",
+                precision="float32",
+                metric="residual_correlation",
+                enable_rust=True,
+                engine=engine_name,
+                residual_use_static_euclidean_tree=True,
+            )
+
+            tree = engine.build(
+                points,
+                runtime=runtime.to_config(),
+                residual_backend=backend_state,
+                residual_params={"variance": 1.0, "lengthscale": 1.0},
+                compute_predecessor_bounds=True,
+            )
+
+            query_indices = np.arange(n_points, dtype=np.int64).reshape(-1, 1)
+            ctx = cx_config.runtime_context()
+            neighbors = engine.knn(
+                tree,
+                query_indices,
+                k=k,
+                return_distances=False,
+                predecessor_mode=True,
+                context=ctx,
+                runtime=runtime.to_config(),
+            )
+            results[engine_name] = np.asarray(neighbors)
+
+            # Clear backend for next iteration
+            set_residual_backend(None)
+
+        # Both should have zero violations - the critical invariant
+        for engine_name, neighbors in results.items():
+            violations = sum(
+                1 for i in range(n_points) for j in neighbors[i] if j >= 0 and j >= i
+            )
+            assert violations == 0, f"{engine_name} has {violations} violations"
+
+        # Verify no neighbor exceeds the query index (predecessor constraint)
+        for engine_name, neighbors in results.items():
+            for i in range(n_points):
+                valid_neighbors = neighbors[i][neighbors[i] >= 0]
+                for j in valid_neighbors:
+                    assert j < i, f"{engine_name} query {i} has invalid neighbor {j} >= {i}"

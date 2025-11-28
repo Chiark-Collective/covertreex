@@ -176,6 +176,7 @@ def benchmark_knn_latency(
     context: cx_config.RuntimeContext | None = None,
     residual_backend: Any | None = None,
     residual_params: Mapping[str, Any] | None = None,
+    predecessor_mode: bool = False,
 ) -> Tuple[CoverTree | PCCTree, QueryBenchmarkResult]:
     from covertreex.queries.knn import knn
     
@@ -247,7 +248,7 @@ def benchmark_knn_latency(
             queries = backend.asarray(prebuilt_queries, dtype=backend.default_float)
     
     with measure_resources() as query_stats:
-        knn(tree, queries, k=k, context=resolved_context)
+        knn(tree, queries, k=k, context=resolved_context, predecessor_mode=predecessor_mode)
     
     elapsed = query_stats['wall']
     qps = query_count / elapsed if elapsed > 0 else float("inf")
