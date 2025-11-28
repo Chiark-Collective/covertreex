@@ -397,7 +397,7 @@ def _rust_knn_query(
             subtree_min_bounds=subtree_min_bounds,
         )
     else:
-        indices, dists = wrapper.knn_query(queries_np, k)
+        indices, dists = wrapper.knn_query(queries_np, k, predecessor_mode=predecessor_mode)
 
     rust_telemetry = None
     if hasattr(wrapper, "last_query_telemetry"):

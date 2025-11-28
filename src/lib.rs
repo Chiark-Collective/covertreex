@@ -327,24 +327,27 @@ impl CoverTreeWrapper {
         }
     }
 
+    #[pyo3(signature = (queries, k, predecessor_mode=None))]
     fn knn_query<'py>(
         &self,
         py: Python<'py>,
         queries: PyObject,
         k: usize,
+        predecessor_mode: Option<bool>,
     ) -> PyResult<(Bound<'py, numpy::PyArray2<i64>>, PyObject)> {
+        let pred_mode = predecessor_mode.unwrap_or(false);
         match &self.inner {
             CoverTreeInner::F32(data) => {
                 let q_obj = queries.extract::<PyReadonlyArray2<f32>>(py)?;
                 let q_view = q_obj.as_array();
-                let (indices, dists) = batch_knn_query(data, q_view, k);
+                let (indices, dists) = batch_knn_query(data, q_view, k, pred_mode);
                 let (idx, dst) = to_py_arrays(py, indices, dists, k);
                 Ok((idx, dst.into_any().into()))
             }
             CoverTreeInner::F64(data) => {
                 let q_obj = queries.extract::<PyReadonlyArray2<f64>>(py)?;
                 let q_view = q_obj.as_array();
-                let (indices, dists) = batch_knn_query(data, q_view, k);
+                let (indices, dists) = batch_knn_query(data, q_view, k, pred_mode);
                 let (idx, dst) = to_py_arrays(py, indices, dists, k);
                 Ok((idx, dst.into_any().into()))
             }

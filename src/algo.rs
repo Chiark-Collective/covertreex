@@ -180,6 +180,7 @@ pub fn batch_knn_query<T>(
     tree: &CoverTreeData<T>,
     queries: ndarray::ArrayView2<T>,
     k: usize,
+    predecessor_mode: bool,
 ) -> (Vec<Vec<i64>>, Vec<Vec<T>>)
 where
     T: Float + Debug + Send + Sync + std::iter::Sum,
@@ -188,7 +189,11 @@ where
     let results: Vec<(Vec<i64>, Vec<T>)> = queries
         .outer_iter()
         .into_par_iter()
-        .map(|q_point| single_knn_query(tree, &metric, q_point.as_slice().unwrap(), k))
+        .enumerate()
+        .map(|(query_idx, q_point)| {
+            let max_neighbor_idx = if predecessor_mode { Some(query_idx) } else { None };
+            single_knn_query(tree, &metric, q_point.as_slice().unwrap(), k, max_neighbor_idx)
+        })
         .collect();
 
     let mut indices = Vec::with_capacity(results.len());
@@ -205,6 +210,7 @@ fn single_knn_query<T>(
     metric: &dyn Metric<T>,
     q_point: &[T],
     k: usize,
+    max_neighbor_idx: Option<usize>,
 ) -> (Vec<i64>, Vec<T>)
 where
     T: Float + Debug + Send + Sync + std::iter::Sum,
@@ -216,57 +222,80 @@ where
         return (vec![], vec![]);
     }
 
-    let root_idx = 0;
-    let d = metric.distance(q_point, tree.get_point_row(root_idx as usize));
-    candidate_heap.push(Candidate {
-        dist: OrderedFloat(d),
-        node_idx: root_idx,
-    });
+    // Predecessor constraint fast-path: query 0 has no valid predecessors
+    if let Some(max_idx) = max_neighbor_idx {
+        if max_idx == 0 {
+            return (vec![], vec![]);
+        }
+    }
+
+    // Find ALL roots (nodes with parent == -1) and add them to candidate heap
+    // This is critical for trees with multiple disconnected components
+    for root_idx in 0..tree.len() {
+        if tree.parents[root_idx] != -1 {
+            continue; // Not a root
+        }
+        let d = metric.distance(q_point, tree.get_point_row(root_idx));
+        candidate_heap.push(Candidate {
+            dist: OrderedFloat(d),
+            node_idx: root_idx as i64,
+        });
+    }
 
     let two = T::from(2.0).unwrap();
     let mut kth_dist = T::max_value();
 
+    // For predecessor_mode, keep searching until we have k valid neighbors
     while let Some(cand) = candidate_heap.pop() {
         let dist = cand.dist.0;
         let node_idx = cand.node_idx;
 
         // Pruning check: if the lower bound distance to any descendant is greater than
         // the current k-th nearest neighbor distance, we can skip this branch.
-        if result_heap.len() == k {
+        // But for predecessor_mode, we may need to keep searching even with full heap
+        let can_prune = if max_neighbor_idx.is_some() {
+            result_heap.len() >= k // Don't prune too aggressively in predecessor mode
+        } else {
+            result_heap.len() == k
+        };
+
+        if can_prune {
             let level = tree.levels[node_idx as usize];
             let radius = two.powi(level + 1);
             let lower_bound = dist - radius;
             if lower_bound > kth_dist {
-                continue;
+                // In predecessor_mode, only skip if we have k valid predecessors
+                if max_neighbor_idx.is_none() || result_heap.len() >= k {
+                    continue;
+                }
             }
         }
 
-        result_heap.push(Neighbor {
-            dist: OrderedFloat(dist),
-            node_idx,
-        });
-        if result_heap.len() > k {
-            result_heap.pop();
-        }
-        if result_heap.len() == k {
-            if let Some(peek) = result_heap.peek() {
-                kth_dist = peek.dist.0;
+        // Check predecessor constraint before adding to result
+        let predecessor_ok = match max_neighbor_idx {
+            Some(max_idx) => (node_idx as usize) < max_idx,
+            None => true,
+        };
+
+        if predecessor_ok {
+            result_heap.push(Neighbor {
+                dist: OrderedFloat(dist),
+                node_idx,
+            });
+            if result_heap.len() > k {
+                result_heap.pop();
+            }
+            if result_heap.len() == k {
+                if let Some(peek) = result_heap.peek() {
+                    kth_dist = peek.dist.0;
+                }
             }
         }
 
+        // Always explore children (they may have valid predecessors even if parent doesn't)
         let mut child = tree.children[node_idx as usize];
         while child != -1 {
             let d_child = metric.distance(q_point, tree.get_point_row(child as usize));
-            // Optimization: Early check before pushing to heap?
-            // For now, just push. The loop popping will handle the pruning.
-            // However, we can prune *insertion* if d_child - child_radius > kth_dist,
-            // but child_radius requires looking up child level.
-
-            // Tighter check for insertion: if d_child > kth_dist + child_radius?
-            // No, simpler to just let the main loop prune.
-
-            // Optimization: if d_child > kth_dist + max_possible_radius?
-            // Keep it simple for now.
             candidate_heap.push(Candidate {
                 dist: OrderedFloat(d_child),
                 node_idx: child,

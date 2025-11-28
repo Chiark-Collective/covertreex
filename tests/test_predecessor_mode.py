@@ -684,3 +684,49 @@ def test_predecessor_mode_via_cover_tree_factory() -> None:
     valid_1 = neighbors[1][neighbors[1] >= 0]
     if len(valid_1) > 0:
         assert valid_1[0] == 0, "Query 1's only valid predecessor is 0"
+
+
+def test_predecessor_mode_euclidean() -> None:
+    """Test predecessor_mode works for Euclidean metric (not just residual_correlation).
+
+    This ensures predecessor_mode is a general feature, not tied to a specific metric.
+    The Euclidean path goes through wrapper.knn_query() in Rust.
+    """
+    np.random.seed(42)
+    n_points = 50
+    k = 8
+    points = np.random.randn(n_points, 3).astype(np.float32)
+
+    # Build tree with Euclidean metric
+    runtime = Runtime(
+        backend="numpy",
+        precision="float32",
+        metric="euclidean",
+        enable_rust=True,
+        engine="rust-hilbert",
+    )
+    tree = CoverTree(runtime).fit(points)
+
+    # Query with predecessor_mode
+    neighbors = tree.knn(points, k=k, predecessor_mode=True)
+    neighbors = np.asarray(neighbors)
+
+    # Verify zero predecessor violations
+    violations = 0
+    for i in range(n_points):
+        for j in neighbors[i]:
+            if j >= 0 and j >= i:
+                violations += 1
+
+    assert violations == 0, (
+        f"Euclidean predecessor_mode failed: {violations} violations found. "
+        "All returned neighbors j must satisfy j < query_index i."
+    )
+
+    # Verify k-fulfillment for queries with enough predecessors
+    for i in range(k, n_points):
+        valid = neighbors[i][neighbors[i] >= 0]
+        expected = min(k, i)
+        assert len(valid) == expected, (
+            f"Query {i}: expected {expected} predecessors, got {len(valid)}"
+        )

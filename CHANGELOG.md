@@ -10,7 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.4] - 2025-11-28
 
 ### Fixed
-- **Critical: Multi-root tree search**: Residual k-NN search now correctly starts from ALL roots in the cover tree, not just node 0. This fixes the k-fulfillment bug where `predecessor_mode=True` queries only returned 1-2 predecessors instead of the requested k. The `rust-hilbert` engine creates sparse, disconnected trees (especially at small N), requiring all roots to be explored.
+- **Critical: Multi-root tree search**: Both Euclidean and residual k-NN search now correctly start from ALL roots in the cover tree, not just node 0. This fixes the k-fulfillment bug where `predecessor_mode=True` queries only returned 1-2 predecessors instead of the requested k. The `rust-hilbert` engine creates sparse, disconnected trees (especially at small N), requiring all roots to be explored.
+
+### Added
+- **Euclidean predecessor_mode support**: The `predecessor_mode` parameter now works for Euclidean metric queries, not just residual_correlation. This makes predecessor_mode a general feature usable with any metric.
 
 ## [0.4.3] - 2025-11-28
 

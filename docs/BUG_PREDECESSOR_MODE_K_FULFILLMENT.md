@@ -17,7 +17,7 @@
 **Files Changed:**
 - `src/algo.rs`: Lines 659-796 - multi-root initialization logic
 
-**Scope:** This fix applies to the **residual_correlation metric** (via `cover_tree()` with kernel). The Euclidean metric path uses a different search function that still has this bug. Since the primary use case is Vecchia GP (residual_correlation), the Euclidean path was not fixed.
+**Scope:** This fix applies to **all metrics** including Euclidean and residual_correlation. Both search functions (`single_knn_query` for Euclidean and `single_residual_knn_query` for residual) now correctly handle multi-root trees.
 
 **Verification:**
 ```python
