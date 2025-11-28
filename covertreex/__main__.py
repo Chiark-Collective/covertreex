@@ -70,6 +70,28 @@ For Gaussian process applications with Vecchia approximations:
     tree = CoverTree(runtime).fit(query_indices)
     neighbors = tree.knn(query_indices, k=50)
 
+PREDECESSOR CONSTRAINT (Vecchia GP)
+-----------------------------------
+For Vecchia approximations, query i must only return neighbors j < i:
+
+    from covertreex.engine import RustHilbertEngine
+
+    engine = RustHilbertEngine()
+    tree = engine.build(
+        coords,
+        runtime=runtime.to_config(),
+        residual_backend=backend,
+        residual_params={"variance": 1.0, "lengthscale": 1.0},
+        compute_predecessor_bounds=True,  # Enables subtree pruning optimization
+    )
+
+    # Query with predecessor constraint
+    neighbors = tree.knn(query_indices, k=50, predecessor_mode=True)
+    # Result: neighbors[i] contains only indices j where j < query_indices[i]
+
+    # Early indices have fewer neighbors (query 0 has none, query 1 has at most 1)
+    # Padded with -1 when fewer than k valid neighbors exist
+
 ENGINE SELECTION
 ----------------
     # Fastest (Rust + Hilbert curve ordering)
