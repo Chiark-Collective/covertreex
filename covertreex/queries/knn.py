@@ -228,7 +228,10 @@ def _knn_impl(
             # Fall through to residual_knn_query which uses the kernel_provider
             use_residual_fallback = True
 
-    if runtime.residual_use_static_euclidean_tree or use_residual_fallback:
+    # Always use residual_knn_query for residual_correlation metric
+    # (not just when enable_rust=True with non-RBF kernel fallback)
+    use_residual_metric = runtime.metric == "residual_correlation"
+    if runtime.residual_use_static_euclidean_tree or use_residual_fallback or use_residual_metric:
         return residual_knn_query(
             tree,
             batch,
