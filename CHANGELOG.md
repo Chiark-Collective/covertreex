@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-01-09
+
+### Fixed
+- **Circular import in plugins**: Fixed circular import error when loading metric plugins. The `covertreex.plugins` package no longer eagerly imports all plugin modules, and `covertreex.algo.conflict.__init__` no longer triggers plugin loading at import time. This resolves the `ImportError: cannot import name 'ConflictGraphContext' from partially initialized module` error.
+
+### Changed
+- `covertreex.algo.conflict.load_conflict_plugins()` function added for explicit plugin loading when needed.
+
 ## [0.4.4] - 2025-11-28
 
 ### Fixed

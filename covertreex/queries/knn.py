@@ -198,8 +198,8 @@ def _knn_impl(
     use_residual_fallback = False
 
     if runtime.enable_rust:
-        # Check if kernel type is supported by Rust backend (only RBF currently)
-        # Non-RBF kernels must fall through to Python path which uses kernel_provider
+        # Check if kernel type is supported by Rust backend.
+        # Rust supports RBF (0) and Matern52 (1) kernels.
         try:
             from covertreex.metrics.residual.core import get_residual_backend
             host_backend = get_residual_backend()
@@ -207,7 +207,9 @@ def _knn_impl(
         except (RuntimeError, ImportError):
             kernel_type = "rbf"  # No residual backend configured, assume Euclidean/RBF
 
-        rust_supported = kernel_type == "rbf"
+        # Accept both string and integer kernel types for Rust compatibility
+        # Rust uses: 0 = RBF, 1 = Matern52
+        rust_supported = kernel_type in ("rbf", 0, 1, "matern52")
 
         if rust_supported:
             try:
@@ -399,6 +401,15 @@ def _rust_knn_query(
         coords = np.asarray(coords, dtype=dtype_float)
         rbf_ls = np.asarray(rbf_ls, dtype=dtype_float)
 
+        # Get kernel type for Rust: 0 = RBF, 1 = Matern52
+        raw_kernel_type = getattr(host_backend, "kernel_type", "rbf")
+        if raw_kernel_type in ("rbf", 0):
+            rust_kernel_type = 0
+        elif raw_kernel_type in ("matern52", 1):
+            rust_kernel_type = 1
+        else:
+            rust_kernel_type = None  # Let Rust use default
+
         # Compute subtree bounds for predecessor_mode (critical for k-fulfillment)
         subtree_min_bounds = None
         if predecessor_mode:
@@ -416,6 +427,7 @@ def _rust_knn_query(
             rbf_var,
             rbf_ls,
             k,
+            kernel_type=rust_kernel_type,
             predecessor_mode=predecessor_mode,
             subtree_min_bounds=subtree_min_bounds,
         )

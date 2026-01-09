@@ -1,12 +1,12 @@
 # Predecessor Mode Status Report
 
 **Date:** 2025-11-28
-**covertreex version:** 0.4.2
+**covertreex version:** 0.4.4
 **Related:** [predecessor-constraint-rfc.md](predecessor-constraint-rfc.md)
 
 ## Summary
 
-The `predecessor_mode` parameter is **fully implemented** in covertreex 0.4.2:
+The `predecessor_mode` parameter is **fully implemented** in covertreex 0.4.4:
 - ✅ The j < i constraint IS being enforced (neighbors are valid predecessors)
 - ✅ Search continues until k valid predecessors are found
 - ✅ Output shape is correct: `(n, k)` for all k values
@@ -55,6 +55,18 @@ Query 15: [14, 2, 12, 11, 10, 1, 8, 3]     # ✅ Correct (8 neighbors, all < 15)
 - ✅ rust-hilbert predecessor_mode correctness via `node_to_dataset` mapping
 - ✅ Default `compute_predecessor_bounds=True` for subtree pruning
 - ✅ Output shape is now `(n, k)` via `to_py_arrays` fix
+
+### v0.4.3 (Regression)
+- ❌ Predecessor constraint NOT enforced - regression from 0.4.2
+- ❌ All queries returned j >= i violations (100% failure rate)
+- Root cause: Changes broke predecessor filtering in search path
+
+### v0.4.4 (Multi-Root Fix)
+- ✅ Fixed multi-root tree initialization in `single_residual_knn_query()`
+- ✅ Search now starts from ALL roots (nodes where `parent == -1`)
+- ✅ Both euclidean and residual_correlation metrics work correctly
+- ✅ k-fulfillment restored: min(k, i) neighbors for query i
+- Root cause: rust-hilbert creates sparse/disconnected trees; old code only started from node 0
 
 ## Test Coverage
 
